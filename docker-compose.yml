@@ -1,0 +1,11 @@
+
+
+services:
+  os-build:
+    build: .
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    ports:
+      - "5900:5900"
+    command: make all
