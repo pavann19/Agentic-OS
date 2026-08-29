@@ -9,9 +9,13 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+#![feature(alloc_error_handler)]
+
+extern crate alloc;
 
 pub mod bootinfo;
 pub mod gdt;
+pub mod heap;
 pub mod idt;
 pub mod klog;
 pub mod pmm;
@@ -106,8 +110,24 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     unsafe { vmm::init(info, &segments, current_rsp) };
     klog_info!("VMM_INIT_DONE");
 
-    klog_info!("Rust kernel slice: PMM+VMM live, higher-half, direct-map window active.");
-    klog_info!("NOTE: GDT/IDT/heap/timer/interrupts/graphics not yet ported (Phase 0 in progress).");
+    klog_info!("HEAP_INIT_START");
+    heap::init();
+    klog_info!("HEAP_INIT_DONE");
+
+    // Real smoke test, not just "it linked": alloc::vec::Vec exercises the
+    // global allocator through the same path any future kernel code would.
+    {
+        use alloc::vec::Vec;
+        let mut v: Vec<u32> = Vec::new();
+        for i in 0..256u32 {
+            v.push(i * i);
+        }
+        let sum: u64 = v.iter().map(|&x| x as u64).sum();
+        klog_info!("HEAP_SMOKE_TEST_OK sum={} len={}", sum, v.len());
+    }
+
+    klog_info!("Rust kernel slice: PMM+VMM+heap live, higher-half, direct-map window active.");
+    klog_info!("NOTE: timer/deferred-IRQ/graphics not yet ported (Phase 0 in progress).");
 
     loop {
         unsafe {

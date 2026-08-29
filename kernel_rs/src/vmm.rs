@@ -242,3 +242,11 @@ pub unsafe fn init(boot_info: &BootInfo, segments: &[KernelSegment], current_sta
 pub fn kernel_pml4_phys() -> u64 {
     unsafe { KERNEL_PML4_PHYS }
 }
+
+/// Maps one page into the kernel heap window (`heap.rs`'s
+/// `HEAP_VIRTUAL_BASE`), RW+NX — heap memory is data, never code. Uses the
+/// kernel's OWN production tables (post-CR3-switch), not the bootstrap
+/// ones — callable only after `vmm::init()` has run.
+pub unsafe fn map_heap_page(vaddr: u64, paddr: u64) {
+    map_page(KERNEL_PML4_PHYS, vaddr, paddr, PAGE_WRITABLE | PAGE_NO_EXECUTE);
+}
