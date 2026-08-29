@@ -108,29 +108,38 @@ pub fn stats() -> PmmStats {
     unsafe { STATS }
 }
 
+// Length used to build a slice view over a bitmap for kernel_common's pure
+// functions to operate on — set once in init(). Both bitmaps are the same
+// size (see init()), so one length covers either.
+static mut BITMAP_LEN_BYTES: u64 = 0;
+
+unsafe fn bitmap_slice_mut(bitmap_phys: u64) -> &'static mut [u8] {
+    core::slice::from_raw_parts_mut(p2v(bitmap_phys), BITMAP_LEN_BYTES as usize)
+}
+
+unsafe fn bitmap_slice(bitmap_phys: u64) -> &'static [u8] {
+    core::slice::from_raw_parts(p2v(bitmap_phys), BITMAP_LEN_BYTES as usize)
+}
+
 unsafe fn bitmap_set(bitmap_phys: u64, index: u64) {
-    let byte = p2v(bitmap_phys).add((index / 8) as usize);
-    *byte |= 1 << (index % 8);
+    kernel_common::bitmap::set(bitmap_slice_mut(bitmap_phys), index);
 }
 
 unsafe fn bitmap_clear(bitmap_phys: u64, index: u64) {
-    let byte = p2v(bitmap_phys).add((index / 8) as usize);
-    *byte &= !(1 << (index % 8));
+    kernel_common::bitmap::clear(bitmap_slice_mut(bitmap_phys), index);
 }
 
 unsafe fn bitmap_test(bitmap_phys: u64, index: u64) -> bool {
-    (*p2v(bitmap_phys).add((index / 8) as usize) & (1 << (index % 8))) != 0
+    kernel_common::bitmap::test(bitmap_slice(bitmap_phys), index)
 }
 
 /// Marks `[start, start+length)` reserved AND used, idempotently. Matches
 /// `pmm_reserve_range` exactly, including its "round the covering page range
-/// outward, even across an unaligned start" behavior.
+/// outward, even across an unaligned start" behavior — the actual rounding
+/// math now lives in kernel_common::bitmap::reserve_range_pages, verified
+/// by host_tests/ against known-good vectors rather than only by booting.
 pub unsafe fn reserve_range(start: u64, length: u64, reason: &str) {
-    let start_page = start / PAGE_SIZE;
-    let mut pages = (length + PAGE_SIZE - 1) / PAGE_SIZE;
-    if start % PAGE_SIZE != 0 {
-        pages = (length + (start % PAGE_SIZE) + PAGE_SIZE - 1) / PAGE_SIZE;
-    }
+    let (start_page, pages) = kernel_common::bitmap::reserve_range_pages(start, length, PAGE_SIZE);
 
     for p in 0..pages {
         let idx = start_page + p;
@@ -226,6 +235,7 @@ pub unsafe fn init(boot_info: &BootInfo) {
 
     USED_BITMAP = used_bitmap_addr;
     RESERVED_BITMAP = used_bitmap_addr + bitmap_size_bytes;
+    BITMAP_LEN_BYTES = bitmap_size_bytes;
 
     for i in 0..bitmap_size_bytes {
         *p2v(USED_BITMAP).add(i as usize) = 0xFF;

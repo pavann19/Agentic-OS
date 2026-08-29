@@ -1,0 +1,11 @@
+[package]
+name = "host_tests"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "host_tests"
+path = "src/lib.rs"
+
+[dependencies]
+kernel_common = { path = "../kernel_common" }

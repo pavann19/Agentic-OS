@@ -12,4 +12,6 @@ _evidence/qemu_tmp/
 # Rust build outputs
 boot_rs/target/
 kernel_rs/target/
+kernel_common/target/
+host_tests/target/
 boot_rs/qemu_fatdir/

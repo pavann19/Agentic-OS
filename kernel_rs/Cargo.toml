@@ -12,6 +12,7 @@ edition = "2021"
 # never needs network access to iterate — only `core` and `compiler_builtins`,
 # built from source via -Zbuild-std (see .cargo/config.toml).
 [dependencies]
+kernel_common = { path = "../kernel_common" }
 
 [profile.dev]
 panic = "abort"

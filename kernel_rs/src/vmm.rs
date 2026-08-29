@@ -73,12 +73,11 @@ unsafe fn zeroed_table() -> u64 {
     page
 }
 
+// The real index-splitting math lives in kernel_common::pagetable,
+// verified by host_tests/ against known-good vectors — this is a thin
+// name-matching wrapper, not a parallel implementation.
 fn indices(vaddr: u64) -> (usize, usize, usize, usize) {
-    let pt = ((vaddr >> 12) & 0x1ff) as usize;
-    let pd = ((vaddr >> 21) & 0x1ff) as usize;
-    let pdpt = ((vaddr >> 30) & 0x1ff) as usize;
-    let pml4 = ((vaddr >> 39) & 0x1ff) as usize;
-    (pml4, pdpt, pd, pt)
+    kernel_common::pagetable::split_indices(vaddr)
 }
 
 /// Maps one 4K page. `flags` should be `PAGE_WRITABLE`/`PAGE_NO_EXECUTE` as

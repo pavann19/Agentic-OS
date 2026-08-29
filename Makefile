@@ -68,9 +68,22 @@ run-qemu: image
 test-boot: image
 	powershell -ExecutionPolicy Bypass -File scripts/test-boot.ps1
 
+# Real assertions against kernel_common (the pure logic kernel_rs actually
+# runs, shared via a path dependency — not a parallel reimplementation
+# being tested instead). See host_tests/src/lib.rs.
+# --lib skips the doctest phase deliberately: rustdoc's doctest runner
+# needs its own scratch temp dir, which hits the exact same make/MSYS2
+# TMP-stripping issue documented at run-qemu above (Access is denied on
+# C:\WINDOWS) -- and there are zero doc examples in host_tests/ to lose by
+# skipping it. The real pass/fail gate is the grep below, not cargo test's
+# own exit code through the pipe (which shell captures that reliably here
+# is not worth relying on given everything else this Makefile already
+# fought with this make/MSYS2 combination) -- a crash or panic before
+# printing "test result: ok" fails the grep and this target either way.
 test-host:
 	mkdir -p _evidence/latest
-	printf "No host unit tests exist yet.\n" | tee _evidence/latest/host-tests.log
+	cd host_tests && $(CARGO) test --lib 2>&1 | tee ../_evidence/latest/host-tests.log
+	grep -q "test result: ok\. [0-9]* passed; 0 failed" _evidence/latest/host-tests.log
 
 clean:
 	rm -rf $(BOOT_DIR)/target $(KERNEL_DIR)/target $(FATDIR)
