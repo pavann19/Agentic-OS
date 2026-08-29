@@ -179,6 +179,17 @@ handler_with_ec!(h_vmm_communication, 29);
 handler_with_ec!(h_security_exception, 30);
 handler_no_ec!(h_reserved_31, 31);
 
+/// Vector 0x20 (`apic::TIMER_VECTOR`) — deliberately the only interrupt
+/// handler in this file that does NOT halt. `apic::on_tick()` increments a
+/// counter and sends EOI; nothing else yet, matching Phase 0's "deferred
+/// interrupt work" principle from day one for the one interrupt source
+/// that actually exists so far (there's no rendering/parsing/scheduling
+/// happening here to defer — this handler is already minimal, not a case
+/// that needs fixing later like the C keyboard handler did).
+extern "x86-interrupt" fn h_timer(_frame: InterruptStackFrame) {
+    crate::apic::on_tick();
+}
+
 pub fn init() {
     set_entry(0, h_divide_error as *const () as u64, 0);
     set_entry(1, h_debug as *const () as u64, 0);
@@ -212,6 +223,11 @@ pub fn init() {
     set_entry(29, h_vmm_communication as *const () as u64, 0);
     set_entry(30, h_security_exception as *const () as u64, 0);
     set_entry(31, h_reserved_31 as *const () as u64, 0);
+    set_entry(
+        crate::apic::TIMER_VECTOR as usize,
+        h_timer as *const () as u64,
+        0,
+    );
 
     unsafe {
         let idtr = IdtDescriptor {

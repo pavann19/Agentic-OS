@@ -13,11 +13,14 @@
 
 extern crate alloc;
 
+pub mod apic;
 pub mod bootinfo;
+pub mod events;
 pub mod gdt;
 pub mod heap;
 pub mod idt;
 pub mod klog;
+pub mod pic;
 pub mod pmm;
 pub mod serial;
 pub mod vmm;
@@ -126,8 +129,31 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         klog_info!("HEAP_SMOKE_TEST_OK sum={} len={}", sum, v.len());
     }
 
-    klog_info!("Rust kernel slice: PMM+VMM+heap live, higher-half, direct-map window active.");
-    klog_info!("NOTE: timer/deferred-IRQ/graphics not yet ported (Phase 0 in progress).");
+    pic::remap_and_mask_all(0x20, 0x28);
+    klog_info!("TIMER_INIT_START");
+    apic::init();
+    unsafe {
+        core::arch::asm!("sti", options(nomem, nostack));
+    }
+    klog_info!("TIMER_INIT_DONE");
+
+    klog_info!("Rust kernel slice: PMM+VMM+heap+timer+deferred-IRQ-queue live, higher-half.");
+    klog_info!("NOTE: graphics/keyboard not yet ported (Phase 0 core items complete).");
+
+    // Drains events::pop() in normal (non-interrupt) context — proves the
+    // producer (h_timer, interrupt context)/consumer (here) path works
+    // end to end, not just that the counter increments.
+    let mut consumed = 0u32;
+    while consumed < 3 {
+        unsafe {
+            core::arch::asm!("hlt", options(nomem, nostack));
+        }
+        while let Some(events::Event::Tick(n)) = events::pop() {
+            klog_info!("DEFERRED_EVENT_CONSUMED tick={}", n);
+            consumed += 1;
+        }
+    }
+    klog_info!("TIMER_TICKS_OBSERVED count={}", apic::tick_count());
 
     loop {
         unsafe {

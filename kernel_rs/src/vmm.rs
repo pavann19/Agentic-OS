@@ -37,9 +37,15 @@ use crate::pmm;
 
 pub const KERNEL_VIRTUAL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 pub const PHYS_MAP_BASE: u64 = 0xFFFF_8000_0000_0000;
+/// Dedicated MMIO window (`docs/ROADMAP.md`'s virtual layout) — separate
+/// from the RAM direct-map window because MMIO physical addresses (e.g.
+/// the Local APIC at 0xFEE00000) sit way outside the reported RAM span and
+/// are never covered by that window's per-page loop.
+pub const MMIO_VIRTUAL_BASE: u64 = 0xFFFF_FE00_0000_0000;
 
 const PAGE_PRESENT: u64 = 1 << 0;
 const PAGE_WRITABLE: u64 = 1 << 1;
+const PAGE_CACHE_DISABLE: u64 = 1 << 4;
 const PAGE_NO_EXECUTE: u64 = 1 << 63;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
@@ -249,4 +255,20 @@ pub fn kernel_pml4_phys() -> u64 {
 /// ones — callable only after `vmm::init()` has run.
 pub unsafe fn map_heap_page(vaddr: u64, paddr: u64) {
     map_page(KERNEL_PML4_PHYS, vaddr, paddr, PAGE_WRITABLE | PAGE_NO_EXECUTE);
+}
+
+/// Maps one MMIO page (e.g. the Local APIC) into the MMIO window at
+/// `MMIO_VIRTUAL_BASE + paddr`, RW+NX+cache-disabled — MMIO registers must
+/// never be cached, or writes/reads can silently hit a stale cache line
+/// instead of the real device. Returns the mapped virtual address.
+pub unsafe fn map_mmio_page(paddr: u64) -> u64 {
+    let page_paddr = paddr & !0xFFF;
+    let vaddr = MMIO_VIRTUAL_BASE + page_paddr;
+    map_page(
+        KERNEL_PML4_PHYS,
+        vaddr,
+        page_paddr,
+        PAGE_WRITABLE | PAGE_NO_EXECUTE | PAGE_CACHE_DISABLE,
+    );
+    vaddr + (paddr & 0xFFF)
 }
