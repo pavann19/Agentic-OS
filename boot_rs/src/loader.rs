@@ -183,7 +183,14 @@ unsafe fn load_kernel_elf(bs: &BootServices, root: *mut FileProtocol) -> LResult
         }
     }
 
-    if ehdr.e_entry < kernel_start || ehdr.e_entry >= kernel_end {
+    // e_entry is a higher-half VIRTUAL address (the kernel is linked at
+    // KERNEL_VIRTUAL_BASE + physical offset — see kernel_rs/linker.ld);
+    // kernel_start/kernel_end are physical (from p_paddr, where the bytes
+    // actually landed). Compare against the virtual range, not the
+    // physical one, or every entry point fails this check by construction.
+    let vaddr_start = kernel_start + KERNEL_VIRTUAL_BASE;
+    let vaddr_end = kernel_end + KERNEL_VIRTUAL_BASE;
+    if ehdr.e_entry < vaddr_start || ehdr.e_entry >= vaddr_end {
         return Err(err("entry point outside loaded kernel"));
     }
 
@@ -269,6 +276,19 @@ unsafe fn find_gop_framebuffer(bs: &BootServices) -> LResult<*mut Framebuffer> {
     Ok(fb)
 }
 
+// Must match kernel_rs/src/vmm.rs's KERNEL_VIRTUAL_BASE and
+// kernel_rs/linker.ld's KERNEL_VIRTUAL_BASE exactly — see those files'
+// comments on this three-way constant.
+const KERNEL_VIRTUAL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+
+// Bootstrap page-table scratch pool size. 3072 pages = 12MB: generous for a
+// QEMU-scale identity map at 2MB granularity (a few thousand 2MB regions at
+// most, each needing at most one new PD/PDPT/PML4 entry) plus the small
+// higher-half kernel range at 4K granularity. bootstrap_paging::TablePool
+// halts loudly on serial if this is ever exhausted rather than silently
+// corrupting memory — see its doc comment.
+const BOOTSTRAP_POOL_PAGES: usize = 3072;
+
 pub struct PreparedBoot {
     pub boot_info: *mut BootInfo,
     pub kernel_entry: u64,
@@ -316,6 +336,21 @@ pub unsafe fn prepare_boot(
         kernel_physical_end: kernel.kernel_end,
         kernel_virtual_base: 0,
     };
+
+    // Bootstrap page-table scratch pool: MUST be allocated while boot
+    // services are still live (nothing can allocate after
+    // ExitBootServices). The tables themselves are built after EBS
+    // succeeds, using this pre-reserved memory as a bump allocator.
+    let mut pool_phys: PhysicalAddress = 0;
+    let status = (bs.allocate_pages)(
+        ALLOCATE_ANY_PAGES,
+        EFI_LOADER_DATA,
+        BOOTSTRAP_POOL_PAGES,
+        &mut pool_phys,
+    );
+    if is_error(status) {
+        return Err(err("AllocatePages(bootstrap page-table pool) failed"));
+    }
 
     // Memory map + ExitBootServices retry loop, same shape as boot/main.c:
     // GetMemoryMap can change size out from under a single fixed buffer
@@ -366,6 +401,24 @@ pub unsafe fn prepare_boot(
 
         let status = (bs.exit_boot_services)(image_handle, map_key);
         if !is_error(status) {
+            // Boot services are gone now — no more UEFI calls of any kind
+            // from here on. Build the bootstrap tables using the pool
+            // reserved earlier and the final memory map just captured
+            // above, then switch CR3 before returning to main.rs for the
+            // jump. This is real hardware manipulation, not a firmware
+            // call, so it's fine to do post-EBS.
+            let mut pool = crate::bootstrap_paging::TablePool::new(pool_phys, BOOTSTRAP_POOL_PAGES as u64);
+            let pml4_phys = crate::bootstrap_paging::build(
+                &mut pool,
+                (*boot_info).payload.memory_map,
+                (*boot_info).payload.memory_map_size,
+                (*boot_info).payload.memory_map_descriptor_size,
+                kernel.kernel_start,
+                kernel.kernel_end,
+                kernel.kernel_start + KERNEL_VIRTUAL_BASE,
+            );
+            core::arch::asm!("mov cr3, {}", in(reg) pml4_phys, options(nostack, preserves_flags));
+
             return Ok(PreparedBoot {
                 boot_info,
                 kernel_entry: kernel.entry,

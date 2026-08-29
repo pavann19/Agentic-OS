@@ -13,7 +13,7 @@ Status marks: `[x]` done and evidenced · `[~]` in progress / partially done
 
 ---
 
-## Phase 0 — Foundation Correctness (1/9 items complete, 2 in progress)
+## Phase 0 — Foundation Correctness (3/9 items complete)
 
 Depends on: ADR sign-off (done — ADR-001/002/003/006 accepted, ADR-002
 specifically extended mid-build to cover the bootloader too, see
@@ -22,20 +22,19 @@ specifically extended mid-build to cover the bootloader too, see
 - [x] **Toolchain decision (ADR-002) executed** — Rust, both bootloader and
       kernel. Native, Docker-free: `rustup` (nightly, GNU ABI) + `QEMU` via
       `winget`, no MSVC/gnu-efi/mtools. See `NATIVE_BUILD.md`.
-- [~] **Bootloader ported to Rust** — first slice only. `boot_rs/` boots in
-      QEMU/OVMF, verified this session: `BOOT_START` → `BOOT_RS_HELLO_OK` on
-      serial, reproducible from `make clean`. Does **not** yet load
-      `kernel.elf`, read the font, build the memory map, or construct
-      `BootInfo` — `boot/main.c`'s ELF-loading logic is not ported. See
-      `NATIVE_BUILD.md` "Next integration step".
-- [~] **Kernel ported to Rust (boot-critical slice)** — `kernel_rs/`
-      compiles to a correct static, non-PIE ELF (verified via `objdump`:
-      `EXEC_P`, zero dynamic relocations, entry matches `linker.ld`). Ports
-      `BootInfo` validation, serial, klog, panic handling 1:1 from the C
-      reference. **Not boot-tested** — nothing loads it yet, since the
-      bootloader can't load ELF files yet (see above). The `KERNEL_ENTER`
-      checkpoint has not been observed since the crate restructure to a
-      `bin` crate; do not treat it as current. See `PHASE0_PROGRESS.md`.
+- [x] **Bootloader ported to Rust** — full port of `boot/main.c`'s loading
+      logic: hand-written UEFI bindings (BootServices, LoadedImage,
+      SimpleFileSystem, File, GraphicsOutput protocols), ELF64 PT_LOAD
+      segment mapping to exact physical addresses, PSF1 font loading, GOP
+      framebuffer discovery, BootInfo construction, GetMemoryMap/
+      ExitBootServices retry loop. See `PHASE0_PROGRESS.md`.
+- [x] **Kernel ported to Rust (boot-critical slice)** — verified via
+      `make clean && make test-boot`, exit 0: real
+      `BOOT_START → EXIT_BOOT_SERVICES_OK → KERNEL_ENTER` chain, kernel
+      validates the real `BootInfo` handed to it (`version=1 size=96`).
+      Ports `BootInfo` validation, serial, klog, panic handling 1:1 from
+      the C reference. GDT/IDT/PMM/paging/graphics/keyboard still not
+      ported — see the remaining unchecked items below.
 - [ ] All 32 CPU exception vectors handled, TSS/IST double-fault path —
       not started in Rust. (C reference only handles 3 of 32, no
       IST/TSS at all — see the original repo audit.)

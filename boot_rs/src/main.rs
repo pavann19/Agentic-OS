@@ -11,6 +11,7 @@
 #![no_main]
 
 mod bootinfo;
+mod bootstrap_paging;
 mod elf;
 mod loader;
 mod serial;

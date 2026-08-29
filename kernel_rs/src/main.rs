@@ -1,23 +1,46 @@
 //! Agentic OS kernel — Rust port, Phase 0.
 //!
-//! This is a deliberately narrow first slice, not the whole kernel. It ports
-//! exactly the boot-critical path that already exists and is evidenced in
-//! `kernel/kernel.c` / `kernel/klog.c` / `kernel/serial.c`: validate
-//! `BootInfo`, bring up serial logging, emit `KERNEL_ENTER`, and halt.
-//!
-//! Everything else the C kernel currently does — GDT, IDT, PMM, paging,
-//! graphics, keyboard — is NOT ported yet. See `PHASE0_PROGRESS.md` for
-//! what's next and why this slice was cut here: the goal is a real,
-//! QEMU-verified `KERNEL_ENTER` checkpoint from Rust code before porting
-//! anything else, rather than a large unverified port landing all at once.
+//! Boot path so far: validate BootInfo, bring up serial/klog, initialize
+//! the PMM (`pmm.rs`, ported from `kernel/memory.c`), then replace the
+//! bootloader's temporary identity-mapped page tables with real,
+//! permission-correct higher-half ones (`vmm.rs` — a redesign, not a port;
+//! see its module doc for why). GDT/IDT/heap/timer/interrupts are not
+//! ported yet — see `PHASE0_PROGRESS.md`.
 #![no_std]
 #![no_main]
+#![feature(abi_x86_interrupt)]
 
 pub mod bootinfo;
+pub mod gdt;
+pub mod idt;
 pub mod klog;
+pub mod pmm;
 pub mod serial;
+pub mod vmm;
 
 use bootinfo::BootInfo;
+use vmm::KernelSegment;
+
+// Defined by linker.ld — mark each section's virtual/physical boundaries so
+// the kernel can describe its own layout to vmm::init() without re-parsing
+// its own ELF at runtime. These are addresses, not values — `&__text_start`
+// gives the linked address; the symbol itself has no meaningful "content".
+extern "C" {
+    static __text_start: u8;
+    static __text_end: u8;
+    static __rodata_start: u8;
+    static __rodata_end: u8;
+    static __data_start: u8;
+    static __data_end: u8;
+    static __bss_start: u8;
+    static __bss_end: u8;
+}
+
+const KERNEL_VIRTUAL_BASE: u64 = vmm::KERNEL_VIRTUAL_BASE;
+
+fn vaddr_of(sym: &u8) -> u64 {
+    sym as *const u8 as u64
+}
 
 #[no_mangle]
 pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
@@ -30,13 +53,62 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
 
     klog_info!("KERNEL_ENTER");
     klog_info!("BootInfo version={} size={}", info.version, info.size);
-    klog_info!("Rust kernel slice: boot info validated, serial live.");
-    klog_info!(
-        "NOTE: GDT/IDT/PMM/paging/graphics not yet ported to Rust (Phase 0 in progress)."
-    );
 
-    // Nothing past this point exists yet on the Rust side — halt cleanly
-    // rather than pretending the boot sequence continues.
+    // GDT/IDT come up before PMM/VMM deliberately: a fault during the
+    // risky page-table-rebuild-and-CR3-switch work below needs a real
+    // handler to be diagnosable at all. This ordering was decided
+    // mid-session after a CR3 switch produced a silent, undiagnosable
+    // hang with no exception handling in place yet — see PHASE0_PROGRESS.md.
+    gdt::init();
+    idt::init();
+
+    klog_info!("PMM_INIT_START");
+    unsafe { pmm::init(info) };
+    klog_info!("PMM_INIT_DONE");
+
+    klog_info!("VMM_INIT_START");
+    let segments = unsafe {
+        [
+            KernelSegment {
+                vaddr: vaddr_of(&__text_start),
+                paddr: vaddr_of(&__text_start) - KERNEL_VIRTUAL_BASE,
+                len: vaddr_of(&__text_end) - vaddr_of(&__text_start),
+                writable: false,
+                executable: true,
+            },
+            KernelSegment {
+                vaddr: vaddr_of(&__rodata_start),
+                paddr: vaddr_of(&__rodata_start) - KERNEL_VIRTUAL_BASE,
+                len: vaddr_of(&__rodata_end) - vaddr_of(&__rodata_start),
+                writable: false,
+                executable: false,
+            },
+            KernelSegment {
+                vaddr: vaddr_of(&__data_start),
+                paddr: vaddr_of(&__data_start) - KERNEL_VIRTUAL_BASE,
+                len: vaddr_of(&__data_end) - vaddr_of(&__data_start),
+                writable: true,
+                executable: false,
+            },
+            KernelSegment {
+                vaddr: vaddr_of(&__bss_start),
+                paddr: vaddr_of(&__bss_start) - KERNEL_VIRTUAL_BASE,
+                len: vaddr_of(&__bss_end) - vaddr_of(&__bss_start),
+                writable: true,
+                executable: false,
+            },
+        ]
+    };
+    let current_rsp: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) current_rsp, options(nomem, nostack, preserves_flags));
+    }
+    unsafe { vmm::init(info, &segments, current_rsp) };
+    klog_info!("VMM_INIT_DONE");
+
+    klog_info!("Rust kernel slice: PMM+VMM live, higher-half, direct-map window active.");
+    klog_info!("NOTE: GDT/IDT/heap/timer/interrupts/graphics not yet ported (Phase 0 in progress).");
+
     loop {
         unsafe {
             core::arch::asm!("hlt", options(nomem, nostack));
@@ -46,8 +118,6 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    // Best-effort: the message may not always render (no heap, no alloc),
-    // but the location is always available and is the useful part.
     if let Some(location) = info.location() {
         klog_error!(
             "RUST PANIC at {}:{}:{}",

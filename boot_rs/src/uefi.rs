@@ -77,6 +77,7 @@ pub struct EfiMemoryDescriptor {
     pub attribute: u64,
 }
 
+pub const ALLOCATE_ANY_PAGES: u32 = 0;
 pub const ALLOCATE_ADDRESS: u32 = 2;
 pub const EFI_LOADER_DATA: u32 = 2;
 pub const EFI_CONVENTIONAL_MEMORY: u32 = 7;

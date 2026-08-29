@@ -47,6 +47,27 @@ pub fn write_str(s: &str) {
     }
 }
 
+/// Hand-rolled hex print with NO core::fmt involvement at all — used only
+/// for fault-path diagnostics, specifically to rule core::fmt's formatting
+/// machinery in or out as a cause when something faults inside a
+/// klog_error!/write! call. Not used in normal (non-diagnostic) code paths.
+pub fn write_hex_raw(value: u64) {
+    write_str("0x");
+    let mut started = false;
+    for shift in (0..16).rev() {
+        let nibble = ((value >> (shift * 4)) & 0xF) as u8;
+        if nibble != 0 || started || shift == 0 {
+            started = true;
+            let c = if nibble < 10 {
+                b'0' + nibble
+            } else {
+                b'a' + (nibble - 10)
+            };
+            write_char(c);
+        }
+    }
+}
+
 pub struct SerialWriter;
 
 impl core::fmt::Write for SerialWriter {
