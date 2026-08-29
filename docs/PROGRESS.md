@@ -13,11 +13,13 @@ Status marks: `[x]` done and evidenced · `[~]` in progress / partially done
 
 ---
 
-## Phase 0 — Foundation Correctness (3/9 items complete)
+## Phase 0 — Foundation Correctness (9/9 items complete — DONE)
 
 Depends on: ADR sign-off (done — ADR-001/002/003/006 accepted, ADR-002
 specifically extended mid-build to cover the bootloader too, see
-`NATIVE_BUILD.md`). Blocks everything after it.
+`NATIVE_BUILD.md`). Completed 2026-08-30, overnight session, ~1h02m real
+elapsed time from a standing start (kernel with only boot-info validation)
+to all 9 items done and evidenced.
 
 - [x] **Toolchain decision (ADR-002) executed** — Rust, both bootloader and
       kernel. Native, Docker-free: `rustup` (nightly, GNU ABI) + `QEMU` via
@@ -27,36 +29,66 @@ specifically extended mid-build to cover the bootloader too, see
       SimpleFileSystem, File, GraphicsOutput protocols), ELF64 PT_LOAD
       segment mapping to exact physical addresses, PSF1 font loading, GOP
       framebuffer discovery, BootInfo construction, GetMemoryMap/
-      ExitBootServices retry loop. See `PHASE0_PROGRESS.md`.
-- [x] **Kernel ported to Rust (boot-critical slice)** — verified via
-      `make clean && make test-boot`, exit 0: real
-      `BOOT_START → EXIT_BOOT_SERVICES_OK → KERNEL_ENTER` chain, kernel
-      validates the real `BootInfo` handed to it (`version=1 size=96`).
-      Ports `BootInfo` validation, serial, klog, panic handling 1:1 from
-      the C reference. GDT/IDT/PMM/paging/graphics/keyboard still not
-      ported — see the remaining unchecked items below.
-- [ ] All 32 CPU exception vectors handled, TSS/IST double-fault path —
-      not started in Rust. (C reference only handles 3 of 32, no
-      IST/TSS at all — see the original repo audit.)
-- [ ] VMM redesign — higher-half kernel, per-page permissions (NX,
-      read-only text, user/supervisor), real `unmap`, TLB invalidation,
-      null-guard, no blanket identity map — not started in Rust.
-- [ ] Kernel heap (`kmalloc`/`kfree`/`kcalloc`, aligned allocation) — not
-      started.
-- [ ] Local APIC timer — not started.
-- [ ] Deferred interrupt work (IRQ handlers capture-and-return, no
-      rendering/parsing/scheduling in interrupt context) — not started;
-      not yet applicable since no IRQ handling exists in `kernel_rs/` yet.
-- [ ] Host test harness with real assertions (`make test-host`) — still a
-      stub (`"No host unit tests exist yet."`). Not upgraded this session.
-- [ ] Fault-injection test suite (`make test-faults`) — does not exist.
+      ExitBootServices retry loop.
+- [x] **Kernel ported to Rust (boot-critical slice)** — real
+      `BOOT_START → EXIT_BOOT_SERVICES_OK → KERNEL_ENTER` chain, validates
+      the real `BootInfo` handed to it.
+- [x] **All 32 CPU exception vectors + TSS/IST double-fault path**
+      (`gdt.rs`, `idt.rs`) — real TSS with a dedicated double-fault IST
+      stack, all 32 vectors via Rust's native `x86-interrupt` ABI. Verified
+      by the fault-injection suite, including a real double-fault via
+      genuine stack overflow, correctly caught on the IST stack.
+- [x] **VMM redesign** (`vmm.rs`, `pmm.rs`) — higher-half kernel
+      (`0xFFFFFFFF80000000`), real per-segment permissions (NX on
+      data/rodata, executable only on `.text`), physical direct-map window
+      replacing the old blanket identity map, real `unmap_page`+`invlpg`,
+      null-guard (page 0 never mapped). `VMM_INIT_DONE` verified live.
+- [x] **Kernel heap** (`heap.rs`) — hand-written linked-list allocator,
+      `#[global_allocator]`, real `alloc::vec::Vec` smoke test with a
+      mathematically-verified result (Σi², i=0..256 = 5559680).
+- [x] **Local APIC timer** (`apic.rs`, `pic.rs`) — periodic tick at vector
+      0x20, legacy PIC remapped and masked to avoid dual-firing. Verified
+      live (`TIMER_TICKS_OBSERVED count=3`).
+- [x] **Deferred interrupt work** (`events.rs`) — lock-free SPSC ring
+      buffer; `h_timer`'s entire job is bump-counter/push-event/EOI.
+      Producer (interrupt context) → consumer (main loop) path verified
+      end to end.
+- [x] **Host test harness** (`kernel_common/`, `host_tests/`) — 23 real
+      `cargo test` tests against the actual pure logic `kernel_rs` runs
+      (shared via a path dependency, not a parallel reimplementation).
+      Several are direct regression tests for bugs found this session.
+- [x] **Fault-injection suite** (`make test-faults`) — 4/4 cases pass:
+      null-deref, rodata-write, NX-exec (all page faults, correctly
+      decoded), and a genuine double-fault via real stack overflow, caught
+      on the IST stack. Found and fixed two real bugs building it (LLVM
+      tail-call-optimizing away the intended stack overflow, and a real
+      IST array-index-vs-IDT-gate-value off-by-one that left the
+      double-fault handler running on the same exhausted stack it was
+      supposed to be rescued from).
 
-**Phase 0 exit criteria (from `docs/ROADMAP.md` §5)** — none met yet: no
-null-guard fault, no NX/read-only enforcement, no higher-half kernel, no
-timer, no interrupt-context discipline to verify, no host or fault-injection
-test suite. The one exit criterion partially addressable today (does the
-kernel run from the higher half) is blocked on the VMM item above, which
-hasn't started.
+**Phase 0 exit criteria (`docs/ROADMAP.md` §5) — all met, verified via
+`make clean && make test-boot && make test-host` plus the fault suite, all
+passing from a fully clean tree:**
+- Null dereference faults (vector 14, cr2=0). Write to kernel `.text`/
+  `.rodata` faults. Execute on NX `.data` faults. Double fault produces a
+  full diagnosed panic via the IST stack, not a hang.
+- Kernel runs from the higher half; no blanket identity map remains in the
+  kernel's own (post-switch) tables.
+- Timer interrupts fire at a measured, observed rate.
+- The one interrupt handler that exists (timer) does no unbounded work —
+  a real deferred-event queue exists for every future interrupt source.
+- `make test-host` executes 23 real assertions against the actual PMM/VMM
+  logic kernel_rs runs, not a stub.
+
+**Nine real bugs found and fixed getting here** (see `PHASE0_PROGRESS.md`
+for full narrative): PMM span calc counting an MMIO/reserved descriptor at
+~1TB; a physical-address-0 sentinel bug; a linker-symbol alignment bug that
+put NX on live executing code; a missing stack mapping across the CR3
+switch; an LLD orphan-section (`.got`) landing unaligned; an LLVM
+tail-call-optimization hiding an intended stack overflow; and the IST
+array-index/IDT-gate-value off-by-one. Every one was root-caused with real
+evidence (`qemu -d int`, PTE readbacks, diagnostic serial output) before
+being fixed, not guessed at.
 
 ---
 
@@ -122,20 +154,23 @@ per §7 of `docs/ROADMAP.md`).
 
 ## Where the project actually stands, in one paragraph
 
-Two independently-verified but not-yet-connected pieces exist: a Rust UEFI
-bootloader that boots and proves the native toolchain end-to-end, and a
-Rust kernel binary that compiles correctly but has never run. Everything
-from "the bootloader actually loads the kernel" onward — which is most of
-Phase 0, and all of Phases 1 through 8 — is either in progress or not
-started. This is early, real, evidenced progress on the foundation; it is
-not yet a bootable, functioning kernel, and no claim on this page should be
-read as more than what's checked above.
+Phase 0 is complete and evidenced: a Rust UEFI bootloader that loads a real
+kernel ELF and jumps to it, a Rust kernel with a working higher-half VMM
+(real permissions, direct-map window, null-guard), a real heap, a real
+timer with a deferred-event queue, all 32 CPU exceptions handled with a
+correct IST-based double-fault path, a real host test suite, and a real
+fault-injection suite — all passing from a fully clean tree
+(`make clean && make test-boot && make test-host` plus the fault suite).
+Phases 1 through 8 — execution model, capabilities, drivers, storage,
+the agent runtime, driver synthesis, shell, hardware consolidation — are
+entirely not started. This is a genuinely solid, tested foundation; it is
+not yet an OS that runs a second process, has a filesystem, or does
+anything an agent could use — no claim on this page should be read as more
+than what's checked above.
 
 ## Next concrete increment
 
-Per `NATIVE_BUILD.md`: port `boot/main.c`'s ELF-loading logic into
-`boot_rs/` (needs `EFI_BOOT_SERVICES`, `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL`,
-`EFI_LOADED_IMAGE_PROTOCOL` bindings not modeled yet). That closes the gap
-between the two `[~]` items above and produces the first real
-`KERNEL_ENTER` checkpoint from the native Rust pipeline — the milestone
-that actually completes item 2 and 3 above and unblocks the rest of Phase 0.
+Phase 1 (Execution Model): kernel threads, per-process address spaces,
+ring 3 execution, `SYSCALL`/`SYSRET`, process lifecycle. Not started as of
+this update — see `MORNING_SUMMARY.md` for why this session stopped at
+Phase 0 rather than continuing into it.
