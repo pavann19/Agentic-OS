@@ -238,7 +238,7 @@ pub fn init() {
     unsafe {
         let idtr = IdtDescriptor {
             limit: (core::mem::size_of::<[IdtEntry; IDT_ENTRIES]>() - 1) as u16,
-            base: &IDT as *const _ as u64,
+            base: (&raw const IDT) as u64,
         };
         core::arch::asm!("lidt [{}]", in(reg) &idtr, options(readonly, nostack, preserves_flags));
     }

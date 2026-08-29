@@ -37,7 +37,7 @@ pub struct Tss {
     rsp1: u64,
     rsp2: u64,
     reserved1: u64,
-    pub ist: [u64; 7], // IST[0] unused (per spec, index 1-7 map to IST fields 1-7)
+    pub ist: [u64; 7], // array index 0 IS the IST1 slot -- see the real bug this caused, below
     reserved2: u64,
     reserved3: u16,
     iomap_base: u16,
@@ -104,7 +104,7 @@ fn set_entry(index: usize, base: u32, limit: u32, access: u8, flags: u8) {
 /// it), so it needs the extra slot for the high 32 bits.
 fn set_tss_entry(index: usize, base: u64, limit: u32) {
     unsafe {
-        let low = &mut GDT[index] as *mut GdtEntry as *mut u8;
+        let low = (&raw mut GDT[index]) as *mut u8;
         let base32 = base as u32;
         let base_high32 = (base >> 32) as u32;
 
@@ -127,17 +127,17 @@ pub fn init() {
         set_entry(2, 0, 0xFFFFF, 0x92, 0x80); // kernel data, selector 0x10
 
         let df_stack_top =
-            DOUBLE_FAULT_STACK.0.as_ptr() as u64 + DOUBLE_FAULT_STACK_SIZE as u64;
+            (&raw const DOUBLE_FAULT_STACK.0) as u64 + DOUBLE_FAULT_STACK_SIZE as u64;
         TSS.ist[DOUBLE_FAULT_IST_ARRAY_INDEX] = df_stack_top;
         TSS.iomap_base = core::mem::size_of::<Tss>() as u16; // no I/O bitmap
 
-        let tss_base = &TSS as *const Tss as u64;
+        let tss_base = (&raw const TSS) as u64;
         let tss_limit = (core::mem::size_of::<Tss>() - 1) as u32;
         set_tss_entry(3, tss_base, tss_limit); // selector 0x18-0x20, TSS uses slots 3+4
 
         let gdtr = GdtDescriptor {
             limit: (core::mem::size_of::<[GdtEntry; GDT_ENTRIES]>() - 1) as u16,
-            base: &GDT as *const _ as u64,
+            base: (&raw const GDT) as u64,
         };
         core::arch::asm!("lgdt [{}]", in(reg) &gdtr, options(readonly, nostack, preserves_flags));
 

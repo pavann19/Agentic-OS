@@ -159,12 +159,18 @@ pub unsafe fn reserve_range(start: u64, length: u64, reason: &str) {
 }
 
 pub unsafe fn dump_stats() {
+    // Copy out to a local first (matches `stats()`'s own approach) rather
+    // than holding several `&STATS.field` shared references to the mutable
+    // static across the whole function — avoids the static_mut_refs lint
+    // for a real reason (those references living across further mutation
+    // elsewhere would be genuinely unsound), not just to silence it.
+    let s = STATS;
     klog_info!("--- PMM Stats ---");
-    klog_info!("Total Span: {} MB", STATS.total_physical_span / (1024 * 1024));
-    klog_info!("Total Usable: {} MB", STATS.total_usable_memory / (1024 * 1024));
-    klog_info!("Reserved: {} KB", STATS.reserved_memory / 1024);
-    klog_info!("Free Pages: {}", STATS.free_pages);
-    klog_info!("Used Pages: {}", STATS.used_pages);
+    klog_info!("Total Span: {} MB", s.total_physical_span / (1024 * 1024));
+    klog_info!("Total Usable: {} MB", s.total_usable_memory / (1024 * 1024));
+    klog_info!("Reserved: {} KB", s.reserved_memory / 1024);
+    klog_info!("Free Pages: {}", s.free_pages);
+    klog_info!("Used Pages: {}", s.used_pages);
 }
 
 /// Scans the UEFI memory map to find total physical span, places two

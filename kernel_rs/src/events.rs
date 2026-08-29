@@ -46,25 +46,33 @@ static mut QUEUE: RingBuffer = RingBuffer {
 /// gap) rather than something interrupt context can fix by waiting.
 pub fn push(event: Event) {
     unsafe {
-        let head = QUEUE.head.load(Ordering::Relaxed);
+        // One raw pointer, used consistently, rather than repeated
+        // `QUEUE.field` accesses that each implicitly form a shared
+        // reference to the mutable static — the AtomicUsize fields are
+        // genuinely fine to alias (that's what atomics are for), but the
+        // lint doesn't know that, and going through one pointer either way
+        // is no more code.
+        let q = &raw mut QUEUE;
+        let head = (*q).head.load(Ordering::Relaxed);
         let next = (head + 1) % CAPACITY;
-        if next == QUEUE.tail.load(Ordering::Acquire) {
+        if next == (*q).tail.load(Ordering::Acquire) {
             return; // full — drop
         }
-        QUEUE.slots[head] = Some(event);
-        QUEUE.head.store(next, Ordering::Release);
+        (*q).slots[head] = Some(event);
+        (*q).head.store(next, Ordering::Release);
     }
 }
 
 /// Consumer side — call from normal (non-interrupt) kernel context only.
 pub fn pop() -> Option<Event> {
     unsafe {
-        let tail = QUEUE.tail.load(Ordering::Relaxed);
-        if tail == QUEUE.head.load(Ordering::Acquire) {
+        let q = &raw mut QUEUE;
+        let tail = (*q).tail.load(Ordering::Relaxed);
+        if tail == (*q).head.load(Ordering::Acquire) {
             return None; // empty
         }
-        let event = QUEUE.slots[tail].take();
-        QUEUE.tail.store((tail + 1) % CAPACITY, Ordering::Release);
+        let event = (*q).slots[tail].take();
+        (*q).tail.store((tail + 1) % CAPACITY, Ordering::Release);
         event
     }
 }
