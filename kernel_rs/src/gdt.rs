@@ -43,7 +43,18 @@ pub struct Tss {
     iomap_base: u16,
 }
 
-pub const DOUBLE_FAULT_IST_INDEX: usize = 1;
+// Real bug this session found via `qemu -d int`: the IDT gate's IST field
+// value (1..7, what the CPU is told — "use IST1") and the array index into
+// TSS.ist (0..6, since that array has no unused slot 0 — index 0 IS IST1's
+// slot) are NOT the same number, despite looking like they should be.
+// DOUBLE_FAULT_IST_VALUE (1) goes into the IDT gate; DOUBLE_FAULT_IST_ARRAY_INDEX
+// (0) is where the stack address is actually stored. Writing the address to
+// `ist[1]` (IST2's slot) while telling the CPU "use IST1" left IST1's real
+// slot (index 0) zeroed — confirmed via `-d int`: SP after entering the
+// double-fault vector was the SAME (already-exhausted) stack, not a switch
+// to anything, exactly what "the CPU read a zeroed IST1 slot" would look like.
+pub const DOUBLE_FAULT_IST_VALUE: u8 = 1;
+const DOUBLE_FAULT_IST_ARRAY_INDEX: usize = 0;
 const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
 
 static mut GDT: [GdtEntry; GDT_ENTRIES] = [GdtEntry {
@@ -117,7 +128,7 @@ pub fn init() {
 
         let df_stack_top =
             DOUBLE_FAULT_STACK.0.as_ptr() as u64 + DOUBLE_FAULT_STACK_SIZE as u64;
-        TSS.ist[DOUBLE_FAULT_IST_INDEX] = df_stack_top;
+        TSS.ist[DOUBLE_FAULT_IST_ARRAY_INDEX] = df_stack_top;
         TSS.iomap_base = core::mem::size_of::<Tss>() as u16; // no I/O bitmap
 
         let tss_base = &TSS as *const Tss as u64;

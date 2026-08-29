@@ -16,6 +16,13 @@ extern crate alloc;
 pub mod apic;
 pub mod bootinfo;
 pub mod events;
+#[cfg(any(
+    feature = "fault_test_null_deref",
+    feature = "fault_test_rodata_write",
+    feature = "fault_test_nx_exec",
+    feature = "fault_test_double_fault"
+))]
+pub mod fault_injection;
 pub mod gdt;
 pub mod heap;
 pub mod idt;
@@ -112,6 +119,14 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     }
     unsafe { vmm::init(info, &segments, current_rsp) };
     klog_info!("VMM_INIT_DONE");
+
+    #[cfg(any(
+        feature = "fault_test_null_deref",
+        feature = "fault_test_rodata_write",
+        feature = "fault_test_nx_exec",
+        feature = "fault_test_double_fault"
+    ))]
+    fault_injection::run();
 
     klog_info!("HEAP_INIT_START");
     heap::init();

@@ -8,7 +8,7 @@
 
 #![allow(dead_code)]
 
-use crate::gdt::DOUBLE_FAULT_IST_INDEX;
+use crate::gdt::DOUBLE_FAULT_IST_VALUE;
 use crate::klog_error;
 
 const IDT_ENTRIES: usize = 256;
@@ -144,20 +144,26 @@ handler_with_ec!(h_stack_fault, 12);
 handler_with_ec!(h_general_protection, 13);
 
 extern "x86-interrupt" fn h_page_fault(frame: InterruptStackFrame, error_code: u64) {
-    // Deliberately bypasses klog_error!/core::fmt here — see
-    // crate::serial::write_hex_raw's doc comment. Diagnosing a fault that
-    // happens specifically inside formatted-hex printing by calling
-    // formatted-hex printing from the handler was the reason this handler
-    // was re-faulting on itself and looping forever instead of ever
-    // reaching halt_forever().
+    // Earlier in this session this handler used crate::serial::write_hex_raw
+    // directly (bypassing klog_error!/core::fmt) while root-causing a real
+    // bug where the formatting path itself faulted — this handler kept
+    // re-faulting on its own diagnostic call and never reached
+    // halt_forever(). That root cause (a linker-symbol alignment bug, see
+    // linker.ld) is fixed and covered by host_tests/; back to the normal
+    // formatted report() every other handler uses, which is strictly more
+    // informative (decodes present/write/user/reserved/instruction-fetch
+    // bits, not just the raw values).
     let cr2 = read_cr2();
-    crate::serial::write_str("PAGE_FAULT cr2=");
-    crate::serial::write_hex_raw(cr2);
-    crate::serial::write_str(" rip=");
-    crate::serial::write_hex_raw(frame.instruction_pointer);
-    crate::serial::write_str(" error_code=");
-    crate::serial::write_hex_raw(error_code);
-    crate::serial::write_str("\n");
+    klog_error!(
+        "EXCEPTION vector=14 (PAGE FAULT) error_code=0x{:x} cr2=0x{:x} rip=0x{:x} present={} write={} user={} instr_fetch={}",
+        error_code,
+        cr2,
+        frame.instruction_pointer,
+        error_code & 1 != 0,
+        error_code & 2 != 0,
+        error_code & 4 != 0,
+        error_code & 16 != 0,
+    );
     halt_forever();
 }
 
@@ -199,7 +205,7 @@ pub fn init() {
     set_entry(5, h_bound_range as *const () as u64, 0);
     set_entry(6, h_invalid_opcode as *const () as u64, 0);
     set_entry(7, h_device_not_available as *const () as u64, 0);
-    set_entry(8, h_double_fault as *const () as u64, DOUBLE_FAULT_IST_INDEX as u8);
+    set_entry(8, h_double_fault as *const () as u64, DOUBLE_FAULT_IST_VALUE);
     set_entry(9, h_coprocessor_segment_overrun as *const () as u64, 0);
     set_entry(10, h_invalid_tss as *const () as u64, 0);
     set_entry(11, h_segment_not_present as *const () as u64, 0);

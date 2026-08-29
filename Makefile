@@ -80,6 +80,9 @@ test-boot: image
 # is not worth relying on given everything else this Makefile already
 # fought with this make/MSYS2 combination) -- a crash or panic before
 # printing "test result: ok" fails the grep and this target either way.
+test-faults: image
+	powershell -ExecutionPolicy Bypass -File scripts/test-faults.ps1
+
 test-host:
 	mkdir -p _evidence/latest
 	cd host_tests && $(CARGO) test --lib 2>&1 | tee ../_evidence/latest/host-tests.log
