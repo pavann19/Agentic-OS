@@ -1,0 +1,23 @@
+[package]
+name = "agentic_kernel"
+version = "0.1.0"
+edition = "2021"
+
+# Built as a `bin` crate (src/main.rs) so `cargo build` links kernel.elf
+# directly via rust-lld, per the custom target's linker-flavor. No external
+# `ld` involved — this machine's system `ld` only targets PE (i386pep), not
+# ELF, so that's not a style choice, it's the only thing that works here.
+#
+# No external crates. Phase 0 keeps the dependency graph empty so `cargo build`
+# never needs network access to iterate — only `core` and `compiler_builtins`,
+# built from source via -Zbuild-std (see .cargo/config.toml).
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

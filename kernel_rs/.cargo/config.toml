@@ -1,0 +1,14 @@
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+# relocation-model=static: the bootloader's ELF loader (boot/main.c) loads
+# PT_LOAD segments to their exact p_paddr and jumps to e_entry — it does not
+# process relocation entries. Without this, rustc emits a static-PIE binary
+# whose correctness would depend on self-relocation the loader never does.
+rustflags = [
+    "-C", "relocation-model=static",
+    "-C", "link-arg=-Tlinker.ld",
+    "-C", "link-arg=--gc-sections",
+    "-C", "link-arg=--no-dynamic-linker",
+]
