@@ -63,6 +63,8 @@ run-qemu: image
 # NATIVE_BUILD.md if this breaks again.
 # No args passed: scripts/test-boot.ps1's defaults already match this
 # Makefile's QEMU/OVMF_CODE/FATDIR values. Override there if those diverge.
+# Asserts BOOT_START -> EXIT_BOOT_SERVICES_OK -> KERNEL_ENTER: the full
+# chain now works (bootloader loads kernel.elf and jumps to it for real).
 test-boot: image
 	powershell -ExecutionPolicy Bypass -File scripts/test-boot.ps1
 

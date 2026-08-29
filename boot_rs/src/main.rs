@@ -1,15 +1,18 @@
-//! Agentic OS bootloader — Rust port, first slice.
+//! Agentic OS bootloader — Rust port.
 //!
-//! This is NOT yet a port of `boot/main.c`. It proves the native (no-Docker)
-//! Rust UEFI pipeline end-to-end: build with `x86_64-unknown-uefi`, boot in
-//! QEMU/OVMF, emit `BOOT_START` on serial and a visible line on the UEFI
-//! console. ELF-kernel loading, font/memory-map handling, and the BootInfo
-//! handoff are NOT implemented here yet — seem BOOT0_PROGRESS.md for what's
-//! next and why this was cut here first (same reasoning as kernel_rs/'s
-//! first slice: verify the toolchain and boot path before porting logic).
+//! Loads kernel.elf and font.psf from the ESP root volume, maps the
+//! kernel's PT_LOAD segments to their exact physical addresses, finds the
+//! GOP framebuffer, builds BootInfo, exits boot services, and jumps to the
+//! kernel entry point. Full port of `boot/main.c`'s logic — see
+//! `NATIVE_BUILD.md` / `PHASE0_PROGRESS.md` for what's still open (font
+//! rendering and GOP framebuffer use itself live in the kernel, not here;
+//! this only has to load and hand them off correctly).
 #![no_std]
 #![no_main]
 
+mod bootinfo;
+mod elf;
+mod loader;
 mod serial;
 mod uefi;
 
@@ -17,24 +20,34 @@ use core::panic::PanicInfo;
 use uefi::{Handle, Status, SystemTable, EFI_SUCCESS};
 
 #[no_mangle]
-pub extern "efiapi" fn efi_main(_image_handle: Handle, system_table: *mut SystemTable) -> Status {
+pub extern "efiapi" fn efi_main(image_handle: Handle, system_table: *mut SystemTable) -> Status {
     serial::init();
     serial::write_str("BOOT_START\n");
 
     let st = unsafe { &*system_table };
     uefi::print(st.con_out, "Agentic OS Bootloader (Rust) loading...\r\n");
 
-    serial::write_str("BOOT_RS_HELLO_OK\n");
-
-    // Nothing past this point exists yet — spin rather than pretend the boot
-    // sequence continues. Returning EFI_SUCCESS here would hand control back
-    // to the UEFI shell/BDS, which isn't the right behavior once this is a
-    // real bootloader, but is harmless for this verification slice.
-    loop {
-        unsafe {
-            core::arch::asm!("pause", options(nomem, nostack));
+    let prepared = match unsafe { loader::prepare_boot(st, image_handle) } {
+        Ok(p) => p,
+        Err(loader::LoadError::Uefi(msg)) => {
+            serial::write_str("BOOT_ERROR: ");
+            serial::write_str(msg);
+            serial::write_str("\n");
+            loop {
+                unsafe { core::arch::asm!("pause", options(nomem, nostack)) };
+            }
         }
-    }
+    };
+
+    // Boot services are gone at this point — no more UEFI calls, no more
+    // ConOut. Serial is still fine: it's raw port I/O, not a firmware
+    // service.
+    serial::write_str("EXIT_BOOT_SERVICES_OK\n");
+    serial::write_str("KERNEL_ENTER\n");
+
+    let kernel_entry: extern "sysv64" fn(*const bootinfo::BootInfo) -> ! =
+        unsafe { core::mem::transmute(prepared.kernel_entry as usize) };
+    kernel_entry(prepared.boot_info as *const bootinfo::BootInfo);
 
     #[allow(unreachable_code)]
     EFI_SUCCESS

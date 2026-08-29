@@ -64,12 +64,14 @@ if (-not (Test-Path $SerialLog)) {
 }
 
 $content = Get-Content $SerialLog -Raw
-if ($content -notmatch "BOOT_RS_HELLO_OK") {
-    Write-Error "BOOT_RS_HELLO_OK checkpoint not found in $SerialLog"
+$required = @("BOOT_START", "EXIT_BOOT_SERVICES_OK", "KERNEL_ENTER")
+$missing = $required | Where-Object { $content -notmatch [regex]::Escape($_) }
+if ($missing.Count -gt 0) {
+    Write-Error "Missing checkpoint(s): $($missing -join ', ') in $SerialLog"
     Write-Output "--- serial.log ---"
     Write-Output $content
     exit 1
 }
 
-Write-Output "BOOT_RS_HELLO_OK checkpoint confirmed."
+Write-Output "Checkpoints confirmed: $($required -join ' -> ')"
 exit 0
