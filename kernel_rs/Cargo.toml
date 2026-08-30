@@ -23,6 +23,11 @@ fault_test_null_deref = []
 fault_test_rodata_write = []
 fault_test_nx_exec = []
 fault_test_double_fault = []
+# Ring 3 proof-of-concept (docs/ROADMAP.md Phase 1 item). Deliberately
+# faults (see ring3.rs's module doc) -- off by default so a normal boot
+# reaches its steady-state loop instead of an intentional #GP. Verified via
+# scripts/test-ring3.ps1.
+demo_ring3 = []
 
 [profile.dev]
 panic = "abort"

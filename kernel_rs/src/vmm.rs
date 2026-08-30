@@ -44,7 +44,7 @@ pub const PHYS_MAP_BASE: u64 = 0xFFFF_8000_0000_0000;
 pub const MMIO_VIRTUAL_BASE: u64 = 0xFFFF_FE00_0000_0000;
 
 const PAGE_PRESENT: u64 = 1 << 0;
-const PAGE_WRITABLE: u64 = 1 << 1;
+pub const PAGE_WRITABLE: u64 = 1 << 1;
 const PAGE_CACHE_DISABLE: u64 = 1 << 4;
 pub const PAGE_NO_EXECUTE: u64 = 1 << 63;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
@@ -88,24 +88,41 @@ fn indices(vaddr: u64) -> (usize, usize, usize, usize) {
 unsafe fn map_page(pml4_phys: u64, vaddr: u64, paddr: u64, flags: u64) {
     let (i4, i3, i2, i1) = indices(vaddr);
 
+    // Real bug this session found: intermediate PML4E/PDPTE/PDE entries
+    // were created with only PAGE_PRESENT|PAGE_WRITABLE — never
+    // PAGE_USER. Per x86_64 paging rules, EVERY level of the translation
+    // needs the USER bit set for a CPL3 access to succeed at all,
+    // regardless of what the LEAF PTE allows; missing it at any
+    // intermediate level makes the whole path supervisor-only. Confirmed
+    // by testing: a leaf PTE correctly marked PAGE_USER still produced a
+    // page fault with the instruction-fetch/present bits set (error code
+    // 0x15) the instant ring-3 code tried to execute from it, because the
+    // PML4E/PDPTE/PDE covering that address had no USER bit. Standard
+    // practice (matching Linux and others) is to set USER permissively on
+    // intermediate tables and let the LEAF's own R/W/X bits be the real
+    // per-page gate — this doesn't grant broader access than intended,
+    // since every level still needs PRESENT and the leaf still needs its
+    // own correct flags.
+    let intermediate_flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+
     let pml4 = pmm::p2v_pub(pml4_phys) as *mut u64;
     if *pml4.add(i4) & PAGE_PRESENT == 0 {
         let new = zeroed_table();
-        *pml4.add(i4) = new | PAGE_PRESENT | PAGE_WRITABLE;
+        *pml4.add(i4) = new | intermediate_flags;
     }
     let pdpt_phys = *pml4.add(i4) & ADDR_MASK;
 
     let pdpt = pmm::p2v_pub(pdpt_phys) as *mut u64;
     if *pdpt.add(i3) & PAGE_PRESENT == 0 {
         let new = zeroed_table();
-        *pdpt.add(i3) = new | PAGE_PRESENT | PAGE_WRITABLE;
+        *pdpt.add(i3) = new | intermediate_flags;
     }
     let pd_phys = *pdpt.add(i3) & ADDR_MASK;
 
     let pd = pmm::p2v_pub(pd_phys) as *mut u64;
     if *pd.add(i2) & PAGE_PRESENT == 0 {
         let new = zeroed_table();
-        *pd.add(i2) = new | PAGE_PRESENT | PAGE_WRITABLE;
+        *pd.add(i2) = new | intermediate_flags;
     }
     let pt_phys = *pd.add(i2) & ADDR_MASK;
 

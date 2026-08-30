@@ -120,11 +120,26 @@ fn set_tss_entry(index: usize, base: u64, limit: u32) {
     }
 }
 
+// Ring 3 (Phase 1 item). Selectors include the RPL=3 bits callers need
+// when loading CS/SS — `USER_CODE_SELECTOR`/`USER_DATA_SELECTOR` are
+// ready to load directly, not raw GDT indices.
+pub const USER_DATA_SELECTOR: u16 = (5 << 3) | 3; // 0x2B
+pub const USER_CODE_SELECTOR: u16 = (6 << 3) | 3; // 0x33
+
 pub fn init() {
     unsafe {
         set_entry(0, 0, 0, 0, 0); // null
         set_entry(1, 0, 0xFFFFF, 0x9A, 0xA0); // kernel code, selector 0x08
         set_entry(2, 0, 0xFFFFF, 0x92, 0x80); // kernel data, selector 0x10
+        // DPL=3 versions of the same access-byte pattern as the kernel
+        // descriptors above (bits 5-6 = DPL, set to 11 instead of 00):
+        // kernel code 0x9A -> user code 0xFA; kernel data 0x92 -> user
+        // data 0xF2. User data MUST come before user code at consecutive
+        // indices (5, 6) here — that ordering is what SYSCALL/SYSRET's
+        // STAR MSR will rely on later; getting it right now avoids
+        // reshuffling GDT indices when that item lands.
+        set_entry(5, 0, 0xFFFFF, 0xF2, 0x80); // user data, selector 0x28
+        set_entry(6, 0, 0xFFFFF, 0xFA, 0xA0); // user code, selector 0x30
 
         let df_stack_top =
             (&raw const DOUBLE_FAULT_STACK.0) as u64 + DOUBLE_FAULT_STACK_SIZE as u64;
@@ -163,4 +178,17 @@ pub fn init() {
         core::arch::asm!("ltr ax", in("ax") 0x18u16, options(nostack, preserves_flags));
     }
     klog_info!("GDT+TSS initialized (double-fault IST stack ready)");
+}
+
+/// Sets TSS.RSP0 — the kernel stack the CPU switches to automatically on
+/// any ring3->ring0 transition (interrupt, exception, or a future syscall
+/// entry that relies on it). Not yet wired into the scheduler per-thread
+/// (a stated gap for when ring-3 threads become first-class scheduled
+/// entities, see PHASE1_PROGRESS.md) — callers set this manually before
+/// entering user mode with whatever kernel stack should catch that
+/// thread's faults/interrupts.
+pub fn set_kernel_stack(rsp0: u64) {
+    unsafe {
+        TSS.rsp0 = rsp0;
+    }
 }

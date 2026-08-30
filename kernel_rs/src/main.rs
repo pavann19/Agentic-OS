@@ -29,6 +29,8 @@ pub mod idt;
 pub mod klog;
 pub mod pic;
 pub mod pmm;
+#[cfg(feature = "demo_ring3")]
+pub mod ring3;
 pub mod serial;
 pub mod thread;
 pub mod vmm;
@@ -206,6 +208,9 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     thread::spawn_in(demo_process_b, ADDRESS_SPACE_B.load(core::sync::atomic::Ordering::SeqCst));
     klog_info!("ADDRESS_SPACES_CREATED count=2");
 
+    #[cfg(feature = "demo_ring3")]
+    thread::spawn(demo_ring3_thread);
+
     loop {
         unsafe {
             core::arch::asm!("hlt", options(nomem, nostack));
@@ -245,6 +250,64 @@ extern "C" fn demo_process_a() {
 extern "C" fn demo_process_b() {
     let value = unsafe { *(USER_TEST_VADDR as *const u64) };
     klog_info!("PROCESS_B read 0x{:x} at 0x{:x}", value, USER_TEST_VADDR);
+}
+
+/// Real proof of ring 3, not just "it compiles": user code executing
+/// `hlt` (0xF4), a CPL0-only instruction. If this faults with #GP, CPL
+/// really was 3 -- kernel code running the identical instruction never
+/// faults. See ring3.rs's module doc.
+///
+/// MUST run as a spawned thread, not inline in kernel_main -- a real bug
+/// this session found: kernel_main still runs on its ORIGINAL boot-time
+/// stack (a low-address identity mapping from vmm::init(), never migrated
+/// to a heap allocation), which lives in the canonical-LOW half and is
+/// therefore NOT included in a fresh address space's copied upper half
+/// (vmm::new_address_space() only copies indices 256-511). Calling
+/// switch_address_space() directly from kernel_main's context unmapped
+/// its own currently-in-use stack out from under it, immediately
+/// double-faulting. A spawned thread's stack is heap-allocated (already
+/// in the upper canonical half), so it survives the switch correctly --
+/// confirmed by demo_process_a/b (also spawned threads) switching address
+/// spaces via schedule() without incident, while this exact code inline
+/// in kernel_main double-faulted.
+#[cfg(feature = "demo_ring3")]
+extern "C" fn demo_ring3_thread() {
+    const USER_CODE_VADDR: u64 = 0x0000_0000_0060_0000;
+    const USER_STACK_VADDR: u64 = 0x0000_0000_0070_0000;
+
+    unsafe {
+        let space = vmm::new_address_space();
+
+        let code_page = pmm::alloc_page();
+        let code_bytes = pmm::p2v_pub(code_page);
+        *code_bytes = 0xF4; // hlt
+        vmm::map_page_in(space, USER_CODE_VADDR, code_page, vmm::PAGE_USER);
+        // deliberately no PAGE_NO_EXECUTE -- this page must be executable
+
+        let stack_page = pmm::alloc_page();
+        vmm::map_page_in(
+            space,
+            USER_STACK_VADDR,
+            stack_page,
+            vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE | vmm::PAGE_WRITABLE,
+        );
+
+        // A dedicated kernel stack to catch the #GP this demo expects --
+        // TSS.RSP0 is what the CPU switches to on the ring3->ring0
+        // transition an exception causes.
+        let rsp0_stack = alloc::vec![0u8; 16384].into_boxed_slice();
+        let rsp0_top = rsp0_stack.as_ptr() as u64 + 16384;
+        core::mem::forget(rsp0_stack); // kept alive for the kernel's remaining lifetime
+        gdt::set_kernel_stack(rsp0_top);
+
+        vmm::switch_address_space(space);
+        klog_info!(
+            "RING3_ENTER entry=0x{:x} stack=0x{:x}",
+            USER_CODE_VADDR,
+            USER_STACK_VADDR + 4096
+        );
+        ring3::enter_user_mode(USER_CODE_VADDR, USER_STACK_VADDR + 4096);
+    }
 }
 
 extern "C" fn demo_thread_b() {
