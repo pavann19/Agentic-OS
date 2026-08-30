@@ -88,6 +88,37 @@ pub fn init_svc_cap() -> capability::CapId {
     INIT_SVC_CAP.load(core::sync::atomic::Ordering::SeqCst)
 }
 
+// Phase 3's framebuffer driver readiness signal: a third, dedicated
+// capability table/endpoint, same reasoning as INIT_SVC_TABLE above --
+// each syscall-reachable operation gets its own capability, never a
+// shared ambient one.
+static mut FB_READY_TABLE: Option<capability::CapabilityTable> = None;
+static FB_READY_CAP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// One-time setup so syscall number 4 (below) has a real capability to
+/// invoke. Called once from user_driver.rs before spawning the
+/// framebuffer driver.
+pub fn init_fb_ready_ipc() -> capability::CapId {
+    unsafe {
+        FB_READY_TABLE = Some(capability::CapabilityTable::new());
+        let table = (&mut *&raw mut FB_READY_TABLE).as_mut().unwrap();
+        let cap = ipc::create_endpoint(
+            table,
+            capability::Rights::SEND.union(capability::Rights::RECEIVE),
+        );
+        FB_READY_CAP.store(cap, core::sync::atomic::Ordering::SeqCst);
+        cap
+    }
+}
+
+pub fn fb_ready_table() -> &'static capability::CapabilityTable {
+    unsafe { (*(&raw const FB_READY_TABLE)).as_ref().unwrap() }
+}
+
+pub fn fb_ready_cap() -> capability::CapId {
+    FB_READY_CAP.load(core::sync::atomic::Ordering::SeqCst)
+}
+
 const IA32_EFER: u32 = 0xC000_0080;
 const IA32_STAR: u32 = 0xC000_0081;
 const IA32_LSTAR: u32 = 0xC000_0082;
@@ -169,6 +200,24 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, _a1: u64) -> u64 {
             match ipc::send(table, cap, msg) {
                 Ok(()) => {
                     klog_info!("SYSCALL_SVC_START token=0x{:x}", a0);
+                    0
+                }
+                Err(_) => u64::MAX,
+            }
+        }
+        4 => {
+            // Phase 3's framebuffer driver readiness signal: the real
+            // ELF-loaded framebuffer driver (user_driver.rs) tells the
+            // kernel-side verify thread it has finished writing its test
+            // pattern into the real GOP framebuffer -- same real
+            // capability-gated IPC discipline as syscalls 2/3.
+            let table = fb_ready_table();
+            let cap = FB_READY_CAP.load(core::sync::atomic::Ordering::SeqCst);
+            let mut msg = ipc::Message::default();
+            msg.data[0] = a0;
+            match ipc::send(table, cap, msg) {
+                Ok(()) => {
+                    klog_info!("SYSCALL_FB_READY token=0x{:x}", a0);
                     0
                 }
                 Err(_) => u64::MAX,

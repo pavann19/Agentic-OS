@@ -234,6 +234,38 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     user_driver::spawn_serial_driver();
     klog_info!("USER_DRIVER_SPAWN_DONE");
 
+    // Phase 3: second real user-space driver -- the REAL GOP framebuffer
+    // boot_rs found at boot, granted to a genuine ELF-loaded ring-3
+    // process as a real MmioRegion capability. See user_driver.rs's
+    // module doc for why the verification (an independent kernel-side
+    // readback, not the driver's own self-report) is what makes this
+    // real rather than just another log line.
+    unsafe {
+        // Real bug found bringing this up: info.payload.framebuffer is a
+        // PHYSICAL pointer (UEFI pool memory boot_rs allocated it in),
+        // same class of bug as the info: &BootInfo dangling-reference
+        // fix in this same function -- dereferencing it directly here
+        // faulted (vector 14, user=false, present=false) the instant
+        // this code ran, since it's not identity-mapped under the
+        // kernel's OWN production tables. Fixed the same way: translate
+        // through pmm::p2v_pub before dereferencing.
+        let fb_ptr = pmm::p2v_pub(info.payload.framebuffer as u64) as *const bootinfo::Framebuffer;
+        let fb = &*fb_ptr;
+        klog_info!(
+            "FRAMEBUFFER_FOUND base=0x{:x} size={} width={} height={} pixels_per_scan_line={}",
+            fb.base_address as u64, fb.buffer_size, fb.width, fb.height, fb.pixels_per_scan_line
+        );
+        klog_info!("USER_DRIVER_FB_SPAWN_START");
+        user_driver::spawn_framebuffer_driver(
+            fb.base_address as u64,
+            fb.buffer_size,
+            fb.width,
+            fb.height,
+            fb.pixels_per_scan_line,
+        );
+        klog_info!("USER_DRIVER_FB_SPAWN_DONE");
+    }
+
     // Phase 3: ACPI table discovery -- the real RSDP boot_rs found via the
     // UEFI configuration table, walked to find DMAR (the IOMMU's register
     // base) for the item below.

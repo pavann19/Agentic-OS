@@ -19,6 +19,21 @@
 //! `demo_ring3_thread` documents applies here identically — this function
 //! is meant to run as its own spawned thread, never inlined into
 //! `kernel_main`.
+//!
+//! Real bug found and fixed once real ongoing user-space drivers existed
+//! alongside `init` (`user_driver.rs`): the ORIGINAL version of this
+//! program ended in a deliberate `hlt` — copied from the Phase 1 ring-3
+//! CPL proof, where a privileged instruction faulting in ring 3 (`#GP`)
+//! WAS the point. But every unhandled exception still halts the WHOLE
+//! kernel (a real, still-open Phase 1 gap — see idt.rs), and `init` is a
+//! real process now, not a one-shot demo: its deliberate self-crash was
+//! killing the entire machine before the framebuffer driver's own
+//! ongoing work (spawned after `init`, genuinely concurrent with it) got
+//! a chance to run its syscall/verification sequence. Fixed by ending
+//! `init`'s program in a benign infinite spin (`jmp $`) instead — the
+//! same fix already applied to both real user-space drivers themselves,
+//! now applied here too since `init` needs to coexist with them, not
+//! demonstrate CPL and then take the system down with it.
 
 use crate::{gdt, klog_info, pmm, ring3, syscall, thread, vmm};
 
@@ -46,12 +61,14 @@ extern "C" fn init_thread() {
 
         let code_page = pmm::alloc_page();
         let code_bytes = pmm::p2v_pub(code_page);
-        // mov edi, 0xC0DE ; mov eax, 3 ; syscall (SVC_START) ; hlt
-        let program: [u8; 13] = [
+        // mov edi, 0xC0DE ; mov eax, 3 ; syscall (SVC_START) ; jmp $ (benign
+        // infinite spin -- see module doc's real-bug note on why this is
+        // no longer a deliberate hlt/#GP)
+        let program: [u8; 14] = [
             0xBF, 0xDE, 0xC0, 0x00, 0x00, // mov edi, 0xC0DE
             0xB8, 0x03, 0x00, 0x00, 0x00, // mov eax, 3
             0x0F, 0x05, // syscall
-            0xF4, // hlt
+            0xEB, 0xFE, // jmp $
         ];
         core::ptr::copy_nonoverlapping(program.as_ptr(), code_bytes, program.len());
         vmm::map_page_in(space, INIT_CODE_VADDR, code_page, vmm::PAGE_USER);

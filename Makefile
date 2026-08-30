@@ -19,6 +19,7 @@ OVMF_CODE ?= C:/Program Files/qemu/share/edk2-x86_64-code.fd
 BOOT_DIR    = boot_rs
 KERNEL_DIR  = kernel_rs
 USER_DIR    = user_rs/serial_driver
+USER_DIR2   = user_rs/framebuffer_driver
 FATDIR      = $(BOOT_DIR)/qemu_fatdir
 BOOT_EFI    = $(BOOT_DIR)/target/x86_64-unknown-uefi/release/agentic_bootloader.efi
 KERNEL_ELF  = $(KERNEL_DIR)/target/x86_64-unknown-none/release/agentic_kernel
@@ -36,6 +37,7 @@ bootloader:
 # comment), so the kernel build fails outright if this hasn't run first.
 userland:
 	cd $(USER_DIR) && $(CARGO) build --release
+	cd $(USER_DIR2) && $(CARGO) build --release
 
 kernel: userland
 	cd $(KERNEL_DIR) && $(CARGO) build --release
@@ -97,5 +99,5 @@ test-host:
 	grep -q "test result: ok\. [0-9]* passed; 0 failed" _evidence/latest/host-tests.log
 
 clean:
-	rm -rf $(BOOT_DIR)/target $(KERNEL_DIR)/target $(USER_DIR)/target $(FATDIR)
+	rm -rf $(BOOT_DIR)/target $(KERNEL_DIR)/target $(USER_DIR)/target $(USER_DIR2)/target $(FATDIR)
 	rm -rf _evidence/latest

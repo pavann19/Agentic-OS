@@ -1,0 +1,18 @@
+[package]
+name = "framebuffer_driver"
+version = "0.1.0"
+edition = "2021"
+
+# Second real user-space driver (Phase 3): a genuine freestanding ELF64
+# binary, built completely separately from kernel_rs, loaded at runtime
+# by kernel_rs/src/elf.rs -- same pattern as user_rs/serial_driver.
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true
