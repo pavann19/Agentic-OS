@@ -160,13 +160,77 @@ substrate Phase 2 builds, not just more Phase 1 code); and a syscall
 rejecting a malicious pointer argument (no syscall in this proof-of-concept
 takes a pointer argument at all yet).
 
-## Phase 2 — Capability And IPC Substrate — Not started
+## Phase 2 — Capability And IPC Substrate (6/6 items complete — DONE)
 
-Depends on Phase 1. Capability table, grant/attenuate/revoke, IPC, the
-kernel-level audit log (ADR-005), interrupt forwarding to user space — none
-of this exists yet. This is the phase where the OS becomes agent-native
-rather than a conventional kernel; nothing in the current boot-slice touches
-it.
+Depends on Phase 1 (done). Completed 2026-08-30. This is the phase where
+the OS becomes agent-native rather than a conventional kernel — the
+decision point `docs/ROADMAP.md` itself frames it as.
+
+- [x] **Per-process capability table, unforgeable references**
+      (`capability.rs`) — `CapabilityTable` holds `Capability { object_id,
+      rights, generation }` behind an opaque `CapId` index; nothing a
+      process holds is a raw pointer or a guessable handle.
+- [x] **Grant / attenuated derive / revoke** — `grant()` mints from a new
+      object; `derive()`/`derive_self()` enforce attenuation as a REJECTED
+      request, not a silent clamp, when the requested rights aren't
+      already a subset; `revoke()` bumps the object's generation counter.
+      Revocation is immediate for every derivative, by construction —
+      derived capabilities share the source object's generation, so one
+      write invalidates the whole tree with no walk needed.
+- [x] **Synchronous, capability-gated IPC** (`ipc.rs`) — real rendezvous
+      (spin-yield, documented single-core simplification), gated through
+      the same `CapabilityTable::resolve` every other operation uses.
+- [x] **Kernel audit log, one code path with invocation** (`audit.rs`,
+      ADR-005) — `capability.rs`'s grant/derive/revoke and `resolve`'s
+      denial path all call `audit::record` as part of their own bodies;
+      there is no capability operation whose code skips it.
+- [x] **Interrupt forwarding to a registered handler** (`interrupt_forward.rs`)
+      — real hardware interrupt (the APIC timer, this kernel's one live
+      IRQ source), `notify()` called from the actual ISR, `wait_for_interrupt`/
+      `acknowledge` as two distinct, separately-audited steps.
+- [x] **Syscall surface expressing a capability operation** — syscall
+      number 2 (`syscall.rs`) performs a real, capability-gated IPC send
+      from ring 3, enforcement not bypassed for the syscall path.
+
+**Every exit criterion (`docs/ROADMAP.md` §5) demonstrated live, in one
+boot log, not just individually:** a denied access (SEND-only capability
+rejected for RECEIVE), an attenuation violation rejected outright (not
+clamped), immediate revocation (same `cap_id`, post-revoke, denied), and a
+complete audit trail with no gaps (11 records for the kernel-thread demo
+alone — Grant, 3×Derive, 2×Denied, IpcSend, IpcReceive, Revoke,
+InterruptDelivered, InterruptAcknowledged — sequential, none missing).
+
+**Six real bugs found and fixed getting here**, several substantially
+deeper than Phase 0/1's: (1) the first attenuation-violation test
+exercised the wrong failure path entirely (missing `GRANT`, not an
+attenuation violation) — required understanding `derive()`'s own
+precondition, not a typo; (2) a genuine memory-visibility bug in the IPC
+rendezvous — `spin_yield()`'s `options(nomem, nostack)` let LLVM cache a
+plain field read across the wait loop, spinning on a stale register
+forever, fixed with real atomics and Acquire/Release ordering; (3) a
+**deadlock**: `IA32_FMASK` masks interrupts on syscall entry, and a
+blocking syscall (IPC send) needs the timer to fire for the scheduler to
+ever unblock it — fixed with `sti` inside the entry stub, using the same
+STI-shadow reasoning as Phase 1's thread-switch fix; (4) fixing that
+deadlock exposed a second, deeper one: syscall entry swapped onto a
+*shared scratch stack* separate from the calling thread's own tracked
+stack, so a mid-syscall preemption saved the wrong RSP into the thread's
+context — fixed by reusing the thread's own kernel stack instead
+(`thread::current_kernel_stack_top`); (5) a thread that manually calls
+`vmm::switch_address_space` (entering a freshly-created process's address
+space at runtime) was never reflected in `thread.rs`'s own tracking, so
+the NEXT preemption silently switched CR3 back to the stale value —
+fixed with `thread::set_current_address_space`; (6) a phantom, undefined
+helper function referenced during first-draft aliasing avoidance, caught
+immediately by the compiler and replaced with a real `derive_self()`
+method. Every one of (2)-(5) was found specifically because the
+ring-3-plus-syscall demo was pushed to survive REAL preemption mid-
+operation, not just a single uninterrupted happy path.
+
+`make clean && make test-boot && make test-host && (fault suite)` all
+pass with zero regression; the `demo_ring3` feature build (gated, same as
+Phase 1's ring-3 proof) shows the complete capability→IPC→syscall→ring-3
+round-trip, including surviving a real timer preemption mid-syscall.
 
 ## Phase 3 — User-Space Driver Framework — Not started
 

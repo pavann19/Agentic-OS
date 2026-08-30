@@ -326,6 +326,51 @@ pub fn init_as_current_thread() {
     }
 }
 
+/// Top address of the CURRENTLY RUNNING thread's own kernel stack — for
+/// `gdt::set_kernel_stack`/`syscall::set_kernel_stack` to use instead of a
+/// separate scratch allocation. Real bug this session found by tracing
+/// through what happens when a syscall blocks and gets preempted: a
+/// separate scratch stack for syscall/interrupt re-entry works fine right
+/// up until something running ON it gets preempted (schedule() saves
+/// whatever RSP is current into the THREAD's own saved_rsp — but that RSP
+/// pointed into the scratch buffer, not this thread's real stack, so a
+/// LATER unrelated thread reusing that same scratch region for ITS OWN
+/// syscall would silently corrupt the first thread's still-suspended
+/// state). Using the thread's own already-allocated kernel stack instead
+/// means a mid-syscall preemption is just an ordinary, correctly-tracked
+/// context switch — nothing else can ever collide with it, because it's
+/// the same stack that thread already owns for its whole lifetime.
+pub fn current_kernel_stack_top() -> u64 {
+    unsafe {
+        current_mut()
+            .as_ref()
+            .map(|t| t._stack.as_ptr() as u64 + t._stack.len() as u64)
+            .unwrap_or(0)
+    }
+}
+
+/// Updates the CURRENTLY RUNNING thread's tracked `address_space` field.
+/// Real bug this session found: a thread spawned via plain `spawn()`
+/// (shared kernel PML4) that LATER calls `vmm::switch_address_space`
+/// manually (as the ring-3 demo does, to enter a freshly-created process
+/// address space at runtime) changes CR3 WITHOUT `thread.rs` ever finding
+/// out — the Thread struct's own `address_space` field stays stale at
+/// whatever it was spawned with. The instant this thread is preempted and
+/// later resumed, `schedule()` switches CR3 back to that STALE tracked
+/// value (the kernel's, not the process's), silently pulling the rug out
+/// from under whatever address space the thread thought it was still
+/// running in — manifested as a page fault on a page that had been
+/// present moments before, because it genuinely was no longer the active
+/// address space. Any code that manually switches its own address space
+/// must call this right after, or preemption can and will undo it.
+pub fn set_current_address_space(pml4_phys: u64) {
+    unsafe {
+        if let Some(t) = current_mut().as_mut() {
+            t.address_space = pml4_phys;
+        }
+    }
+}
+
 pub fn current_id() -> ThreadId {
     unsafe { current_mut().as_ref().map(|t| t.id).unwrap_or(0) }
 }

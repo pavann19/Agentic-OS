@@ -14,8 +14,12 @@
 extern crate alloc;
 
 pub mod apic;
+pub mod audit;
 pub mod bootinfo;
+pub mod capability;
 pub mod events;
+pub mod interrupt_forward;
+pub mod ipc;
 #[cfg(any(
     feature = "fault_test_null_deref",
     feature = "fault_test_rodata_write",
@@ -212,6 +216,85 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     #[cfg(feature = "demo_ring3")]
     thread::spawn(demo_ring3_thread);
 
+    // Phase 2: capability substrate. Real proof of every exit criterion
+    // from docs/ROADMAP.md's Phase 2 section, not just "it compiles":
+    // grant, attenuated derive (both the success case AND the rejected
+    // over-broad request), real cross-thread IPC data transfer gated by
+    // capability, a denied access from insufficient rights, and immediate
+    // revocation that invalidates an already-derived capability.
+    unsafe {
+        SENDER_TABLE = Some(capability::CapabilityTable::new());
+        RECEIVER_TABLE = Some(capability::CapabilityTable::new());
+        let sender_table = (&mut *&raw mut SENDER_TABLE).as_mut().unwrap();
+
+        // Full-rights grant, then attenuate down to what each side
+        // actually needs — sender gets SEND-only, receiver gets
+        // RECEIVE-only, both derived from the SAME underlying object.
+        let root_cap = ipc::create_endpoint(
+            sender_table,
+            capability::Rights::SEND
+                .union(capability::Rights::RECEIVE)
+                .union(capability::Rights::GRANT)
+                .union(capability::Rights::REVOKE),
+        );
+
+        // Attenuation, success case: SEND-only is a real subset of what
+        // root_cap holds.
+        let send_cap = sender_table
+            .derive_self(root_cap, capability::Rights::SEND)
+            .expect("SEND-only derive must succeed — it's a real subset");
+        ENDPOINT_OBJECT_ID.store(
+            sender_table.resolve(send_cap, capability::Rights::SEND).unwrap().object_id,
+            core::sync::atomic::Ordering::SeqCst,
+        );
+
+        // Attenuation, REJECTED case. `send_cap` alone can't demonstrate
+        // this correctly (derive() itself requires the SOURCE to hold
+        // GRANT just to be usable as a derivation source at all — send_cap
+        // has no GRANT, so trying from it fails at that earlier check with
+        // InsufficientRights, not the attenuation check this is meant to
+        // exercise; found by testing, not anticipated). A real
+        // over-broad-request test needs a source that HAS GRANT but
+        // genuinely LACKS the right being asked for: derive an
+        // intermediate SEND|GRANT capability (a real subset of root_cap,
+        // so this derive itself succeeds), then ask it for RECEIVE, which
+        // it does not hold.
+        let send_and_grant_cap = sender_table
+            .derive_self(root_cap, capability::Rights::SEND.union(capability::Rights::GRANT))
+            .expect("SEND|GRANT derive must succeed — real subset of root_cap");
+        match sender_table.derive_self(send_and_grant_cap, capability::Rights::RECEIVE) {
+            Err(capability::CapError::AttenuationViolation) => {
+                klog_info!("ATTENUATION_VIOLATION_REJECTED_OK (asked RECEIVE from a SEND|GRANT cap)");
+            }
+            other => klog_info!("ATTENUATION_VIOLATION_TEST_UNEXPECTED result={:?}", other.is_ok()),
+        }
+
+        let receiver_table = (&mut *&raw mut RECEIVER_TABLE).as_mut().unwrap();
+        let recv_cap = sender_table
+            .derive(root_cap, capability::Rights::RECEIVE, receiver_table)
+            .expect("RECEIVE-only derive must succeed");
+
+        SENDER_SEND_CAP.store(send_cap, core::sync::atomic::Ordering::SeqCst);
+        RECEIVER_RECV_CAP.store(recv_cap, core::sync::atomic::Ordering::SeqCst);
+        ROOT_CAP.store(root_cap, core::sync::atomic::Ordering::SeqCst);
+
+        // Denied-access proof: the SENDER's table holds send_cap (SEND
+        // only) — attempting to use it for RECEIVE must fail, logged as a
+        // real Denied audit record, not just an assumption.
+        match sender_table.resolve(send_cap, capability::Rights::RECEIVE) {
+            Err(capability::CapError::InsufficientRights) => {
+                klog_info!("DENIED_ACCESS_REJECTED_OK (SEND-only cap used for RECEIVE)");
+            }
+            other => klog_info!("DENIED_ACCESS_TEST_UNEXPECTED result={:?}", other.is_ok()),
+        }
+    }
+    klog_info!("CAPABILITIES_GRANTED_AND_DERIVED");
+
+    thread::spawn(demo_ipc_sender);
+    thread::spawn(demo_ipc_receiver);
+
+    thread::spawn(demo_interrupt_forward_thread);
+
     loop {
         unsafe {
             core::arch::asm!("hlt", options(nomem, nostack));
@@ -253,6 +336,63 @@ extern "C" fn demo_process_b() {
     klog_info!("PROCESS_B read 0x{:x} at 0x{:x}", value, USER_TEST_VADDR);
 }
 
+// Phase 2: capability + IPC demo state. Same "pass via statics" pattern
+// as the address-space demo above, same reasoning — extern "C" fn()
+// thread entries take no arguments.
+static mut SENDER_TABLE: Option<capability::CapabilityTable> = None;
+static mut RECEIVER_TABLE: Option<capability::CapabilityTable> = None;
+static SENDER_SEND_CAP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static RECEIVER_RECV_CAP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static ROOT_CAP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static ENDPOINT_OBJECT_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+extern "C" fn demo_ipc_sender() {
+    use core::sync::atomic::Ordering;
+    let table = unsafe { (*&raw const SENDER_TABLE).as_ref().unwrap() };
+    let cap = SENDER_SEND_CAP.load(Ordering::SeqCst);
+    let mut msg = ipc::Message::default();
+    msg.data[0] = 0xC0FF_EE00_DEAD_BEEF;
+    klog_info!("IPC_SENDER sending 0x{:x}", msg.data[0]);
+    match ipc::send(table, cap, msg) {
+        Ok(()) => klog_info!("IPC_SENDER send confirmed delivered"),
+        Err(e) => klog_info!("IPC_SENDER send FAILED {:?}", e),
+    }
+
+    // Revocation proof: revoke the underlying endpoint object, then try
+    // to send again on the SAME capability that worked a moment ago —
+    // must now be rejected, proving revocation takes effect immediately
+    // even though the capability's own table slot is untouched.
+    let object_id = ENDPOINT_OBJECT_ID.load(Ordering::SeqCst);
+    capability::revoke(object_id, false);
+    match ipc::send(table, cap, msg) {
+        Err(ipc::IpcError::Cap(capability::CapError::Revoked)) => {
+            klog_info!("REVOCATION_REJECTED_OK (same cap_id, post-revoke send denied)");
+        }
+        other => klog_info!("REVOCATION_TEST_UNEXPECTED result={:?}", matches!(other, Ok(()))),
+    }
+}
+
+extern "C" fn demo_ipc_receiver() {
+    use core::sync::atomic::Ordering;
+    let table = unsafe { (*&raw const RECEIVER_TABLE).as_ref().unwrap() };
+    let cap = RECEIVER_RECV_CAP.load(Ordering::SeqCst);
+    match ipc::receive(table, cap) {
+        Ok(msg) => klog_info!("IPC_RECEIVER got 0x{:x}", msg.data[0]),
+        Err(e) => klog_info!("IPC_RECEIVER receive FAILED {:?}", e),
+    }
+}
+
+extern "C" fn demo_interrupt_forward_thread() {
+    interrupt_forward::register(apic::TIMER_VECTOR);
+    klog_info!("INTERRUPT_FORWARD registered vector=0x{:x}, waiting", apic::TIMER_VECTOR);
+    interrupt_forward::wait_for_interrupt(apic::TIMER_VECTOR);
+    klog_info!("INTERRUPT_FORWARD received vector=0x{:x}", apic::TIMER_VECTOR);
+    interrupt_forward::acknowledge(apic::TIMER_VECTOR);
+    klog_info!("INTERRUPT_FORWARD acknowledged");
+    audit::dump_all();
+    klog_info!("AUDIT_LOG_DUMP_DONE count={}", audit::len());
+}
+
 /// Real proof of ring 3, not just "it compiles": user code executing
 /// `hlt` (0xF4), a CPL0-only instruction. If this faults with #GP, CPL
 /// really was 3 -- kernel code running the identical instruction never
@@ -281,14 +421,20 @@ extern "C" fn demo_ring3_thread() {
 
         let code_page = pmm::alloc_page();
         let code_bytes = pmm::p2v_pub(code_page);
-        // mov edi, 0x1234 ; mov eax, 1 ; syscall ; hlt
-        // (mov r32,imm32 zero-extends into the full r64 in long mode, so
-        // this is really `rdi = 0x1234; rax = 1` — arg0 and the syscall
-        // number syscall_dispatch expects.) The trailing hlt is the same
-        // CPL0-only-instruction proof as before: if SYSRET correctly
-        // returned to ring 3 (not silently staying at CPL0), this still
-        // faults with #GP exactly as it did without the syscall.
-        let program: [u8; 13] = [
+        // Phase 2's syscall-surface proof, chained before the Phase 1
+        // logging syscall: syscall 2 sends 0xCAFE through a REAL
+        // capability-gated IPC endpoint (syscall.rs::init_ring3_ipc_demo,
+        // set up below) entirely from ring 3 — enforcement isn't bypassed
+        // for syscalls, this goes through the identical
+        // CapabilityTable::resolve every other caller does. Then syscall 1
+        // (Phase 1's original proof) logs 0x1234. The trailing hlt is the
+        // same CPL0-only-instruction proof as before: if SYSRET correctly
+        // returned to ring 3 both times, this still faults with #GP
+        // exactly as it always has.
+        let program: [u8; 25] = [
+            0xBF, 0xFE, 0xCA, 0x00, 0x00, // mov edi, 0xCAFE
+            0xB8, 0x02, 0x00, 0x00, 0x00, // mov eax, 2
+            0x0F, 0x05, // syscall
             0xBF, 0x34, 0x12, 0x00, 0x00, // mov edi, 0x1234
             0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
             0x0F, 0x05, // syscall
@@ -306,31 +452,42 @@ extern "C" fn demo_ring3_thread() {
             vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE | vmm::PAGE_WRITABLE,
         );
 
-        // A dedicated kernel stack to catch the #GP this demo expects --
-        // TSS.RSP0 is what the CPU switches to on the ring3->ring0
-        // transition an exception causes.
-        let rsp0_stack = alloc::vec![0u8; 16384].into_boxed_slice();
-        let rsp0_top = rsp0_stack.as_ptr() as u64 + 16384;
-        core::mem::forget(rsp0_stack); // kept alive for the kernel's remaining lifetime
-        gdt::set_kernel_stack(rsp0_top);
-        // Reusing the same stack for both TSS.RSP0 (interrupt/exception
-        // entry) and syscall.rs's KERNEL_RSP (syscall entry) is fine for
-        // this single demo thread specifically: the two entry paths are
-        // mutually exclusive in time (a syscall isn't preemptible mid-
-        // transition — IA32_FMASK masks IF for exactly that reason), not
-        // a general multi-thread answer. Real per-thread stack assignment
-        // for both is the same stated gap noted in both gdt.rs and
-        // syscall.rs.
-        syscall::set_kernel_stack(rsp0_top);
+        // Uses THIS thread's own kernel stack (thread::spawn already
+        // allocated it) for both TSS.RSP0 and syscall.rs's KERNEL_RSP,
+        // not a separate scratch buffer — see
+        // thread::current_kernel_stack_top's doc comment for the real bug
+        // that reusing a shared scratch stack caused once syscalls became
+        // preemptible (necessary for a blocking syscall like #2 below to
+        // avoid deadlocking on interrupts-disabled).
+        let kernel_stack_top = thread::current_kernel_stack_top();
+        gdt::set_kernel_stack(kernel_stack_top);
+        syscall::set_kernel_stack(kernel_stack_top);
         syscall::init();
+        syscall::init_ring3_ipc_demo();
+        thread::spawn(ring3_ipc_receiver);
 
         vmm::switch_address_space(space);
+        thread::set_current_address_space(space);
         klog_info!(
             "RING3_ENTER entry=0x{:x} stack=0x{:x}",
             USER_CODE_VADDR,
             USER_STACK_VADDR + 4096
         );
         ring3::enter_user_mode(USER_CODE_VADDR, USER_STACK_VADDR + 4096);
+    }
+}
+
+/// Kernel-side counterpart to syscall number 2 (syscall.rs): waits for the
+/// message a REAL ring-3 process sends via the syscall surface, proving
+/// the data genuinely crosses the ring3->syscall->IPC->kernel-thread path,
+/// not just that the syscall returned success.
+#[cfg(feature = "demo_ring3")]
+extern "C" fn ring3_ipc_receiver() {
+    let table = syscall::ring3_ipc_table();
+    let cap = syscall::ring3_send_cap();
+    match ipc::receive(table, cap) {
+        Ok(msg) => klog_info!("RING3_IPC_RECEIVER got 0x{:x} (via syscall from ring 3)", msg.data[0]),
+        Err(e) => klog_info!("RING3_IPC_RECEIVER FAILED {:?}", e),
     }
 }
 

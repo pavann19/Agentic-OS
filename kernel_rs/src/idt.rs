@@ -194,6 +194,7 @@ handler_no_ec!(h_reserved_31, 31);
 /// that needs fixing later like the C keyboard handler did).
 extern "x86-interrupt" fn h_timer(_frame: InterruptStackFrame) {
     crate::apic::on_tick();
+    crate::interrupt_forward::notify(crate::apic::TIMER_VECTOR);
     crate::thread::schedule();
 }
 

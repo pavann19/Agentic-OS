@@ -23,6 +23,38 @@
 //! (it lands on the TSS's second 8-byte slot) is fine.
 
 use crate::klog_info;
+use crate::{capability, ipc};
+
+// Phase 2's syscall-surface proof: a dedicated table/capability reachable
+// from ring 3 via syscall number 2, independent of the kernel-thread-level
+// capability demo in main.rs (deliberately not reusing that demo's state —
+// it revokes its own capability partway through, which would make this
+// syscall path's success order-dependent on unrelated demo internals).
+static mut RING3_IPC_TABLE: Option<capability::CapabilityTable> = None;
+static RING3_SEND_CAP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// One-time setup so syscall number 2 (below) has a real capability to
+/// invoke. Called once from main.rs before entering ring 3.
+pub fn init_ring3_ipc_demo() -> capability::CapId {
+    unsafe {
+        RING3_IPC_TABLE = Some(capability::CapabilityTable::new());
+        let table = (&mut *&raw mut RING3_IPC_TABLE).as_mut().unwrap();
+        let cap = ipc::create_endpoint(
+            table,
+            capability::Rights::SEND.union(capability::Rights::RECEIVE),
+        );
+        RING3_SEND_CAP.store(cap, core::sync::atomic::Ordering::SeqCst);
+        cap
+    }
+}
+
+pub fn ring3_ipc_table() -> &'static capability::CapabilityTable {
+    unsafe { (*(&raw const RING3_IPC_TABLE)).as_ref().unwrap() }
+}
+
+pub fn ring3_send_cap() -> capability::CapId {
+    RING3_SEND_CAP.load(core::sync::atomic::Ordering::SeqCst)
+}
 
 const IA32_EFER: u32 = 0xC000_0080;
 const IA32_STAR: u32 = 0xC000_0081;
@@ -69,6 +101,27 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, _a1: u64) -> u64 {
             klog_info!("SYSCALL_LOG value=0x{:x}", a0);
             0
         }
+        2 => {
+            // Phase 2's syscall-surface proof: a ring-3 process invoking a
+            // REAL capability-gated kernel operation (IPC send) through
+            // the syscall path, not just a kernel thread calling ipc::send
+            // directly. `a0` is the message payload. Capability
+            // enforcement is not bypassed for syscalls — this still goes
+            // through the exact same `CapabilityTable::resolve` every
+            // other caller does; a ring-3 process gets nothing syscalls
+            // don't explicitly grant it.
+            let table = ring3_ipc_table();
+            let cap = RING3_SEND_CAP.load(core::sync::atomic::Ordering::SeqCst);
+            let mut msg = ipc::Message::default();
+            msg.data[0] = a0;
+            match ipc::send(table, cap, msg) {
+                Ok(()) => {
+                    klog_info!("SYSCALL_IPC_SEND delivered value=0x{:x}", a0);
+                    0
+                }
+                Err(_) => u64::MAX,
+            }
+        }
         _ => {
             klog_info!("SYSCALL_UNKNOWN num={}", num);
             u64::MAX
@@ -90,6 +143,17 @@ extern "C" fn syscall_entry() {
         "mov rsp, [{kernel_rsp}]",   // switch onto the kernel stack
         "push rcx",                  // user RIP (SYSCALL-saved) — must survive to sysretq
         "push r11",                  // user RFLAGS (SYSCALL-saved) — same
+        // Real bug this session found: IA32_FMASK clears IF on SYSCALL
+        // entry, and dispatch is free to call blocking operations
+        // (ipc::send/receive spin-yield via hlt, waiting for another
+        // thread to run) — with interrupts still masked, the timer can
+        // never fire, schedule() never runs, and a blocking syscall
+        // deadlocks the entire machine forever. `sti` here, AFTER the two
+        // pushes above are safely on the kernel stack, fixes it — same
+        // STI-shadow reasoning as thread.rs's switch_to (the enable
+        // doesn't take effect until after the NEXT instruction), so
+        // nothing can be preempted mid-push.
+        "sti",
         // Syscall args arrive in rdi/rsi/rdx/r10/r8/r9 (Linux convention,
         // r10 not rcx — rcx is consumed by SYSCALL itself); num is in rax.
         // syscall_dispatch(num=rax, a0=rdi, a1=rsi) via the C calling
@@ -103,6 +167,17 @@ extern "C" fn syscall_entry() {
         // return value already in rax, exactly where sysretq's caller expects it
         "pop r11",
         "pop rcx",
+        // `cli` before swapping onto the user's own stack: right after
+        // that swap, RSP holds a user-space address but CS is STILL the
+        // kernel selector (sysretq hasn't run yet) — CPL is still 0, so
+        // an interrupt landing in that window would push its frame using
+        // the CURRENT RSP (no privilege-change stack switch happens,
+        // because CPL isn't changing), i.e. onto the USER's stack from
+        // kernel context. `cli` closes that window; sysretq itself
+        // restores IF from R11 (the user's original RFLAGS, IF=1) the
+        // instant it lands back in ring 3, so nothing stays disabled
+        // longer than this narrow gap.
+        "cli",
         "mov rsp, [{user_rsp}]",     // back onto the user's own stack
         "sysretq",
         user_rsp = sym USER_RSP_SCRATCH,
