@@ -177,7 +177,52 @@ pub struct SystemTable {
     pub std_err: *mut c_void,
     pub runtime_services: *mut c_void,
     pub boot_services: *mut BootServices,
-    // ConfigurationTable/NumberOfTableEntries follow; not needed yet.
+    pub number_of_table_entries: usize,
+    pub configuration_table: *mut EfiConfigurationTableEntry,
+}
+
+#[repr(C)]
+pub struct EfiConfigurationTableEntry {
+    pub vendor_guid: Guid,
+    pub vendor_table: *mut c_void,
+}
+
+// ACPI 2.0+ RSDP GUID (EFI_ACPI_20_TABLE_GUID): 8868e871-e4f1-11d3-bc22-0080c73c8881
+pub const ACPI_20_TABLE_GUID: Guid = Guid(
+    0x8868e871,
+    0xe4f1,
+    0x11d3,
+    [0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81],
+);
+// ACPI 1.0 RSDP GUID (fallback if 2.0 isn't present): eb9d2d30-2d88-11d3-9a16-0050da3455c
+pub const ACPI_10_TABLE_GUID: Guid = Guid(
+    0xeb9d2d30,
+    0x2d88,
+    0x11d3,
+    [0x9a, 0x16, 0x00, 0x50, 0xda, 0x34, 0x55, 0x53],
+);
+
+/// Walks the UEFI configuration table looking for the ACPI RSDP,
+/// preferring the ACPI 2.0+ GUID (XSDT, 64-bit pointers) over the 1.0
+/// fallback (RSDT only). Returns null if neither is present — some very
+/// minimal/malformed firmware could theoretically omit both, though real
+/// hardware and OVMF always provide at least one.
+pub unsafe fn find_rsdp(system_table: &SystemTable) -> *mut c_void {
+    let mut fallback: *mut c_void = core::ptr::null_mut();
+    for i in 0..system_table.number_of_table_entries {
+        let entry = &*system_table.configuration_table.add(i);
+        if guid_eq(entry.vendor_guid, ACPI_20_TABLE_GUID) {
+            return entry.vendor_table;
+        }
+        if guid_eq(entry.vendor_guid, ACPI_10_TABLE_GUID) {
+            fallback = entry.vendor_table;
+        }
+    }
+    fallback
+}
+
+fn guid_eq(a: Guid, b: Guid) -> bool {
+    a.0 == b.0 && a.1 == b.1 && a.2 == b.2 && a.3 == b.3
 }
 
 pub fn print(con_out: *mut SimpleTextOutputProtocol, s: &str) {

@@ -324,6 +324,7 @@ pub unsafe fn prepare_boot(
     (*boot_info).magic = BOOTINFO_MAGIC;
     (*boot_info).version = BOOTINFO_VERSION;
     (*boot_info).size = core::mem::size_of::<BootInfo>() as u32;
+    let rsdp = find_rsdp(system_table);
     (*boot_info).payload = BootInfoPayload {
         framebuffer,
         font,
@@ -331,7 +332,7 @@ pub unsafe fn prepare_boot(
         memory_map_size: 0,
         memory_map_descriptor_size: 0,
         memory_map_descriptor_version: 0,
-        rsdp: ptr::null_mut(),
+        rsdp,
         kernel_physical_start: kernel.kernel_start,
         kernel_physical_end: kernel.kernel_end,
         kernel_virtual_base: 0,

@@ -13,6 +13,7 @@
 
 extern crate alloc;
 
+pub mod acpi;
 pub mod apic;
 pub mod audit;
 pub mod bootinfo;
@@ -31,6 +32,7 @@ pub mod fault_injection;
 pub mod gdt;
 pub mod heap;
 pub mod idt;
+pub mod iommu;
 pub mod klog;
 pub mod pci;
 pub mod pic;
@@ -130,6 +132,20 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     unsafe { vmm::init(info, &segments, current_rsp) };
     klog_info!("VMM_INIT_DONE");
 
+    // Real bug this session found: `info` was validated against the
+    // BOOTSTRAP identity mapping boot_rs set up, back before this line —
+    // once vmm::init() switches to the kernel's own production tables
+    // (which do NOT identity-map arbitrary physical memory, only kernel
+    // segments + the direct-map window + heap + MMIO), the OLD `info`
+    // reference silently points at now-unmapped memory. Every use of it
+    // between here and the actual crash happened to not touch it again
+    // until Phase 3's ACPI code did — manifested as a page fault reading
+    // BootInfo's own rsdp field. Fixed by re-deriving a reference through
+    // the direct-map window (the same translation pmm.rs uses for every
+    // other post-switch physical access), which stays valid for the rest
+    // of the kernel's lifetime.
+    let info: &BootInfo = unsafe { &*(pmm::p2v_pub(boot_info as u64) as *const BootInfo) };
+
     #[cfg(any(
         feature = "fault_test_null_deref",
         feature = "fault_test_rodata_write",
@@ -171,6 +187,43 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     let pci_devices = pci::enumerate();
     pci::log_all(&pci_devices);
     klog_info!("PCI_ENUMERATE_DONE count={}", pci_devices.len());
+
+    // Phase 3: ACPI table discovery -- the real RSDP boot_rs found via the
+    // UEFI configuration table, walked to find DMAR (the IOMMU's register
+    // base) for the item below.
+    klog_info!("ACPI_INIT_START rsdp=0x{:x}", info.payload.rsdp as u64);
+    let xsdt = acpi::init(info.payload.rsdp as u64);
+    match xsdt {
+        Some(xsdt_phys) => {
+            klog_info!("ACPI_INIT_DONE xsdt=0x{:x}", xsdt_phys);
+            match acpi::find_table(xsdt_phys, b"DMAR") {
+                Some(dmar_phys) => {
+                    klog_info!("ACPI_DMAR_FOUND phys=0x{:x}", dmar_phys);
+                    klog_info!("IOMMU_INIT_START");
+                    if iommu::init(dmar_phys) {
+                        klog_info!("IOMMU_INIT_DONE");
+                        // Real domain assignment for a real device this
+                        // session's own PCI enumeration found: the SATA/
+                        // AHCI controller (00:1f.2). Grants it exactly one
+                        // 4KB physical page -- everything else on the
+                        // system stays unreachable to this device by
+                        // construction (empty page tables for any address
+                        // outside this range), not by kernel-side policy.
+                        let dma_buffer_phys = unsafe { pmm::alloc_page() };
+                        let _domain = iommu::assign_device(0, 0x1f, 2, &[(dma_buffer_phys, 4096)]);
+                        klog_info!(
+                            "IOMMU_DOMAIN_ASSIGNED device=00:1f.2 mapped_phys=0x{:x} len=4096",
+                            dma_buffer_phys
+                        );
+                    } else {
+                        klog_info!("IOMMU_INIT_FAILED");
+                    }
+                }
+                None => klog_info!("ACPI_DMAR_NOT_FOUND (no IOMMU exposed by firmware)"),
+            }
+        }
+        None => klog_info!("ACPI_INIT_FAILED"),
+    }
 
     // Drains events::pop() in normal (non-interrupt) context — proves the
     // producer (h_timer, interrupt context)/consumer (here) path works

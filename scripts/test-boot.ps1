@@ -43,8 +43,9 @@ New-Item -ItemType Directory -Force -Path (Split-Path $SerialLog) | Out-Null
 # space in it, so it must be quoted manually here or qemu sees it split
 # into two argv entries ("C:\Program" / "Files\...") and fails to find it.
 $qemuArgs = @(
-    "-machine", "q35",
+    "-machine", "q35,kernel-irqchip=split",
     "-m", "256M",
+    "-device", "intel-iommu,intremap=on",
     "-drive", "if=pflash,format=raw,readonly=on,file=`"$OvmfCode`"",
     "-drive", "file=fat:rw:$FatDir,format=raw",
     "-serial", "file:$SerialLog",
