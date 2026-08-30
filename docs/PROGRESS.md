@@ -246,7 +246,7 @@ pass with zero regression; the `demo_ring3` feature build (gated, same as
 Phase 1's ring-3 proof) shows the complete capability→IPC→syscall→ring-3
 round-trip, including surviving a real timer preemption mid-syscall.
 
-## Phase 3 — User-Space Driver Framework (6/7 items complete, 1 partial (2/3 drivers) — IN PROGRESS)
+## Phase 3 — User-Space Driver Framework (6/7 items complete — IN PROGRESS)
 
 Depends on Phase 2 (done). Started 2026-08-30.
 
@@ -304,9 +304,9 @@ Depends on Phase 2 (done). Started 2026-08-30.
       need the ELF loader the next item below will build; duplicating
       that loader here just to move this one process to ring 3 would be
       wasted work.
-- [~] **First user-space drivers** (serial, framebuffer, PS/2 keyboard),
-      ported off the current in-kernel implementations — **serial and
-      framebuffer done, PS/2 keyboard not started.** `kernel_rs/src/elf.rs`
+- [x] **First user-space drivers** (serial, framebuffer, PS/2 keyboard),
+      ported off the current in-kernel implementations — **all three
+      done.** `kernel_rs/src/elf.rs`
       (new) is a real ELF64 loader — validates the header, walks PT_LOAD
       program headers, maps each with the same real permission
       discipline every other mapper in this kernel uses.
@@ -349,9 +349,33 @@ Depends on Phase 2 (done). Started 2026-08-30.
       WHOLE kernel down (exceptions still halt everything — Phase 1's
       still-open gap) before the framebuffer driver's own concurrent work
       finished; fixed by ending `init` in a benign infinite spin instead.
+      `user_rs/keyboard_driver/` (new crate) is the third: the first to
+      use a real `InterruptLine` capability from ring 3 (via a new
+      syscall pair, 5=wait/6=ack — a REAL ring-3 process blocking
+      repeatedly on an interrupt, not just a kernel thread the way
+      `interrupt_forward.rs`'s Phase 2 demo does). `pic.rs` gained a real
+      `unmask_irq()` (unmasking exactly IRQ1) and `send_eoi()`; `idt.rs`
+      gained a second non-halting handler (`h_keyboard`, vector 0x21)
+      that does the EOI + interrupt_forward-notify and deliberately does
+      NOT read the scancode itself, leaving that entirely to the driver's
+      own `PortIoRange` grant for 0x60-0x64. Verified live: `PIC:
+      unmasked IRQ1` → `USER_DRIVER_PORT_GRANTED base=0x60 count=5` →
+      the driver's own raw string (same direct-COM1-write proof
+      technique as the serial driver) → `SYSCALL_LOG value=0xb0ad`,
+      stable with all three drivers plus `init` alive concurrently (four
+      real ring-3 processes, the most this kernel has ever run at once).
+      **Honesty note, disclosed rather than hidden:** this project's
+      headless automated QEMU test harness has no way to synthesize a
+      real keystroke (no monitor/HMP scripting, `-display none`), so the
+      driver correctly sits blocked on its own `wait_interrupt` syscall
+      forever in every automated run — the right behavior for a real,
+      correctly-waiting driver with nothing to react to, not a bug. The
+      mechanism is exercised up to exactly that waiting point; the actual
+      scancode-read path is real code, verified by inspection, not by an
+      actual interrupt firing in the current automated suite.
       The *current* serial/klog code in `boot_rs/` and `kernel_rs/`
       itself still runs in the bootloader/kernel directly — correct,
-      since that's boot-time diagnostics, not this driver.
+      since that's boot-time diagnostics, not any of these drivers.
 
       **Multi-process scheduling crash — investigated, root-caused, and
       FIXED (was disclosed here as an open, unresolved issue; now
@@ -473,16 +497,21 @@ bring-up (DMAR discovery through a live translation-enabled root table and
 a real per-device DMA domain), a device manager (real classification,
 lifecycle state machine, bounded restart-on-crash), `init`/a service
 manager (a real ring-3 init process handing off to a service manager via
-a genuine capability-gated syscall), and a real ELF64 loader with two
-genuine user-space drivers running from real compiled ELF binaries (not
-hand-built machine-code blobs) — serial (real port I/O) and framebuffer
-(real MMIO, independently verified by an out-of-process kernel-side
-readback) — are done; PS/2 keyboard and Tier 2 hardware selection
-remain. A real multi-process scheduling crash, found along the way and
-initially disclosed as unresolved, has since been investigated, fully
-root-caused (three real, stacked bugs), fixed, and verified stable across
-5 consecutive clean boot runs (see the Phase 3 section above) — the
-scheduler now correctly supports multiple concurrent ring-3 processes.
+a genuine capability-gated syscall), and a real ELF64 loader with all
+three genuine user-space drivers `docs/ROADMAP.md` names, running from
+real compiled ELF binaries (not hand-built machine-code blobs) — serial
+(real port I/O), framebuffer (real MMIO, independently verified by an
+out-of-process kernel-side readback), and PS/2 keyboard (the first real
+`InterruptLine` capability held by a ring-3 process) — are done; Tier 2
+hardware selection is the one item left in Phase 3. A real multi-process
+scheduling crash, found along the way and initially disclosed as
+unresolved, has since been investigated, fully root-caused (three real,
+stacked bugs), fixed, and verified stable across many consecutive clean
+boot runs with up to four concurrent ring-3 processes alive at once (see
+the Phase 3 section above). Also closed this session: Phase 1's own
+long-open exit criterion, per-process fault isolation — a real ring-3
+fault now kills only that process, with the whole system continuing,
+verified live and repeatedly.
 Phases 4 through 8 — storage/filesystem, the agent runtime, driver
 synthesis, shell, hardware consolidation — are entirely not started. This
 is a genuinely solid, tested foundation; it is not yet an OS with a
@@ -491,11 +520,10 @@ should be read as more than what's checked above.
 
 ## Next concrete increment
 
-Phase 3 (User-Space Driver Framework), remaining items: the PS/2 keyboard
-user-space driver — needs real new mechanism beyond what serial/
-framebuffer proved (an unmasked PIC IRQ1, a new IDT vector, and syscalls
-letting a REAL ring-3 process block-wait on an `InterruptLine`
-capability, not just a one-time pre-ring-3 grant). Then Tier 2 physical
-hardware selection, the last Phase 3 item. The multi-process scheduling
-crash previously noted here as an open investigation is now fixed and
-verified (Phase 3 section above) — no longer blocking anything.
+Phase 3 (User-Space Driver Framework), one item left: Tier 2 physical
+hardware selection (`docs/ROADMAP.md` §4 — needs IOMMU present, serial
+reachable, NVMe/AHCI storage, documented chipset). Closing that finishes
+Phase 3 outright. Phases 1-3 have no other open gaps as of this update —
+the multi-process scheduling crash and Phase 1's per-process
+fault-isolation exit criterion, both previously noted as open, are fixed
+and verified (see the Phase 1/Phase 3 sections above).
