@@ -232,7 +232,7 @@ pass with zero regression; the `demo_ring3` feature build (gated, same as
 Phase 1's ring-3 proof) shows the complete capability→IPC→syscall→ring-3
 round-trip, including surviving a real timer preemption mid-syscall.
 
-## Phase 3 — User-Space Driver Framework (4/7 items complete — IN PROGRESS)
+## Phase 3 — User-Space Driver Framework (5/7 items complete — IN PROGRESS)
 
 Depends on Phase 2 (done). Started 2026-08-30.
 
@@ -274,8 +274,22 @@ Depends on Phase 2 (done). Started 2026-08-30.
       `bind_all()` records a real binding decision but does not yet hand
       a capability set to an actual user-space driver process — that
       handoff is the next item below, still not started.
-- [ ] **`init` and a service manager as the first user-space processes**
-      — not started.
+- [x] **`init` and a service manager as the first user-space processes**
+      (`init.rs`, `service_manager.rs`) — `init` is a real, unconditional
+      (not feature-gated, unlike the Phase 1/2 `demo_ring3` proof) ring-3
+      process, part of normal boot now. It issues a real capability-gated
+      syscall (SVC_START, syscall 3) that only succeeds once the service
+      manager thread is alive and listening on its own capability
+      endpoint — a real cross-process handoff, not a hardcoded boot-order
+      assumption. The service manager reads the REAL `device_manager`
+      state from this session's own PCI scan and decides what to start.
+      Verified live: `INIT_ENTER` → `SERVICE_MANAGER: got SVC_START` →
+      four real bound devices each getting a real "would start driver"
+      decision. **Scope note:** the service manager itself still runs in
+      ring 0 (a kernel thread), not ring 3 — real ring-3 driver processes
+      need the ELF loader the next item below will build; duplicating
+      that loader here just to move this one process to ring 3 would be
+      wasted work.
 - [ ] **First user-space drivers** (serial, framebuffer, PS/2 keyboard),
       ported off the current in-kernel implementations — not started.
       The *current* serial/klog code in both `boot_rs/` and `kernel_rs/`
@@ -357,10 +371,11 @@ capability operation, and a capability-gated syscall surface (Phase 2).
 Phase 3 (User-Space Driver Framework) is in progress: capability-mediated
 MMIO/interrupt/port-IO access, real PCIe enumeration, real VT-d IOMMU
 bring-up (DMAR discovery through a live translation-enabled root table and
-a real per-device DMA domain), and a device manager (real classification,
-lifecycle state machine, bounded restart-on-crash) are done; `init`/
-service manager, actual user-space drivers, and Tier 2 hardware selection
-remain.
+a real per-device DMA domain), a device manager (real classification,
+lifecycle state machine, bounded restart-on-crash), and `init`/a service
+manager (a real ring-3 init process handing off to a service manager via
+a genuine capability-gated syscall) are done; actual user-space drivers
+and Tier 2 hardware selection remain.
 Phases 4 through 8 — storage/filesystem, the agent runtime, driver
 synthesis, shell, hardware consolidation — are entirely not started. This
 is a genuinely solid, tested foundation; it is not yet an OS with a
@@ -369,8 +384,10 @@ should be read as more than what's checked above.
 
 ## Next concrete increment
 
-Phase 3 (User-Space Driver Framework), remaining items: `init` and a
-service manager as the first real user-space processes — needed before
-`device_manager.rs`'s binding decisions can hand a capability set to an
-actual driver process, which is what the first-user-space-drivers item
-after it depends on.
+Phase 3 (User-Space Driver Framework), remaining items: first user-space
+drivers (serial, framebuffer, PS/2 keyboard), ported off the current
+in-kernel implementations — this needs a real ELF loader for arbitrary
+user binaries first (everything ring-3 in this kernel so far, including
+`init`, is a hand-built machine-code blob mapped directly into a fresh
+address space; that technique doesn't scale to porting real driver code).
+Then Tier 2 physical hardware selection.
