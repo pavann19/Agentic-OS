@@ -74,6 +74,24 @@ pub struct DeviceManager {
     pub devices: Vec<ManagedDevice>,
 }
 
+// Single-core simplification, same pattern and same justification as
+// syscall.rs's RING3_IPC_TABLE/INIT_SVC_TABLE: one kernel-wide instance,
+// reachable via a raw-pointer accessor rather than a lock, because there
+// is exactly one core to race with itself. Revisit before SMP, same as
+// every other kernel-wide `static mut` in this codebase.
+static mut GLOBAL: Option<DeviceManager> = None;
+
+/// Installs the `DeviceManager` main.rs builds from the real PCI scan as
+/// the kernel-wide instance `service_manager.rs` reads from. Called once,
+/// after `discover()`/`bind_all()` have already populated it.
+pub fn install_global(dm: DeviceManager) {
+    unsafe { GLOBAL = Some(dm) };
+}
+
+pub fn global() -> &'static mut DeviceManager {
+    unsafe { (&mut *&raw mut GLOBAL).as_mut().unwrap() }
+}
+
 impl DeviceManager {
     pub fn new() -> Self {
         Self { devices: Vec::new() }
@@ -157,6 +175,13 @@ impl DeviceManager {
         self.devices.iter_mut().find(|d| {
             d.pci.bus == bus && d.pci.device == device && d.pci.function == function
         })
+    }
+
+    /// The devices currently in `Bound` state — what a real service
+    /// manager (`service_manager.rs`) would actually start a driver
+    /// process for.
+    pub fn bound_devices(&self) -> impl Iterator<Item = &ManagedDevice> {
+        self.devices.iter().filter(|d| d.state == DeviceState::Bound)
     }
 
     pub fn log_summary(&self) {

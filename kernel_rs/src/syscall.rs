@@ -56,6 +56,38 @@ pub fn ring3_send_cap() -> capability::CapId {
     RING3_SEND_CAP.load(core::sync::atomic::Ordering::SeqCst)
 }
 
+// Phase 3's init->service-manager handoff: a second, separate capability
+// table/endpoint from the Phase 2 demo above — deliberately not reusing
+// RING3_IPC_TABLE, since that demo's capability gets revoked partway
+// through its own run and this path must stay correct independent of
+// that unrelated demo's internal state (same reasoning noted for
+// RING3_IPC_TABLE itself).
+static mut INIT_SVC_TABLE: Option<capability::CapabilityTable> = None;
+static INIT_SVC_CAP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// One-time setup so syscall number 3 (below) has a real capability to
+/// invoke. Called once from main.rs before spawning the init process.
+pub fn init_service_ipc() -> capability::CapId {
+    unsafe {
+        INIT_SVC_TABLE = Some(capability::CapabilityTable::new());
+        let table = (&mut *&raw mut INIT_SVC_TABLE).as_mut().unwrap();
+        let cap = ipc::create_endpoint(
+            table,
+            capability::Rights::SEND.union(capability::Rights::RECEIVE),
+        );
+        INIT_SVC_CAP.store(cap, core::sync::atomic::Ordering::SeqCst);
+        cap
+    }
+}
+
+pub fn init_svc_table() -> &'static capability::CapabilityTable {
+    unsafe { (*(&raw const INIT_SVC_TABLE)).as_ref().unwrap() }
+}
+
+pub fn init_svc_cap() -> capability::CapId {
+    INIT_SVC_CAP.load(core::sync::atomic::Ordering::SeqCst)
+}
+
 const IA32_EFER: u32 = 0xC000_0080;
 const IA32_STAR: u32 = 0xC000_0081;
 const IA32_LSTAR: u32 = 0xC000_0082;
@@ -117,6 +149,26 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, _a1: u64) -> u64 {
             match ipc::send(table, cap, msg) {
                 Ok(()) => {
                     klog_info!("SYSCALL_IPC_SEND delivered value=0x{:x}", a0);
+                    0
+                }
+                Err(_) => u64::MAX,
+            }
+        }
+        3 => {
+            // Phase 3's init->service-manager handoff: the real `init`
+            // process (init.rs, unconditional part of normal boot, not
+            // feature-gated like the demo_ring3 proof) tells the service
+            // manager it's ready via this real capability-gated IPC send
+            // — same enforcement discipline as syscall 2, a distinct
+            // capability table so this path's correctness doesn't depend
+            // on any other demo's internal state.
+            let table = init_svc_table();
+            let cap = INIT_SVC_CAP.load(core::sync::atomic::Ordering::SeqCst);
+            let mut msg = ipc::Message::default();
+            msg.data[0] = a0;
+            match ipc::send(table, cap, msg) {
+                Ok(()) => {
+                    klog_info!("SYSCALL_SVC_START token=0x{:x}", a0);
                     0
                 }
                 Err(_) => u64::MAX,
@@ -186,7 +238,17 @@ extern "C" fn syscall_entry() {
     );
 }
 
+static SYSCALL_INITIALIZED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Idempotent: init.rs's real init process and the feature-gated
+/// demo_ring3 proof can both run in the same build and each call this
+/// once before entering ring 3 for the first time. Re-running the MSR
+/// writes with the same values would be harmless anyway, but this avoids
+/// a confusing duplicate "initialized" log line.
 pub fn init() {
+    if SYSCALL_INITIALIZED.swap(true, core::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     unsafe {
         let efer = rdmsr(IA32_EFER);
         wrmsr(IA32_EFER, efer | EFER_SCE);

@@ -20,6 +20,7 @@ pub mod bootinfo;
 pub mod capability;
 pub mod device_manager;
 pub mod driver;
+pub mod init;
 pub mod events;
 pub mod interrupt_forward;
 pub mod ipc;
@@ -38,9 +39,9 @@ pub mod klog;
 pub mod pci;
 pub mod pic;
 pub mod pmm;
-#[cfg(feature = "demo_ring3")]
 pub mod ring3;
 pub mod serial;
+pub mod service_manager;
 pub mod syscall;
 pub mod thread;
 pub mod vmm;
@@ -211,7 +212,17 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         devmgr.mark_running(0, 0x1f, 2);
     }
     devmgr.log_summary();
+    device_manager::install_global(devmgr);
     klog_info!("DEVMGR_INIT_DONE");
+
+    // Phase 3: init and a service manager as the first user-space
+    // processes. spawn_init() starts service_manager_thread (kernel-side
+    // for now -- see service_manager.rs's honesty note) and a REAL ring-3
+    // `init` process; the two rendezvous through a real capability-gated
+    // syscall (SVC_START), not a hardcoded boot-order assumption.
+    klog_info!("INIT_SPAWN_START");
+    init::spawn_init();
+    klog_info!("INIT_SPAWN_DONE");
 
     // Phase 3: ACPI table discovery -- the real RSDP boot_rs found via the
     // UEFI configuration table, walked to find DMAR (the IOMMU's register
