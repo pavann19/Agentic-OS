@@ -232,15 +232,67 @@ pass with zero regression; the `demo_ring3` feature build (gated, same as
 Phase 1's ring-3 proof) shows the complete capability→IPC→syscall→ring-3
 round-trip, including surviving a real timer preemption mid-syscall.
 
-## Phase 3 — User-Space Driver Framework — Not started
+## Phase 3 — User-Space Driver Framework (3/7 items complete — IN PROGRESS)
 
-Depends on Phase 2. IOMMU bring-up (ADR-006, hard gate), PCIe enumeration,
-device manager, `init`, first user-space drivers (serial/framebuffer/PS2),
-Tier 2 physical hardware selection — none started. Notably: the *current*
-serial/klog code in both `boot_rs/` and `kernel_rs/` runs in the bootloader
-and kernel directly (correct for where they are now — this is boot-time
-diagnostics, not a driver), not as a user-space driver — that move happens
-here, later.
+Depends on Phase 2 (done). Started 2026-08-30.
+
+- [x] **Driver process model: MMIO/interrupt/port-IO capabilities**
+      (`driver.rs`, extends `capability.rs`) — three new
+      `KernelObjectKind` variants (`MmioRegion`, `InterruptLine`,
+      `PortIoRange`), each mediated through the same `CapabilityTable`
+      the rest of the kernel uses — no separate driver-privilege path.
+      `map_mmio`/`wait_interrupt`/`ack_interrupt`/`grant_port_access` all
+      resolve through a capability first; a real TSS I/O Permission
+      Bitmap (1024 ports, COM1 included) backs port-IO grants — not a
+      blanket `IOPL=3`.
+- [x] **Real PCIe enumeration** (`pci.rs`) — Configuration Mechanism #1
+      (CF8/CFC), full 256-bus × 32-device × 8-function scan. Verified
+      live: found exactly the 6 real devices QEMU's Q35 machine actually
+      exposes (host bridge, VGA, an unnamed 0x8086/0x10d3 function, ICH9
+      LPC, ICH9 SATA/AHCI at 00:1f.2, ICH9 SMBus) — not a stub list.
+- [x] **IOMMU bring-up** (ADR-006 hard gate) (`acpi.rs`, `iommu.rs`) —
+      real ACPI RSDP/XSDT walk to find the DMAR table, real DRHD MMIO
+      register discovery and mapping, real GCMD/GSTS hardware handshake
+      (SRTP+poll RTPS, TE+poll TES), real per-device DMA domain page
+      tables, `assign_device()` used against the actual SATA controller
+      `pci::enumerate()` found (00:1f.2). Verified live: translation
+      enabled, root table live, domain assigned with a real mapped
+      range. **Scope note:** this proves the register-level mechanism
+      end-to-end; it does not yet prove *behavioral* containment (an
+      actual illegal DMA attempt being blocked and logged), since no
+      DMA-capable driver exists yet to generate one — deferred to when a
+      real AHCI driver exists to exercise it.
+- [ ] **Device manager** — discovery, driver binding, lifecycle,
+      restart-on-crash. Not started; natural next item, since it
+      consumes the PCI enumeration + capability primitives above.
+- [ ] **`init` and a service manager as the first user-space processes**
+      — not started.
+- [ ] **First user-space drivers** (serial, framebuffer, PS/2 keyboard),
+      ported off the current in-kernel implementations — not started.
+      The *current* serial/klog code in both `boot_rs/` and `kernel_rs/`
+      still runs in the bootloader and kernel directly (correct for
+      where they are now — boot-time diagnostics, not a driver); that
+      move happens here.
+- [ ] **Tier 2 physical machine selected and brought to serial output**
+      (`docs/ROADMAP.md` §4 — needs IOMMU present, serial reachable,
+      NVMe/AHCI storage, documented chipset) — not started.
+
+**Three real bugs found and fixed this phase so far:** (1) `info:
+&BootInfo`, validated under `boot_rs`'s bootstrap identity mapping, was
+read again after `vmm::init()` switched CR3 to the kernel's production
+tables — the old mapping no longer existed and the reference silently
+dangled; fixed by re-deriving the reference through
+`pmm::p2v_pub(boot_info as u64)` post-init. (2) E0793 "reference to field
+of packed struct is unaligned" on DMAR remapping-structure fields — Rust
+nightly hard-errors on this now; fixed with
+`core::ptr::read_unaligned(core::ptr::addr_of!(...))`. (3) QEMU's default
+`-machine q35` exposes no IOMMU/DMAR table at all; fixed by adding
+`-device intel-iommu,intremap=on` and `kernel-irqchip=split` to
+`scripts/test-boot.ps1`.
+
+`make clean && make test-boot && make test-host` plus the fault
+injection suite all pass with zero regression against this phase's work
+so far.
 
 ## Phase 4 — Storage And Filesystem — Not started
 
@@ -287,16 +339,26 @@ timer with a deferred-event queue, all 32 CPU exceptions handled with a
 correct IST-based double-fault path, a real host test suite, and a real
 fault-injection suite — all passing from a fully clean tree
 (`make clean && make test-boot && make test-host` plus the fault suite).
-Phases 1 through 8 — execution model, capabilities, drivers, storage,
-the agent runtime, driver synthesis, shell, hardware consolidation — are
-entirely not started. This is a genuinely solid, tested foundation; it is
-not yet an OS that runs a second process, has a filesystem, or does
-anything an agent could use — no claim on this page should be read as more
-than what's checked above.
+Phases 1 and 2 are also complete and evidenced: a preemptive kernel
+scheduler with real isolated per-process address spaces, ring 3 execution,
+`SYSCALL`/`SYSRET`, and process lifecycle (Phase 1); then a full
+capability-based security model with generation-counter revocation,
+capability-gated synchronous IPC, a kernel audit log wired into every
+capability operation, and a capability-gated syscall surface (Phase 2).
+Phase 3 (User-Space Driver Framework) is in progress: capability-mediated
+MMIO/interrupt/port-IO access, real PCIe enumeration, and real VT-d IOMMU
+bring-up (DMAR discovery through a live translation-enabled root table and
+a real per-device DMA domain) are done; the device manager, `init`/service
+manager, actual user-space drivers, and Tier 2 hardware selection remain.
+Phases 4 through 8 — storage/filesystem, the agent runtime, driver
+synthesis, shell, hardware consolidation — are entirely not started. This
+is a genuinely solid, tested foundation; it is not yet an OS with a
+filesystem or a real user-space driver running — no claim on this page
+should be read as more than what's checked above.
 
 ## Next concrete increment
 
-Phase 1 (Execution Model): kernel threads, per-process address spaces,
-ring 3 execution, `SYSCALL`/`SYSRET`, process lifecycle. Not started as of
-this update — see `MORNING_SUMMARY.md` for why this session stopped at
-Phase 0 rather than continuing into it.
+Phase 3 (User-Space Driver Framework), remaining items: the device
+manager (discovery, driver binding, lifecycle, restart-on-crash) is next
+— it's the natural dependency for the first user-space drivers, and
+`init`/service-manager work, that follow it.
