@@ -57,6 +57,12 @@ pub struct Thread {
     /// this is stale; the real RSP is wherever the CPU currently has it.
     saved_rsp: u64,
     _stack: Box<[u8]>, // keeps the stack allocation alive for the thread's lifetime
+    /// Physical address of this thread's PML4. Kernel-only threads (the
+    /// common case so far) all share `vmm::kernel_pml4_phys()` — no
+    /// isolation needed between them, they're all equally trusted. A
+    /// thread bound to a process (`vmm::new_address_space()`) gets its own,
+    /// isolated from every other process's.
+    pub address_space: u64,
 }
 
 static mut NEXT_TID: ThreadId = 1;
@@ -110,6 +116,14 @@ extern "C" fn thread_trampoline() -> ! {
 /// call `enqueue` (or rely on `spawn`, which does both) separately if
 /// that's not what's wanted.
 pub fn spawn(entry: extern "C" fn()) -> ThreadId {
+    spawn_in(entry, crate::vmm::kernel_pml4_phys())
+}
+
+/// Same as `spawn`, but binds the new thread to `address_space` (from
+/// `vmm::new_address_space()`) instead of the shared kernel one —
+/// `schedule()` switches CR3 automatically when consecutive threads don't
+/// share an address space.
+pub fn spawn_in(entry: extern "C" fn(), address_space: u64) -> ThreadId {
     unsafe {
         let tid = NEXT_TID;
         NEXT_TID += 1;
@@ -139,6 +153,7 @@ pub fn spawn(entry: extern "C" fn()) -> ThreadId {
             state: ThreadState::Ready,
             saved_rsp: sp,
             _stack: stack,
+            address_space,
         });
 
         if threads_mut().is_none() {
@@ -227,7 +242,18 @@ pub fn schedule() {
         };
         next.state = ThreadState::Running;
         let new_rsp = next.saved_rsp;
+        let new_address_space = next.address_space;
         *current_mut() = Some(next);
+
+        // Only switch CR3 (a full non-global TLB flush) when the incoming
+        // thread actually uses a different address space than whatever is
+        // currently loaded — most switches so far are between kernel
+        // threads that all share vmm::kernel_pml4_phys(), where reloading
+        // CR3 would be pure overhead for zero isolation benefit.
+        let loaded = crate::vmm::current_cr3();
+        if new_address_space != loaded {
+            crate::vmm::switch_address_space(new_address_space);
+        }
 
         // old_rsp_slot is a raw pointer into the outgoing thread's boxed
         // Thread struct — stable regardless of the VecDeque itself
@@ -260,6 +286,7 @@ pub fn init_as_current_thread() {
             state: ThreadState::Running,
             saved_rsp: 0, // never read until this thread is switched OUT of, which fills it in
             _stack: stack,
+            address_space: crate::vmm::kernel_pml4_phys(),
         }));
     }
 }

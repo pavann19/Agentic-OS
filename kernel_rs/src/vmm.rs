@@ -46,7 +46,7 @@ pub const MMIO_VIRTUAL_BASE: u64 = 0xFFFF_FE00_0000_0000;
 const PAGE_PRESENT: u64 = 1 << 0;
 const PAGE_WRITABLE: u64 = 1 << 1;
 const PAGE_CACHE_DISABLE: u64 = 1 << 4;
-const PAGE_NO_EXECUTE: u64 = 1 << 63;
+pub const PAGE_NO_EXECUTE: u64 = 1 << 63;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 #[repr(C, align(4096))]
@@ -246,6 +246,56 @@ pub unsafe fn init(boot_info: &BootInfo, segments: &[KernelSegment], current_sta
 
 pub fn kernel_pml4_phys() -> u64 {
     unsafe { KERNEL_PML4_PHYS }
+}
+
+/// Creates a new, independent address space for a process: a fresh PML4
+/// whose upper half (indices 256-511 — the canonical-high range, exactly
+/// where x86_64's sign-extension boundary sits, not an arbitrary choice)
+/// is copied from the kernel's own PML4, and whose lower half (0-255, user
+/// space) starts completely empty. Copying only the PML4 ENTRIES (not the
+/// tables they point to) is what makes kernel mappings shared rather than
+/// duplicated — every process's PML4[256..512] points at the SAME
+/// PDPT/PD/PT structures the kernel itself uses, so kernel code/heap/
+/// direct-map/MMIO stay reachable from ring 0 no matter which process's
+/// CR3 is loaded, while user-space mappings (built by the caller into the
+/// returned PML4's lower half) are completely independent per process.
+/// Returns the new PML4's physical address.
+pub unsafe fn new_address_space() -> u64 {
+    let new_pml4_phys = pmm::alloc_page(); // already zeroed by pmm::alloc_page
+    let new_pml4 = pmm::p2v_pub(new_pml4_phys) as *mut u64;
+    let kernel_pml4 = pmm::p2v_pub(KERNEL_PML4_PHYS) as *mut u64;
+    for i in 256..512 {
+        *new_pml4.add(i) = *kernel_pml4.add(i);
+    }
+    new_pml4_phys
+}
+
+/// Maps one page into `pml4_phys`'s address space at `vaddr` -> `paddr`
+/// with the given flags — the general-purpose version of `map_page` for
+/// callers outside this module (process/user-space setup). `flags` should
+/// NOT include `PAGE_PRESENT` (added automatically); pass `PAGE_USER` for
+/// any mapping a ring-3 process needs to access itself.
+pub unsafe fn map_page_in(pml4_phys: u64, vaddr: u64, paddr: u64, flags: u64) {
+    map_page(pml4_phys, vaddr, paddr, flags);
+}
+
+pub const PAGE_USER: u64 = 1 << 2;
+
+/// Switches CR3 to `pml4_phys` — a full TLB flush (every non-global page).
+/// Callers (the scheduler) should avoid calling this when the incoming
+/// thread's address space is already the one currently loaded.
+pub unsafe fn switch_address_space(pml4_phys: u64) {
+    core::arch::asm!("mov cr3, {}", in(reg) pml4_phys, options(nostack, preserves_flags));
+}
+
+/// Reads the currently-loaded CR3 (physical PML4 address, low 12 bits
+/// masked off since CR3 carries PCID/flags there we don't use yet).
+pub fn current_cr3() -> u64 {
+    let cr3: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+    }
+    cr3 & 0x000F_FFFF_FFFF_F000
 }
 
 /// Maps one page into the kernel heap window (`heap.rs`'s

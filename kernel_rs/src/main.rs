@@ -181,6 +181,31 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     thread::spawn(demo_thread_b);
     klog_info!("THREADS_SPAWNED count=2");
 
+    // Phase 1: per-process address spaces. Real proof of isolation, not
+    // just "it compiles": two independent address spaces, each with a
+    // page mapped at the SAME user virtual address but backed by a
+    // DIFFERENT physical page holding different content. A thread bound
+    // to each address space reads that shared virtual address and logs
+    // what it finds — if isolation is real, they see different values
+    // despite using the identical pointer.
+    unsafe {
+        let space_a = vmm::new_address_space();
+        let page_a = pmm::alloc_page();
+        *(pmm::p2v_pub(page_a) as *mut u64) = 0xAAAA_AAAA_AAAA_AAAA;
+        vmm::map_page_in(space_a, USER_TEST_VADDR, page_a, vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE);
+
+        let space_b = vmm::new_address_space();
+        let page_b = pmm::alloc_page();
+        *(pmm::p2v_pub(page_b) as *mut u64) = 0xBBBB_BBBB_BBBB_BBBB;
+        vmm::map_page_in(space_b, USER_TEST_VADDR, page_b, vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE);
+
+        ADDRESS_SPACE_A.store(space_a, core::sync::atomic::Ordering::SeqCst);
+        ADDRESS_SPACE_B.store(space_b, core::sync::atomic::Ordering::SeqCst);
+    }
+    thread::spawn_in(demo_process_a, ADDRESS_SPACE_A.load(core::sync::atomic::Ordering::SeqCst));
+    thread::spawn_in(demo_process_b, ADDRESS_SPACE_B.load(core::sync::atomic::Ordering::SeqCst));
+    klog_info!("ADDRESS_SPACES_CREATED count=2");
+
     loop {
         unsafe {
             core::arch::asm!("hlt", options(nomem, nostack));
@@ -201,6 +226,25 @@ extern "C" fn demo_thread_a() {
         }
     }
     klog_info!("THREAD_A_DONE");
+}
+
+// extern "C" fn() thread entry points take no arguments, so the address
+// each demo process needs to read is passed via these statics instead —
+// set once before spawning, read once at thread start. A real process
+// abstraction (Phase 1's remaining "process lifecycle" item) would carry
+// this per-thread instead; this is the minimal plumbing for THIS proof.
+static ADDRESS_SPACE_A: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static ADDRESS_SPACE_B: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+const USER_TEST_VADDR: u64 = 0x0000_0000_0040_0000;
+
+extern "C" fn demo_process_a() {
+    let value = unsafe { *(USER_TEST_VADDR as *const u64) };
+    klog_info!("PROCESS_A read 0x{:x} at 0x{:x}", value, USER_TEST_VADDR);
+}
+
+extern "C" fn demo_process_b() {
+    let value = unsafe { *(USER_TEST_VADDR as *const u64) };
+    klog_info!("PROCESS_B read 0x{:x} at 0x{:x}", value, USER_TEST_VADDR);
 }
 
 extern "C" fn demo_thread_b() {
