@@ -26,6 +26,7 @@
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use core::arch::asm;
+use crate::klog_info;
 
 const KERNEL_STACK_SIZE: usize = 64 * 1024;
 
@@ -203,12 +204,41 @@ unsafe extern "C" fn switch_to(old_rsp_slot: *mut u64, new_rsp: u64) {
     );
 }
 
+// Process lifecycle: reap. Holds an exited thread's Box<Thread> between
+// the tick that switched it out and the NEXT tick that gets a chance to
+// actually drop it. Real bug this session found by tracing through what
+// switch_to() actually does: dropping an exited thread's Box INLINE,
+// on the same stack frame that's about to call switch_to() and jump
+// away from PERMANENTLY (nothing will ever resume that specific call),
+// means the destructor never runs at all — a genuine leak of the
+// thread's Box<Thread> AND its 64KB stack allocation, every single
+// time any thread exits. The standard fix (matching Linux's
+// finish_task_switch, conceptually): defer the drop to the NEXT
+// scheduling point that runs on a DIFFERENT, still-valid stack, which
+// `schedule()` reaches on every tick regardless of which thread ends
+// up resumed there.
+static mut ZOMBIE: Option<Box<Thread>> = None;
+#[allow(static_mut_refs)]
+unsafe fn zombie_mut() -> &'static mut Option<Box<Thread>> {
+    &mut *&raw mut ZOMBIE
+}
+
 /// Called from `idt.rs::h_timer` on every tick. Picks the next Ready
 /// thread round-robin and switches to it; a no-op if there's nothing else
 /// runnable yet (Phase 1's early state, before more than one thread
 /// exists) or scheduling hasn't been initialized.
 pub fn schedule() {
     unsafe {
+        // Reap whatever the PREVIOUS tick's exiting thread left behind —
+        // safe here specifically because this code is running on
+        // whichever thread got resumed this tick, never on the exited
+        // thread's own (permanently abandoned) stack.
+        if let Some(zombie) = zombie_mut().take() {
+            let reaped_id = zombie.id;
+            drop(zombie);
+            klog_info!("THREAD_REAPED id={}", reaped_id);
+        }
+
         let threads = match threads_mut().as_mut() {
             Some(t) => t,
             None => return,
@@ -226,9 +256,14 @@ pub fn schedule() {
 
         // Requeue the outgoing thread (unless it exited) before picking
         // the next one, so a single-thread system safely switches back to
-        // itself rather than finding an empty queue.
+        // itself rather than finding an empty queue. An exited thread is
+        // stashed as the zombie for the NEXT tick to reap (see above) —
+        // NOT dropped here, which would silently no-op instead of freeing
+        // anything (see ZOMBIE's doc comment for why).
         let exited = current.state == ThreadState::Exited;
-        if !exited {
+        if exited {
+            *zombie_mut() = Some(current);
+        } else {
             threads.push_back(current);
         }
 

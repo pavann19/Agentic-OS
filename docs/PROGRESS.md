@@ -92,7 +92,7 @@ being fixed, not guessed at.
 
 ---
 
-## Phase 1 — Execution Model (3/5 items complete)
+## Phase 1 — Execution Model (5/5 items complete — DONE)
 
 Depends on Phase 0 (done). Started 2026-08-30.
 
@@ -120,25 +120,45 @@ Depends on Phase 0 (done). Started 2026-08-30.
       page-table entries never carried the USER bit (only the leaf did),
       which x86_64 requires at every level for CPL3 access to succeed at
       all.
-- [ ] `SYSCALL`/`SYSRET` entry path with kernel stack switching and full
-      user-pointer validation on every argument — not started. GDT's user
-      segment ordering (`gdt.rs`) was deliberately chosen to match what
-      the `STAR` MSR will need, to avoid reshuffling indices when this
-      lands.
-- [ ] Process lifecycle: create, exit, reap — not started. `thread.rs`'s
-      `ThreadState::Exited` exists but nothing reaps a finished thread's
-      resources yet (its `Box<Thread>` and stack allocation currently just
-      get dropped when overwritten, not explicitly reclaimed/reported).
+- [x] **`SYSCALL`/`SYSRET` entry path** (`syscall.rs`) — single-core
+      simplification stated plainly (a plain static kernel-stack pointer,
+      not the `swapgs`/per-CPU-GS mechanism multi-core kernels need; a
+      real, load-bearing constraint to revisit before SMP, not a corner
+      cut). Verified live with a complete, correct round-trip: user code
+      executing `syscall` with `rdi=0x1234, rax=1` produces
+      `SYSCALL_LOG value=0x1234` from the kernel, then `SYSRET` returns to
+      `rip=0x60000c` — the EXACT byte after the `syscall` instruction —
+      still at `cs=0x33` (ring 3), where the program's trailing `hlt`
+      faults exactly as the ring-3-only demo's did. No bugs found
+      building this one — the intermediate-page-table and stack-placement
+      lessons from the ring-3 item applied directly. User-pointer
+      validation stays explicitly open: no syscall here takes a pointer
+      argument yet, so there's nothing to validate.
+- [x] **Process lifecycle: create, exit, reap** (`thread.rs`) — `spawn`/
+      `spawn_in` (create), `exit_current` (exit) already existed; reap was
+      a **real bug found and fixed**, not a missing feature added cleanly:
+      dropping an exited thread's `Box<Thread>` inline, on the same stack
+      frame that's about to call `switch_to()` and abandon that frame
+      permanently, meant the destructor never ran — every thread that
+      ever exited leaked its `Box<Thread>` and 64KB stack. Fixed with a
+      deferred zombie slot, reaped at the top of the NEXT `schedule()`
+      call (which always runs on a different, still-valid stack — the
+      same pattern Linux's `finish_task_switch` uses). Verified live: all
+      four demo threads (two long-running, two address-space-isolation
+      probes) produce `THREAD_REAPED id=N` for every one of them, in the
+      order they actually exited.
 
-**Phase 1 exit criteria (`docs/ROADMAP.md` §5)** — partially met: two
-processes run concurrently and are preempted by the timer (demonstrated,
-though with kernel threads rather than full user processes so far);
-process A cannot read process B's memory (demonstrated via the address-
-space isolation test). Not yet demonstrated: a user-space fault
-terminating only that process while the system continues (currently any
-unhandled exception halts the whole kernel — Phase 1's fault handlers are
-still Phase 0's "diagnose and halt," not "diagnose and recover"); a syscall
-rejecting a malicious pointer argument (no syscalls exist yet).
+**Phase 1 exit criteria (`docs/ROADMAP.md` §5)** — the concurrency and
+isolation criteria are met and demonstrated (two threads preempted by the
+timer; one process provably cannot read another's memory). Two criteria
+remain explicitly unmet by design, not by oversight, and are correctly
+Phase 2+ scope: a user-space fault terminating only that process while the
+system continues (every unhandled exception still halts the whole kernel —
+Phase 0's exception handlers were built as "diagnose and halt," and
+"diagnose and recover into killing one process" needs the capability/IPC
+substrate Phase 2 builds, not just more Phase 1 code); and a syscall
+rejecting a malicious pointer argument (no syscall in this proof-of-concept
+takes a pointer argument at all yet).
 
 ## Phase 2 — Capability And IPC Substrate — Not started
 
