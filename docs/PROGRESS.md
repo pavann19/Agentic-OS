@@ -148,17 +148,31 @@ Depends on Phase 0 (done). Started 2026-08-30.
       probes) produce `THREAD_REAPED id=N` for every one of them, in the
       order they actually exited.
 
-**Phase 1 exit criteria (`docs/ROADMAP.md` §5)** — the concurrency and
-isolation criteria are met and demonstrated (two threads preempted by the
-timer; one process provably cannot read another's memory). Two criteria
-remain explicitly unmet by design, not by oversight, and are correctly
-Phase 2+ scope: a user-space fault terminating only that process while the
-system continues (every unhandled exception still halts the whole kernel —
-Phase 0's exception handlers were built as "diagnose and halt," and
-"diagnose and recover into killing one process" needs the capability/IPC
-substrate Phase 2 builds, not just more Phase 1 code); and a syscall
-rejecting a malicious pointer argument (no syscall in this proof-of-concept
-takes a pointer argument at all yet).
+**Phase 1 exit criteria (`docs/ROADMAP.md` §5) — ALL MET as of the Phase
+3 session that closed the two remaining gaps.** The concurrency and
+isolation criteria were met from the start (two threads preempted by the
+timer; one process provably cannot read another's memory). The two
+criteria that stayed explicitly open through Phase 1 and Phase 2 are both
+resolved now:
+- **A user-space fault terminates only that process while the system
+  continues** — CLOSED. `idt.rs::recover_or_halt` + `thread.rs`'s
+  `kill_current_and_reschedule` (added during Phase 3, once real
+  concurrent ring-3 processes made the gap impossible to defer further):
+  any fault whose `InterruptStackFrame` shows CS's RPL was 3 kills just
+  that process (the same deferred-zombie-reap path a normal thread exit
+  uses) and reschedules immediately; a fault at CPL0 (the kernel itself)
+  still halts unconditionally — there's no safe recovery when the thing
+  faulting IS the kernel. `fault_isolation_demo.rs` is a real, permanent,
+  unconditional proof: a ring-3 process deliberately faults, and every
+  OTHER thread — driver processes, kernel-thread demos, the full audit
+  log dump — keeps running and finishing its own work afterward, visible
+  directly in the boot log as continued output past the
+  `PROCESS_KILLED` line, not silence. Verified stable across repeated
+  boot runs.
+- **A syscall rejecting a malicious pointer argument** — still correctly
+  N/A, not a gap: no syscall in this kernel takes a pointer argument yet
+  (syscalls 1-4 all take plain `u64` values), so there's nothing to
+  validate. Stays open until a syscall that actually takes one exists.
 
 ## Phase 2 — Capability And IPC Substrate (6/6 items complete — DONE)
 
@@ -444,12 +458,15 @@ timer with a deferred-event queue, all 32 CPU exceptions handled with a
 correct IST-based double-fault path, a real host test suite, and a real
 fault-injection suite — all passing from a fully clean tree
 (`make clean && make test-boot && make test-host` plus the fault suite).
-Phases 1 and 2 are also complete and evidenced: a preemptive kernel
-scheduler with real isolated per-process address spaces, ring 3 execution,
-`SYSCALL`/`SYSRET`, and process lifecycle (Phase 1); then a full
-capability-based security model with generation-counter revocation,
-capability-gated synchronous IPC, a kernel audit log wired into every
-capability operation, and a capability-gated syscall surface (Phase 2).
+Phases 1 and 2 are also complete and evidenced, with ALL Phase 1 exit
+criteria now met (the last one — a user-space fault killing only that
+process, not the whole kernel — closed during this same Phase 3 session):
+a preemptive kernel scheduler with real isolated per-process address
+spaces, ring 3 execution, `SYSCALL`/`SYSRET`, process lifecycle, AND
+per-process fault isolation (Phase 1); then a full capability-based
+security model with generation-counter revocation, capability-gated
+synchronous IPC, a kernel audit log wired into every capability
+operation, and a capability-gated syscall surface (Phase 2).
 Phase 3 (User-Space Driver Framework) is in progress: capability-mediated
 MMIO/interrupt/port-IO access, real PCIe enumeration, real VT-d IOMMU
 bring-up (DMAR discovery through a live translation-enabled root table and
