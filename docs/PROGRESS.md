@@ -246,7 +246,7 @@ pass with zero regression; the `demo_ring3` feature build (gated, same as
 Phase 1's ring-3 proof) shows the complete capability→IPC→syscall→ring-3
 round-trip, including surviving a real timer preemption mid-syscall.
 
-## Phase 3 — User-Space Driver Framework (6/7 items complete — IN PROGRESS)
+## Phase 3 — User-Space Driver Framework (6/7 items complete, 1 partial — IN PROGRESS)
 
 Depends on Phase 2 (done). Started 2026-08-30.
 
@@ -416,9 +416,24 @@ Depends on Phase 2 (done). Started 2026-08-30.
       reproducible before); full regression (`test-boot`, `test-host`
       23/23, `test-faults.ps1` 4/4 including the real double-fault case)
       stays clean.
-- [ ] **Tier 2 physical machine selected and brought to serial output**
+- [~] **Tier 2 physical machine selected and brought to serial output**
       (`docs/ROADMAP.md` §4 — needs IOMMU present, serial reachable,
-      NVMe/AHCI storage, documented chipset) — not started.
+      NVMe/AHCI storage, documented chipset) — **selection done, physical
+      bring-up not started.** `docs/TIER2_HARDWARE.md` (new) recommends
+      the Lenovo ThinkPad T480 against all four criteria with real
+      sources: Intel VT-d (standard on its mobile Core i5/i7 CPU
+      options), a real documented EC UART serial path via coreboot's own
+      mainboard support page, standard NVMe M.2 storage, and a publicly
+      documented Intel 200-series chipset. Also records what got ruled
+      out and why (most modern mini PCs fail on serial specifically, not
+      IOMMU or NVMe; the OSDev wiki's classic testing-hardware advice
+      predates the IOMMU requirement; older UART-friendly ThinkPads lack
+      native NVMe). **Honestly scoped, not glossed over:** this closes
+      the *selection* half only — "brought to serial output" requires
+      physically owning the machine and running this kernel's real boot
+      chain over a real serial line, which needs actual hardware access
+      no AI agent has. This checklist item stays open until that
+      physical step happens.
 
 **Three real bugs found and fixed this phase so far:** (1) `info:
 &BootInfo`, validated under `boot_rs`'s bootstrap identity mapping, was
@@ -503,7 +518,10 @@ real compiled ELF binaries (not hand-built machine-code blobs) — serial
 (real port I/O), framebuffer (real MMIO, independently verified by an
 out-of-process kernel-side readback), and PS/2 keyboard (the first real
 `InterruptLine` capability held by a ring-3 process) — are done; Tier 2
-hardware selection is the one item left in Phase 3. A real multi-process
+hardware SELECTION is done too (`docs/TIER2_HARDWARE.md` recommends the
+Lenovo ThinkPad T480, sourced against all four criteria) — the one thing
+left in Phase 3 is the physical bring-up itself, which needs real
+hardware access no AI agent has. A real multi-process
 scheduling crash, found along the way and initially disclosed as
 unresolved, has since been investigated, fully root-caused (three real,
 stacked bugs), fixed, and verified stable across many consecutive clean
@@ -520,10 +538,15 @@ should be read as more than what's checked above.
 
 ## Next concrete increment
 
-Phase 3 (User-Space Driver Framework), one item left: Tier 2 physical
-hardware selection (`docs/ROADMAP.md` §4 — needs IOMMU present, serial
-reachable, NVMe/AHCI storage, documented chipset). Closing that finishes
-Phase 3 outright. Phases 1-3 have no other open gaps as of this update —
-the multi-process scheduling crash and Phase 1's per-process
+Phase 3 (User-Space Driver Framework) has exactly one item left, and it
+is NOT code: physically bringing up the selected Tier 2 machine (Lenovo
+ThinkPad T480, `docs/TIER2_HARDWARE.md`) and confirming this kernel's
+real boot chain over its real serial line. That step needs the user to
+actually acquire and wire up the hardware — it cannot be completed by
+further code changes in this repository. Every OTHER Phase 3 item, and
+every Phase 1/Phase 2 exit criterion, is done and verified as of this
+update — the multi-process scheduling crash and Phase 1's per-process
 fault-isolation exit criterion, both previously noted as open, are fixed
-and verified (see the Phase 1/Phase 3 sections above).
+and verified (see the Phase 1/Phase 3 sections above). Once the physical
+bring-up happens, Phase 3 is fully done and Phase 4 (Storage And
+Filesystem) is next.
