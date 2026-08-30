@@ -1,0 +1,21 @@
+[package]
+name = "keyboard_driver"
+version = "0.1.0"
+edition = "2021"
+
+# Third real user-space driver (Phase 3): a genuine freestanding ELF64
+# binary, built completely separately from kernel_rs, loaded at runtime
+# by kernel_rs/src/elf.rs -- same pattern as serial_driver/
+# framebuffer_driver. Unlike those two, this one issues an ONGOING
+# capability-gated syscall pair (5=wait, 6=ack) instead of a one-shot
+# signal, since a keyboard genuinely produces a stream of events, not one.
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

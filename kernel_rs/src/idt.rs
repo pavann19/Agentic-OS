@@ -213,16 +213,30 @@ handler_with_ec!(h_vmm_communication, 29);
 handler_with_ec!(h_security_exception, 30);
 handler_no_ec!(h_reserved_31, 31);
 
-/// Vector 0x20 (`apic::TIMER_VECTOR`) — deliberately the only interrupt
-/// handler in this file that does NOT halt. `apic::on_tick()` increments a
-/// counter and sends EOI; nothing else yet, matching Phase 0's "deferred
+/// Vector 0x20 (`apic::TIMER_VECTOR`) — a real interrupt handler that
+/// does NOT halt (unlike every fault handler above). `apic::on_tick()`
+/// increments a counter; nothing else yet, matching Phase 0's "deferred
 /// interrupt work" principle from day one for the one interrupt source
-/// that actually exists so far (there's no rendering/parsing/scheduling
+/// that existed at the time (there's no rendering/parsing/scheduling
 /// happening here to defer — this handler is already minimal, not a case
 /// that needs fixing later like the C keyboard handler did).
 extern "x86-interrupt" fn h_timer(_frame: InterruptStackFrame) {
     crate::apic::on_tick();
     crate::interrupt_forward::notify(crate::apic::TIMER_VECTOR);
+    crate::thread::schedule();
+}
+
+/// Vector 0x21 (`pic::KEYBOARD_VECTOR`) — Phase 3's PS/2 keyboard driver.
+/// Deliberately does NOT read the scancode itself (port 0x60) — that's
+/// left entirely to the real ring-3 driver, which holds the actual
+/// `PortIoRange` capability for it (see `user_rs/keyboard_driver`); this
+/// handler's only job is the two things that MUST happen at kernel level
+/// (real hardware EOI, so the PIC can ever raise IRQ1 again; and waking
+/// whatever's blocked in `interrupt_forward::wait_for_interrupt`) — same
+/// minimal-ISR philosophy `h_timer` already documents.
+extern "x86-interrupt" fn h_keyboard(_frame: InterruptStackFrame) {
+    crate::interrupt_forward::notify(crate::pic::KEYBOARD_VECTOR);
+    crate::pic::send_eoi(1);
     crate::thread::schedule();
 }
 
@@ -262,6 +276,11 @@ pub fn init() {
     set_entry(
         crate::apic::TIMER_VECTOR as usize,
         h_timer as *const () as u64,
+        0,
+    );
+    set_entry(
+        crate::pic::KEYBOARD_VECTOR as usize,
+        h_keyboard as *const () as u64,
         0,
     );
 

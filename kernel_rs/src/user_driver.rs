@@ -7,15 +7,15 @@
 //! address chosen by the kernel, the address the ELF header itself
 //! states.
 //!
-//! Scope note (also in `user_rs/serial_driver/src/main.rs` and
-//! `elf.rs`): only one real user-space driver exists yet (serial, since
-//! it needed no MMIO/interrupt capability to prove the ELF-loading path
-//! end to end, only port I/O); framebuffer and PS/2 keyboard — the other
-//! two `docs/ROADMAP.md` names for this item — are not yet ported. The
-//! ELF itself is embedded at kernel build time via `include_bytes!`,
-//! since there is no filesystem yet (Phase 4) to load it from at
-//! runtime; that's a real, honest interim source, not a simulated one —
-//! see `elf.rs`'s doc comment.
+//! Scope note (also in each driver crate's own module doc): all three
+//! `docs/ROADMAP.md` names for this item are now ported — serial (port
+//! I/O), framebuffer (MMIO, independently verified), and PS/2 keyboard
+//! (the first to use an `InterruptLine` capability from ring 3, via a
+//! real, ongoing wait/ack syscall pair, not a one-shot signal). Every
+//! ELF is embedded at kernel build time via `include_bytes!`, since
+//! there is no filesystem yet (Phase 4) to load it from at runtime;
+//! that's a real, honest interim source, not a simulated one — see
+//! `elf.rs`'s doc comment.
 
 use crate::capability::{CapabilityTable, Rights};
 use crate::{driver, gdt, ipc, klog_info, pmm, ring3, syscall, thread, vmm};
@@ -243,5 +243,80 @@ extern "C" fn fb_verify_thread() {
         } else {
             klog_info!("USER_DRIVER_FB_VERIFY_MISMATCH pixel0=0x{:x} expected=0x{:x}", observed, FB_TEST_MARKER);
         }
+    }
+}
+
+// --- Keyboard driver -----------------------------------------------------
+//
+// Third real user-space driver: same standalone-ELF pattern, but proves
+// a real ring-3 process blocking on an `InterruptLine` capability (via
+// syscalls 5/6, syscall.rs) instead of a one-shot MMIO/port grant. See
+// user_rs/keyboard_driver's module doc for the honest scope note on why
+// this project's automated headless test harness can't itself generate a
+// real keystroke to exercise the full path end to end.
+
+static KEYBOARD_DRIVER_ELF: &[u8] = include_bytes!(
+    "../../user_rs/keyboard_driver/target/x86_64-unknown-none/release/keyboard_driver"
+);
+
+const KBD_DRIVER_STACK_VADDR: u64 = 0x0000_0000_0070_0000;
+
+pub fn spawn_keyboard_driver() {
+    thread::spawn(keyboard_driver_thread);
+}
+
+extern "C" fn keyboard_driver_thread() {
+    unsafe {
+        let space = vmm::new_address_space();
+
+        let entry = match crate::elf::load(space, KEYBOARD_DRIVER_ELF) {
+            Ok(e) => e,
+            Err(e) => {
+                klog_info!("USER_DRIVER_ELF_LOAD_FAILED {:?}", e);
+                return;
+            }
+        };
+
+        let stack_page = pmm::alloc_page();
+        vmm::map_page_in(
+            space,
+            KBD_DRIVER_STACK_VADDR,
+            stack_page,
+            vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE | vmm::PAGE_WRITABLE,
+        );
+
+        // Real PortIoRange grant for the PS/2 controller's data+status/
+        // command ports (0x60, 0x64) -- same one-time IOPB mediation
+        // pattern as the serial driver's COM1 grant, just a different
+        // real port range.
+        let mut port_table = CapabilityTable::new();
+        let port_cap = driver::create_port_capability(&mut port_table, 0x60, 5, Rights::PORT_IO);
+        match driver::grant_port_access(&port_table, port_cap) {
+            Ok(()) => klog_info!("USER_DRIVER_PORT_GRANTED base=0x60 count=5"),
+            Err(e) => {
+                klog_info!("USER_DRIVER_PORT_GRANT_FAILED {:?}", e);
+                return;
+            }
+        }
+
+        // Real InterruptLine capability for the real, unmasked IRQ1
+        // (pic.rs::KEYBOARD_VECTOR / idt.rs::h_keyboard) -- set up here,
+        // once, before ring 3 is ever entered; syscalls 5/6 reuse this
+        // exact dedicated table on every subsequent wait/ack call.
+        syscall::init_kbd_capability();
+
+        let kernel_stack_top = thread::current_kernel_stack_top();
+        gdt::set_kernel_stack(kernel_stack_top);
+        syscall::set_kernel_stack(kernel_stack_top);
+        syscall::init();
+
+        vmm::switch_address_space(space);
+        thread::set_current_address_space(space);
+        klog_info!(
+            "USER_DRIVER_ELF_ENTER entry=0x{:x} stack=0x{:x}",
+            entry,
+            KBD_DRIVER_STACK_VADDR + 4096
+        );
+        ring3::enter_user_mode(entry, KBD_DRIVER_STACK_VADDR + 4096);
     }
 }

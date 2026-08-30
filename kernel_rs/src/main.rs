@@ -177,6 +177,11 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     }
 
     pic::remap_and_mask_all(0x20, 0x28);
+    // Phase 3: PS/2 keyboard needs its real IRQ (1) unmasked -- every
+    // OTHER legacy PIC line stays masked, still fully correct for
+    // pic.rs's own "APIC timer only" reasoning above (this clears
+    // exactly one bit).
+    pic::unmask_irq(1);
     klog_info!("TIMER_INIT_START");
     apic::init();
     unsafe {
@@ -267,6 +272,14 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         );
         klog_info!("USER_DRIVER_FB_SPAWN_DONE");
     }
+
+    // Phase 3: third real user-space driver -- PS/2 keyboard, the first
+    // to use a real InterruptLine capability from ring 3 (see
+    // user_driver.rs's module doc for the honest scope note on headless
+    // automated verification).
+    klog_info!("USER_DRIVER_KBD_SPAWN_START");
+    user_driver::spawn_keyboard_driver();
+    klog_info!("USER_DRIVER_KBD_SPAWN_DONE");
 
     // Phase 1's long-deferred exit criterion, finally closed (see
     // fault_isolation_demo.rs and idt.rs::recover_or_halt): a real

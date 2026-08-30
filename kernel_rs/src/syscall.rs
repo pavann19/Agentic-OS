@@ -23,7 +23,7 @@
 //! (it lands on the TSS's second 8-byte slot) is fine.
 
 use crate::klog_info;
-use crate::{capability, ipc};
+use crate::{capability, driver, ipc};
 
 // Phase 2's syscall-surface proof: a dedicated table/capability reachable
 // from ring 3 via syscall number 2, independent of the kernel-thread-level
@@ -117,6 +117,43 @@ pub fn fb_ready_table() -> &'static capability::CapabilityTable {
 
 pub fn fb_ready_cap() -> capability::CapId {
     FB_READY_CAP.load(core::sync::atomic::Ordering::SeqCst)
+}
+
+// Phase 3's PS/2 keyboard driver: a fourth dedicated capability table,
+// same pattern as the three above -- but holding an `InterruptLine`
+// capability (`driver.rs`), not an IPC endpoint. Syscalls 5/6 below let a
+// REAL ring-3 process block-wait on it and acknowledge it repeatedly
+// (unlike syscalls 2/3/4's one-shot sends) -- the first syscall pair in
+// this kernel that mediates an ONGOING driver operation rather than a
+// single handoff.
+static mut KBD_TABLE: Option<capability::CapabilityTable> = None;
+static KBD_CAP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// One-time setup so syscalls 5/6 (below) have a real `InterruptLine`
+/// capability for `pic::KEYBOARD_VECTOR` to operate on. Called once from
+/// user_driver.rs before spawning the keyboard driver process --
+/// `driver::create_interrupt_capability` also registers the vector with
+/// `interrupt_forward`, the same real mechanism `idt.rs::h_keyboard`
+/// notifies.
+pub fn init_kbd_capability() {
+    unsafe {
+        KBD_TABLE = Some(capability::CapabilityTable::new());
+        let table = (&mut *&raw mut KBD_TABLE).as_mut().unwrap();
+        let cap = driver::create_interrupt_capability(
+            table,
+            crate::pic::KEYBOARD_VECTOR,
+            capability::Rights::WAIT,
+        );
+        KBD_CAP.store(cap, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn kbd_table() -> &'static capability::CapabilityTable {
+    unsafe { (*(&raw const KBD_TABLE)).as_ref().unwrap() }
+}
+
+fn kbd_cap() -> capability::CapId {
+    KBD_CAP.load(core::sync::atomic::Ordering::SeqCst)
 }
 
 const IA32_EFER: u32 = 0xC000_0080;
@@ -222,6 +259,29 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, _a1: u64) -> u64 {
                     klog_info!("SYSCALL_FB_READY token=0x{:x}", a0);
                     0
                 }
+                Err(_) => u64::MAX,
+            }
+        }
+        5 => {
+            // Phase 3's PS/2 keyboard driver: blocks the calling ring-3
+            // thread (via driver::wait_interrupt -> the same real
+            // interrupt_forward rendezvous idt.rs::h_keyboard notifies)
+            // until IRQ1 fires. Capability-gated identically to every
+            // other driver.rs operation -- Rights::WAIT is checked, not
+            // bypassed for being reached via syscall.
+            match driver::wait_interrupt(kbd_table(), kbd_cap()) {
+                Ok(()) => 0,
+                Err(_) => u64::MAX,
+            }
+        }
+        6 => {
+            // Distinct acknowledge step, same real/audited-separately
+            // discipline interrupt_forward.rs documents for the
+            // kernel-thread-level demo -- a real driver's "I saw the IRQ"
+            // and "I finished handling it" are genuinely different
+            // moments here too.
+            match driver::ack_interrupt(kbd_table(), kbd_cap()) {
+                Ok(()) => 0,
                 Err(_) => u64::MAX,
             }
         }
