@@ -339,25 +339,45 @@ Depends on Phase 2 (done). Started 2026-08-30.
       itself still runs in the bootloader/kernel directly — correct,
       since that's boot-time diagnostics, not this driver.
 
-      **Known issue, disclosed and NOT yet root-caused:** fixing (3)
-      above — letting `init` survive past its one-shot job instead of
-      self-destructing within a few ticks, as every ring-3 process in
-      this kernel's history did before now — surfaced a SEPARATE,
-      genuinely pre-existing bug: with two real ring-3 processes staying
-      alive concurrently for far more scheduler ticks than any previous
-      run ever exercised, a live process's own previously-working page
-      mapping eventually reports not-present, producing a page fault
-      (and, per the same still-open exception-handling gap, halting the
-      machine) some time after the interesting proof work above has
-      already completed and been logged. Confirmed via bisection to
-      already exist on the prior commit with nothing else changed —
-      NOT introduced by the framebuffer driver, the MMIO capability path,
-      or its mapping size, all of which were ruled out. Root cause not
-      yet found; does not block any driver's own proof (which completes
-      first in every observed run) or the standard regression gate (which
-      doesn't check for it), but is real, reproducible, and tracked here
-      rather than hidden — worth a dedicated investigation before Phase 3
-      is called fully done.
+      **Multi-process scheduling crash — investigated, root-caused, and
+      FIXED (was disclosed here as an open, unresolved issue; now
+      closed).** Three real, stacked bugs, found and fixed in sequence
+      (each fix changed the crash's shape rather than eliminating it,
+      which is what kept the investigation going instead of stopping
+      early): (1) `pmm.rs`'s physical-page bitmap and `heap.rs`'s
+      free-list allocator both mutated global state with interrupts
+      enabled — a preemption mid-mutation let two threads hand out the
+      same physical page or corrupt the free list; `heap.rs`'s own
+      module doc had flagged this exact gap as needing a fix before
+      Phase 1's scheduler landed, and it never was, until now. Fixed with
+      a new shared `critical::without_interrupts()` helper wrapping both
+      allocators' entire critical sections. (2) `thread.rs`'s `spawn_in`
+      mutated the SAME `THREADS` queue `schedule()` mutates from inside
+      the timer ISR, with zero protection, since `spawn_in` runs from
+      ordinary preemptible context — fixed the same way. (3) **The actual
+      root cause**, found by disassembling the exact faulting instruction
+      after (1) and (2) were fixed and the crash still reproduced,
+      deterministically, at the same `rip`/`rsp` every run:
+      `schedule()` used to write the incoming thread's CR3 itself,
+      BEFORE the stack pointer swap, while still running on the
+      OUTGOING thread's own stack. Harmless for every spawned thread
+      (heap-based stacks are shared/mapped in every address space) — but
+      thread 0 (`kernel_main` itself) runs on the original low-half
+      boot-time stack, never copied into any process's own page table.
+      The instant CR3 flipped while still on that stack (in either
+      direction), it went unmapped, and the next memory access faulted —
+      a fault that couldn't itself be delivered (the stack needed to
+      report it was the thing just unmapped), escalating to a double
+      fault. This could only ever fire the first time thread 0 and a
+      real process swapped directly, which never happened before this
+      session's driver work put multiple ring-3 processes and thread 0
+      in the same run queue for the first time. Fixed by moving the CR3
+      write INSIDE `switch_to`, after the stack pointer swap, before
+      anything touches memory through it. **Verified: 5 consecutive clean
+      `make test-boot` runs, zero exceptions each time** (was 100%
+      reproducible before); full regression (`test-boot`, `test-host`
+      23/23, `test-faults.ps1` 4/4 including the real double-fault case)
+      stays clean.
 - [ ] **Tier 2 physical machine selected and brought to serial output**
       (`docs/ROADMAP.md` §4 — needs IOMMU present, serial reachable,
       NVMe/AHCI storage, documented chipset) — not started.
@@ -441,10 +461,11 @@ genuine user-space drivers running from real compiled ELF binaries (not
 hand-built machine-code blobs) — serial (real port I/O) and framebuffer
 (real MMIO, independently verified by an out-of-process kernel-side
 readback) — are done; PS/2 keyboard and Tier 2 hardware selection
-remain. A real, disclosed, not-yet-root-caused page-table stability bug
-under sustained multi-process ring-3 scheduling was found along the way
-(see the Phase 3 section above) — tracked, not hidden, doesn't block
-what's shipped so far.
+remain. A real multi-process scheduling crash, found along the way and
+initially disclosed as unresolved, has since been investigated, fully
+root-caused (three real, stacked bugs), fixed, and verified stable across
+5 consecutive clean boot runs (see the Phase 3 section above) — the
+scheduler now correctly supports multiple concurrent ring-3 processes.
 Phases 4 through 8 — storage/filesystem, the agent runtime, driver
 synthesis, shell, hardware consolidation — are entirely not started. This
 is a genuinely solid, tested foundation; it is not yet an OS with a
@@ -458,7 +479,6 @@ user-space driver — needs real new mechanism beyond what serial/
 framebuffer proved (an unmasked PIC IRQ1, a new IDT vector, and syscalls
 letting a REAL ring-3 process block-wait on an `InterruptLine`
 capability, not just a one-time pre-ring-3 grant). Then Tier 2 physical
-hardware selection, the last Phase 3 item. Separately, the disclosed
-multi-process scheduling/page-table stability bug (Phase 3 section above)
-deserves its own dedicated root-cause investigation before Phase 3 is
-called fully done, even though it doesn't block either remaining item.
+hardware selection, the last Phase 3 item. The multi-process scheduling
+crash previously noted here as an open investigation is now fixed and
+verified (Phase 3 section above) — no longer blocking anything.
