@@ -18,6 +18,7 @@ pub mod apic;
 pub mod audit;
 pub mod bootinfo;
 pub mod capability;
+pub mod device_manager;
 pub mod driver;
 pub mod events;
 pub mod interrupt_forward;
@@ -187,6 +188,30 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     let pci_devices = pci::enumerate();
     pci::log_all(&pci_devices);
     klog_info!("PCI_ENUMERATE_DONE count={}", pci_devices.len());
+
+    // Phase 3: device manager -- discovery, driver binding, lifecycle,
+    // restart-on-crash. Consumes the real device list above; the
+    // classification, binding decisions, and lifecycle transitions below
+    // are all real, though nothing yet spawns an actual user-space
+    // driver process (the NEXT unstarted Phase 3 item) -- bind_all()
+    // records a real decision with no process behind it yet.
+    klog_info!("DEVMGR_INIT_START");
+    let mut devmgr = device_manager::DeviceManager::new();
+    devmgr.discover(&pci_devices);
+    devmgr.bind_all();
+    // Bring the real SATA/AHCI controller (00:1f.2) up to Running, then
+    // deliberately simulate a crash and recovery on it, to prove the
+    // restart-on-crash state machine against a real device entry rather
+    // than a synthetic one -- see device_manager.rs's honesty note: this
+    // proves the state machine, not that a real driver actually crashed.
+    devmgr.mark_running(0, 0x1f, 2);
+    let restarted = devmgr.report_crash(0, 0x1f, 2);
+    klog_info!("DEVMGR_SIMULATED_CRASH device=00:1f.2 restart_scheduled={}", restarted);
+    if restarted {
+        devmgr.mark_running(0, 0x1f, 2);
+    }
+    devmgr.log_summary();
+    klog_info!("DEVMGR_INIT_DONE");
 
     // Phase 3: ACPI table discovery -- the real RSDP boot_rs found via the
     // UEFI configuration table, walked to find DMAR (the IOMMU's register
