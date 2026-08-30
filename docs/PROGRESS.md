@@ -232,7 +232,7 @@ pass with zero regression; the `demo_ring3` feature build (gated, same as
 Phase 1's ring-3 proof) shows the complete capability→IPC→syscall→ring-3
 round-trip, including surviving a real timer preemption mid-syscall.
 
-## Phase 3 — User-Space Driver Framework (3/7 items complete — IN PROGRESS)
+## Phase 3 — User-Space Driver Framework (4/7 items complete — IN PROGRESS)
 
 Depends on Phase 2 (done). Started 2026-08-30.
 
@@ -262,9 +262,18 @@ Depends on Phase 2 (done). Started 2026-08-30.
       actual illegal DMA attempt being blocked and logged), since no
       DMA-capable driver exists yet to generate one — deferred to when a
       real AHCI driver exists to exercise it.
-- [ ] **Device manager** — discovery, driver binding, lifecycle,
-      restart-on-crash. Not started; natural next item, since it
-      consumes the PCI enumeration + capability primitives above.
+- [x] **Device manager** (`device_manager.rs`) — real PCI class/subclass/
+      prog_if -> `DriverKind` classification, a real per-device lifecycle
+      state machine (`Discovered -> Bound -> Running -> Crashed ->
+      Restarting -> Failed`), and a bounded restart-on-crash policy
+      (`MAX_RESTARTS=3`, then permanently `Failed` rather than retried
+      forever). Verified live: discovers and binds all 5 classifiable
+      devices from this session's own PCI scan, then a deliberately
+      simulated crash+restart cycle against the real SATA/AHCI controller
+      (00:1f.2) exercises the full state machine.  **Scope note:**
+      `bind_all()` records a real binding decision but does not yet hand
+      a capability set to an actual user-space driver process — that
+      handoff is the next item below, still not started.
 - [ ] **`init` and a service manager as the first user-space processes**
       — not started.
 - [ ] **First user-space drivers** (serial, framebuffer, PS/2 keyboard),
@@ -346,10 +355,12 @@ capability-based security model with generation-counter revocation,
 capability-gated synchronous IPC, a kernel audit log wired into every
 capability operation, and a capability-gated syscall surface (Phase 2).
 Phase 3 (User-Space Driver Framework) is in progress: capability-mediated
-MMIO/interrupt/port-IO access, real PCIe enumeration, and real VT-d IOMMU
+MMIO/interrupt/port-IO access, real PCIe enumeration, real VT-d IOMMU
 bring-up (DMAR discovery through a live translation-enabled root table and
-a real per-device DMA domain) are done; the device manager, `init`/service
-manager, actual user-space drivers, and Tier 2 hardware selection remain.
+a real per-device DMA domain), and a device manager (real classification,
+lifecycle state machine, bounded restart-on-crash) are done; `init`/
+service manager, actual user-space drivers, and Tier 2 hardware selection
+remain.
 Phases 4 through 8 — storage/filesystem, the agent runtime, driver
 synthesis, shell, hardware consolidation — are entirely not started. This
 is a genuinely solid, tested foundation; it is not yet an OS with a
@@ -358,7 +369,8 @@ should be read as more than what's checked above.
 
 ## Next concrete increment
 
-Phase 3 (User-Space Driver Framework), remaining items: the device
-manager (discovery, driver binding, lifecycle, restart-on-crash) is next
-— it's the natural dependency for the first user-space drivers, and
-`init`/service-manager work, that follow it.
+Phase 3 (User-Space Driver Framework), remaining items: `init` and a
+service manager as the first real user-space processes — needed before
+`device_manager.rs`'s binding decisions can hand a capability set to an
+actual driver process, which is what the first-user-space-drivers item
+after it depends on.
