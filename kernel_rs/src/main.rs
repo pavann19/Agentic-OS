@@ -22,6 +22,7 @@ pub mod critical;
 pub mod device_manager;
 pub mod driver;
 pub mod elf;
+pub mod fault_isolation_demo;
 pub mod init;
 pub mod events;
 pub mod interrupt_forward;
@@ -266,6 +267,16 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         );
         klog_info!("USER_DRIVER_FB_SPAWN_DONE");
     }
+
+    // Phase 1's long-deferred exit criterion, finally closed (see
+    // fault_isolation_demo.rs and idt.rs::recover_or_halt): a real
+    // ring-3 process deliberately faults here, and the log below THIS
+    // point continuing to show other threads finishing their own work is
+    // the actual proof the fault killed only this one process, not the
+    // whole kernel.
+    klog_info!("FAULT_ISOLATION_DEMO_SPAWN_START");
+    fault_isolation_demo::spawn_fault_isolation_demo();
+    klog_info!("FAULT_ISOLATION_DEMO_SPAWN_DONE");
 
     // Phase 3: ACPI table discovery -- the real RSDP boot_rs found via the
     // UEFI configuration table, walked to find DMAR (the IOMMU's register

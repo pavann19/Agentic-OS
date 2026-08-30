@@ -430,6 +430,38 @@ fn exit_current() -> ! {
     }
 }
 
+/// Kills the CURRENTLY RUNNING thread (marks it `Exited`, permanently
+/// removing it from the round-robin via the same deferred-zombie-reap
+/// path every normal thread exit already uses) and switches away
+/// IMMEDIATELY, without waiting for the next external timer tick.
+///
+/// Real Phase 1 exit-criterion this closes, unmet since Phase 1 and
+/// deferred through Phase 2 (`docs/ROADMAP.md` §5 — "a user-space fault
+/// terminates only that process while the system continues"; idt.rs's
+/// own doc comment for its fault-handler macros literally said "Phase 1+
+/// scope, once processes exist to kill" — real ring-3 processes now
+/// exist): every unhandled CPU exception used to halt the WHOLE kernel
+/// regardless of which privilege level faulted. `idt.rs`'s handlers now
+/// call this instead of halting, for any fault whose `InterruptStackFrame`
+/// shows CS's RPL was 3 (ring 3) — a kernel-mode fault still halts
+/// unconditionally, since killing "the current thread" when that thread
+/// IS the kernel acting on everyone's behalf would be actively dangerous,
+/// not a recovery.
+///
+/// Diverges in the normal case (there's always at least thread 0, the
+/// kernel's own idle loop, to switch to) — the only way this function
+/// visibly "returns" is the degenerate case where NOTHING is runnable
+/// (shouldn't happen once thread 0 exists), which callers must still
+/// treat as fatal.
+pub fn kill_current_and_reschedule() {
+    crate::critical::without_interrupts(|| unsafe {
+        if let Some(t) = current_mut().as_mut() {
+            t.state = ThreadState::Exited;
+        }
+    });
+    schedule();
+}
+
 /// One-time setup: makes the calling context (kernel_main, post-Phase-0)
 /// "thread 0" so `schedule()` has something valid to save into on the
 /// very first timer tick.

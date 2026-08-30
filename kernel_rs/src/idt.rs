@@ -100,16 +100,36 @@ fn halt_forever() -> ! {
     }
 }
 
-/// Generates a diverging (panics after reporting) `x86-interrupt` handler.
-/// Every vector handled this way for now — Phase 0's scope is "handled and
-/// diagnosable" (item 2), not "recovered from." A real fault-recovery path
-/// (killing a user process instead of halting the kernel) is Phase 1+
-/// scope, once processes exist to kill.
+/// Real Phase 1 exit-criterion closed here (see
+/// `thread::kill_current_and_reschedule`'s doc comment for the full
+/// story): a fault whose `InterruptStackFrame` shows CS's RPL was 3
+/// (ring 3 — `frame.code_segment & 0x3 == 3`) now kills ONLY the
+/// faulting process and lets the system continue, instead of halting the
+/// whole kernel like every OTHER exception (and like this same fault
+/// used to, before this fix) still does. A fault at CPL0 stays
+/// unconditionally fatal — that's the kernel itself faulting, not a
+/// process's own mistake, and there is no safe "just kill it" recovery
+/// for that.
+fn recover_or_halt(frame: &InterruptStackFrame) -> ! {
+    if frame.code_segment & 0x3 == 3 {
+        klog_error!("PROCESS_KILLED: fault occurred in ring 3 -- terminating this process, system continues");
+        crate::thread::kill_current_and_reschedule();
+        // Only reached in the degenerate case where NOTHING else was
+        // runnable (shouldn't happen once thread 0 exists) -- still
+        // fatal, just with an honest reason logged first.
+        klog_error!("PROCESS_KILLED: nothing else was runnable, halting");
+    }
+    halt_forever();
+}
+
+/// Generates a diverging `x86-interrupt` handler: reports the fault, then
+/// recovers (kills just the faulting process) or halts the whole kernel,
+/// per `recover_or_halt`'s ring-3-vs-ring-0 rule.
 macro_rules! handler_no_ec {
     ($name:ident, $vector:expr) => {
         extern "x86-interrupt" fn $name(frame: InterruptStackFrame) {
             report($vector, None, &frame);
-            halt_forever();
+            recover_or_halt(&frame);
         }
     };
 }
@@ -118,7 +138,7 @@ macro_rules! handler_with_ec {
     ($name:ident, $vector:expr) => {
         extern "x86-interrupt" fn $name(frame: InterruptStackFrame, error_code: u64) {
             report($vector, Some(error_code), &frame);
-            halt_forever();
+            recover_or_halt(&frame);
         }
     };
 }
@@ -132,6 +152,14 @@ handler_no_ec!(h_bound_range, 5);
 handler_no_ec!(h_invalid_opcode, 6);
 handler_no_ec!(h_device_not_available, 7);
 
+/// Deliberately NEVER recovers, even for a ring-3 CS — a double fault
+/// means exception delivery ITSELF failed (see `docs/PROGRESS.md`'s
+/// account of exactly this happening for a real reason earlier in this
+/// project: a corrupted/unmapped stack at the moment of an original
+/// fault). Whatever invariant let a normal fault be delivered safely
+/// enough to recover from is exactly what's in question here — killing
+/// "just the process" and continuing would be trusting a kernel-wide
+/// invariant that has already been shown to be broken. Always fatal.
 extern "x86-interrupt" fn h_double_fault(frame: InterruptStackFrame, error_code: u64) -> ! {
     report(8, Some(error_code), &frame);
     halt_forever();
@@ -164,7 +192,7 @@ extern "x86-interrupt" fn h_page_fault(frame: InterruptStackFrame, error_code: u
         error_code & 4 != 0,
         error_code & 16 != 0,
     );
-    halt_forever();
+    recover_or_halt(&frame);
 }
 
 handler_no_ec!(h_reserved_15, 15);
