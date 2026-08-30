@@ -232,7 +232,7 @@ pass with zero regression; the `demo_ring3` feature build (gated, same as
 Phase 1's ring-3 proof) shows the complete capability→IPC→syscall→ring-3
 round-trip, including surviving a real timer preemption mid-syscall.
 
-## Phase 3 — User-Space Driver Framework (5/7 items complete — IN PROGRESS)
+## Phase 3 — User-Space Driver Framework (6/7 items complete, 1 partial — IN PROGRESS)
 
 Depends on Phase 2 (done). Started 2026-08-30.
 
@@ -290,12 +290,31 @@ Depends on Phase 2 (done). Started 2026-08-30.
       need the ELF loader the next item below will build; duplicating
       that loader here just to move this one process to ring 3 would be
       wasted work.
-- [ ] **First user-space drivers** (serial, framebuffer, PS/2 keyboard),
-      ported off the current in-kernel implementations — not started.
-      The *current* serial/klog code in both `boot_rs/` and `kernel_rs/`
-      still runs in the bootloader and kernel directly (correct for
-      where they are now — boot-time diagnostics, not a driver); that
-      move happens here.
+- [~] **First user-space drivers** (serial, framebuffer, PS/2 keyboard),
+      ported off the current in-kernel implementations — **serial done,
+      framebuffer and PS/2 keyboard not started.** `kernel_rs/src/elf.rs`
+      (new) is a real ELF64 loader — validates the header, walks PT_LOAD
+      program headers, maps each with the same real permission
+      discipline every other mapper in this kernel uses. `user_rs/
+      serial_driver/` (new crate) is a genuine standalone ELF64 binary,
+      built completely separately from the kernel, doing real unmediated
+      ring-3 port I/O to COM1 after a one-time capability-gated IOPB
+      grant. Verified live, unambiguously: the driver's own raw string
+      appears DIRECTLY in the serial log, written via real `out`
+      instructions — never touched `klog_info!` — proof this is genuine
+      CPL3 code loaded from a real compiled ELF and entered at ITS entry
+      point (`0x500000`, from the ELF header), not another
+      kernel-hardcoded demo. **Real bug found and fixed:** the linker
+      script packed `.text`(RX) and `.rodata`(R) into the same page since
+      the binary is tiny; `elf.rs` maps PT_LOAD segments page-by-page, so
+      the second segment's mapping silently clobbered the first's
+      executable permission, producing an instruction-fetch `#PF` at the
+      entry point on first boot — fixed with `ALIGN(4096)` between output
+      sections (plus a `build.rs` so cargo actually re-links when
+      `linker.ld` changes, since it has no dependency edge on the linker
+      script otherwise). The *current* serial/klog code in `boot_rs/` and
+      `kernel_rs/` itself still runs in the bootloader/kernel directly —
+      correct, since that's boot-time diagnostics, not this driver.
 - [ ] **Tier 2 physical machine selected and brought to serial output**
       (`docs/ROADMAP.md` §4 — needs IOMMU present, serial reachable,
       NVMe/AHCI storage, documented chipset) — not started.
@@ -372,10 +391,12 @@ Phase 3 (User-Space Driver Framework) is in progress: capability-mediated
 MMIO/interrupt/port-IO access, real PCIe enumeration, real VT-d IOMMU
 bring-up (DMAR discovery through a live translation-enabled root table and
 a real per-device DMA domain), a device manager (real classification,
-lifecycle state machine, bounded restart-on-crash), and `init`/a service
+lifecycle state machine, bounded restart-on-crash), `init`/a service
 manager (a real ring-3 init process handing off to a service manager via
-a genuine capability-gated syscall) are done; actual user-space drivers
-and Tier 2 hardware selection remain.
+a genuine capability-gated syscall), and a real ELF64 loader with the
+first genuine user-space driver (serial, running from a real compiled
+ELF binary, not a hand-built machine-code blob) are done; framebuffer and
+PS/2 keyboard drivers and Tier 2 hardware selection remain.
 Phases 4 through 8 — storage/filesystem, the agent runtime, driver
 synthesis, shell, hardware consolidation — are entirely not started. This
 is a genuinely solid, tested foundation; it is not yet an OS with a
@@ -384,10 +405,8 @@ should be read as more than what's checked above.
 
 ## Next concrete increment
 
-Phase 3 (User-Space Driver Framework), remaining items: first user-space
-drivers (serial, framebuffer, PS/2 keyboard), ported off the current
-in-kernel implementations — this needs a real ELF loader for arbitrary
-user binaries first (everything ring-3 in this kernel so far, including
-`init`, is a hand-built machine-code blob mapped directly into a fresh
-address space; that technique doesn't scale to porting real driver code).
-Then Tier 2 physical hardware selection.
+Phase 3 (User-Space Driver Framework), remaining items: framebuffer and
+PS/2 keyboard user-space drivers (the ELF-loading path and pattern now
+exist, proven on the serial driver — porting these two is now mostly
+about MMIO/interrupt capability wiring, not new mechanism). Then Tier 2
+physical hardware selection, the last Phase 3 item.
