@@ -30,6 +30,15 @@ struct GdtDescriptor {
     base: u64,
 }
 
+// IOPB_PORTS: how many ports this TSS's I/O permission bitmap covers.
+// 1024 (0x000-0x3FF) is enough to include COM1 (0x3F8-0x3FF), the first
+// user-space driver Phase 3 targets — not all 65536 ports, since a
+// bitmap only needs to extend as far as the highest port any capability
+// will ever grant; the CPU treats any port past the TSS limit as
+// permanently denied, which is the correct default-deny posture anyway.
+const IOPB_PORTS: usize = 1024;
+const IOPB_BYTES: usize = IOPB_PORTS / 8 + 1; // +1 for the mandatory trailing all-1s byte (Intel SDM)
+
 #[repr(C, packed)]
 pub struct Tss {
     reserved0: u32,
@@ -41,6 +50,13 @@ pub struct Tss {
     reserved2: u64,
     reserved3: u16,
     iomap_base: u16,
+    /// Phase 3: real per-port grants, not full IOPL=3 (which would open
+    /// EVERY port to any ring-3 code, defeating the whole point of a
+    /// capability-gated grant). Bit N clear (0) = port N allowed at CPL3;
+    /// set (1, the default) = denied, same #GP a random port access
+    /// already gets. `driver.rs::grant_port_access` clears specific bits;
+    /// nothing else ever should.
+    pub iopb: [u8; IOPB_BYTES],
 }
 
 // Real bug this session found via `qemu -d int`: the IDT gate's IST field
@@ -76,6 +92,7 @@ static mut TSS: Tss = Tss {
     reserved2: 0,
     reserved3: 0,
     iomap_base: 0,
+    iopb: [0xFF; IOPB_BYTES], // default-deny every port
 };
 
 // A double-fault-dedicated stack, statically allocated (not via the PMM —
@@ -144,7 +161,13 @@ pub fn init() {
         let df_stack_top =
             (&raw const DOUBLE_FAULT_STACK.0) as u64 + DOUBLE_FAULT_STACK_SIZE as u64;
         TSS.ist[DOUBLE_FAULT_IST_ARRAY_INDEX] = df_stack_top;
-        TSS.iomap_base = core::mem::size_of::<Tss>() as u16; // no I/O bitmap
+        // iomap_base points AT the real iopb field now (Phase 3), not past
+        // the end of the struct — computed via pointer arithmetic so it
+        // stays correct if Tss's layout ever changes, rather than a
+        // hand-counted offset that could silently drift out of sync.
+        let tss_base_addr = (&raw const TSS) as u64;
+        let iopb_addr = (&raw const TSS.iopb) as u64;
+        TSS.iomap_base = (iopb_addr - tss_base_addr) as u16;
 
         let tss_base = (&raw const TSS) as u64;
         let tss_limit = (core::mem::size_of::<Tss>() - 1) as u32;
@@ -178,6 +201,33 @@ pub fn init() {
         core::arch::asm!("ltr ax", in("ax") 0x18u16, options(nostack, preserves_flags));
     }
     klog_info!("GDT+TSS initialized (double-fault IST stack ready)");
+}
+
+/// Clears port `port`'s bit in the IOPB, allowing ring-3 `in`/`out` on it.
+/// Callers MUST have already checked a capability grants this — this
+/// function itself has no notion of capabilities, it's the mechanism
+/// `driver.rs::grant_port_access` wraps with the actual permission check.
+pub fn allow_port(port: u16) {
+    let p = port as usize;
+    if p >= IOPB_PORTS {
+        return; // outside the bitmap's range -- permanently denied regardless
+    }
+    unsafe {
+        TSS.iopb[p / 8] &= !(1 << (p % 8));
+    }
+}
+
+/// Sets port `port`'s bit back to denied. Used by revocation — a driver
+/// whose port-I/O capability is revoked loses ACTUAL hardware access
+/// immediately, not just the capability bookkeeping.
+pub fn deny_port(port: u16) {
+    let p = port as usize;
+    if p >= IOPB_PORTS {
+        return;
+    }
+    unsafe {
+        TSS.iopb[p / 8] |= 1 << (p % 8);
+    }
 }
 
 /// Sets TSS.RSP0 — the kernel stack the CPU switches to automatically on

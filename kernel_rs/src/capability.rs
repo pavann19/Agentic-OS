@@ -47,6 +47,13 @@ impl Rights {
     pub const RECEIVE: Rights = Rights(1 << 1);
     pub const GRANT: Rights = Rights(1 << 2); // may derive/delegate this capability further
     pub const REVOKE: Rights = Rights(1 << 3); // may revoke the underlying object
+    // Phase 3: hardware-resource rights. "Nothing ambient" (docs/ROADMAP.md)
+    // means these are the ONLY way code reaches MMIO/interrupts/ports —
+    // there is no raw-pointer or bare-vector path left once a resource is
+    // wrapped as one of these kinds; see driver.rs.
+    pub const MAP: Rights = Rights(1 << 4); // may map an MmioRegion into its own address space
+    pub const WAIT: Rights = Rights(1 << 5); // may wait_for_interrupt/acknowledge an InterruptLine
+    pub const PORT_IO: Rights = Rights(1 << 6); // may issue in/out on a PortIoRange
 
     pub fn contains(self, other: Rights) -> bool {
         (self.0 & other.0) == other.0
@@ -59,12 +66,27 @@ impl Rights {
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum KernelObjectKind {
     /// An IPC endpoint — Phase 2's one concrete object kind so far. `ipc.rs`
     /// owns the actual mailbox/rendezvous state; this variant just marks
     /// that the object IS an endpoint, giving `resolve_endpoint` something
     /// to type-check against.
     IpcEndpoint,
+    /// A physical MMIO range a driver process may map into its OWN address
+    /// space (never the kernel's) — `driver.rs::map_mmio`. The capability
+    /// carries which physical range; the process never sees or chooses a
+    /// physical address itself, only "give me what this capability names."
+    MmioRegion { phys_base: u64, size: u64 },
+    /// One interrupt vector a driver process may wait for and acknowledge
+    /// — `interrupt_forward.rs`, now capability-gated rather than any
+    /// caller naming a bare vector number.
+    InterruptLine { vector: u8 },
+    /// A range of I/O ports a driver process may `in`/`out` on — granted
+    /// via the TSS I/O permission bitmap (`driver.rs::grant_port_access`),
+    /// not full IOPL=3 (which would open ALL ports, defeating the point of
+    /// a capability grant).
+    PortIoRange { base: u16, count: u16 },
 }
 
 pub struct KernelObject {
@@ -103,6 +125,21 @@ pub fn create_object(kind: KernelObjectKind) -> ObjectId {
             alive: true,
         });
         id
+    }
+}
+
+/// Returns the kind (and any data it carries — physical range, vector,
+/// port range) of a live object, for callers that already resolved a
+/// capability against it and now need to know WHAT it actually names.
+/// Deliberately takes a raw `ObjectId`, not a capability — this is called
+/// AFTER `CapabilityTable::resolve` already did the real access check;
+/// this function only answers "what is this", not "may you see it".
+pub fn object_kind(object_id: ObjectId) -> Option<KernelObjectKind> {
+    unsafe {
+        objects_mut()
+            .get(object_id as usize)
+            .filter(|o| o.alive)
+            .map(|o| o.kind)
     }
 }
 

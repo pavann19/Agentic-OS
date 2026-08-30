@@ -17,6 +17,7 @@ pub mod apic;
 pub mod audit;
 pub mod bootinfo;
 pub mod capability;
+pub mod driver;
 pub mod events;
 pub mod interrupt_forward;
 pub mod ipc;
@@ -31,6 +32,7 @@ pub mod gdt;
 pub mod heap;
 pub mod idt;
 pub mod klog;
+pub mod pci;
 pub mod pic;
 pub mod pmm;
 #[cfg(feature = "demo_ring3")]
@@ -162,6 +164,13 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
 
     klog_info!("Rust kernel slice: PMM+VMM+heap+timer+deferred-IRQ-queue live, higher-half.");
     klog_info!("NOTE: graphics/keyboard not yet ported (Phase 0 core items complete).");
+
+    // Phase 3: real PCIe enumeration against whatever this machine
+    // actually has, not a synthetic/mocked device list.
+    klog_info!("PCI_ENUMERATE_START");
+    let pci_devices = pci::enumerate();
+    pci::log_all(&pci_devices);
+    klog_info!("PCI_ENUMERATE_DONE count={}", pci_devices.len());
 
     // Drains events::pop() in normal (non-interrupt) context — proves the
     // producer (h_timer, interrupt context)/consumer (here) path works

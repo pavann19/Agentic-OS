@@ -45,7 +45,7 @@ pub const MMIO_VIRTUAL_BASE: u64 = 0xFFFF_FE00_0000_0000;
 
 const PAGE_PRESENT: u64 = 1 << 0;
 pub const PAGE_WRITABLE: u64 = 1 << 1;
-const PAGE_CACHE_DISABLE: u64 = 1 << 4;
+pub const PAGE_CACHE_DISABLE: u64 = 1 << 4;
 pub const PAGE_NO_EXECUTE: u64 = 1 << 63;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
