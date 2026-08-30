@@ -30,6 +30,7 @@ pub mod klog;
 pub mod pic;
 pub mod pmm;
 pub mod serial;
+pub mod thread;
 pub mod vmm;
 
 use bootinfo::BootInfo;
@@ -170,11 +171,46 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     }
     klog_info!("TIMER_TICKS_OBSERVED count={}", apic::tick_count());
 
+    // Phase 1: kernel threads + preemptive scheduling. kernel_main itself
+    // becomes "thread 0" (its execution continues below exactly as
+    // before — this call just makes it visible to the scheduler so
+    // h_timer's schedule() has a valid thread to save/restore starting on
+    // the very next tick).
+    thread::init_as_current_thread();
+    thread::spawn(demo_thread_a);
+    thread::spawn(demo_thread_b);
+    klog_info!("THREADS_SPAWNED count=2");
+
     loop {
         unsafe {
             core::arch::asm!("hlt", options(nomem, nostack));
         }
     }
+}
+
+/// Real proof of preemptive multithreading, not just "it compiled": two
+/// threads each looping and logging their own ID + iteration count.
+/// Interleaved output (A/B/A/B, not all of A then all of B) is the actual
+/// evidence that h_timer's schedule() call is really swapping between
+/// them on timer ticks, not just running whichever happened to be current.
+extern "C" fn demo_thread_a() {
+    for i in 0..5u32 {
+        klog_info!("THREAD_A tick={}", i);
+        for _ in 0..80_000_000u64 {
+            unsafe { core::arch::asm!("nop", options(nomem, nostack)) };
+        }
+    }
+    klog_info!("THREAD_A_DONE");
+}
+
+extern "C" fn demo_thread_b() {
+    for i in 0..5u32 {
+        klog_info!("THREAD_B tick={}", i);
+        for _ in 0..80_000_000u64 {
+            unsafe { core::arch::asm!("nop", options(nomem, nostack)) };
+        }
+    }
+    klog_info!("THREAD_B_DONE");
 }
 
 #[panic_handler]
