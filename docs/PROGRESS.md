@@ -92,11 +92,53 @@ being fixed, not guessed at.
 
 ---
 
-## Phase 1 — Execution Model — Not started
+## Phase 1 — Execution Model (3/5 items complete)
 
-Depends on Phase 0 (incomplete). Threads, per-process address spaces, ring 3,
-`SYSCALL`/`SYSRET`, process lifecycle — none of this exists yet, in C or
-Rust.
+Depends on Phase 0 (done). Started 2026-08-30.
+
+- [x] **Kernel threads + preemptive scheduler** (`thread.rs`) — real
+      context switch (swap callee-saved regs + RSP, then `ret`), timer-
+      driven preemption via `idt.rs::h_timer` calling `schedule()`.
+      Verified live: two demo threads produce perfectly interleaved output
+      (A0,B0,A1,B1,...), not sequential execution. Two real bugs found and
+      fixed: a naked-vs-normal-function trampoline bug, and threads
+      silently inheriting interrupts-disabled forever (fixed with `sti`
+      before `switch_to`'s `ret`, safe via x86's STI-shadow guarantee).
+- [x] **Per-process address spaces** (`vmm::new_address_space`) — fresh
+      PML4 per process, upper half (canonical-high, indices 256-511)
+      shared with the kernel, lower half independent per process.
+      Verified live: two address spaces, identical virtual address
+      (`0x400000`), different physical content per process
+      (`0xAAAA...`/`0xBBBB...`) — real isolation, not just plumbing.
+- [x] **Ring 3 execution** (`ring3.rs`) — `enter_user_mode()` via `iretq`.
+      Verified live via a deliberate proof: user code executing `hlt`
+      (CPL0-only) correctly raises `#GP` with `CS=0x33` (the exact user
+      code selector) — unambiguous proof CPL was really 3. Two real bugs
+      found and fixed: switching CR3 from kernel_main's own
+      never-migrated boot-time stack double-faulted (fixed by requiring
+      this to run in a spawned/heap-stacked thread), and intermediate
+      page-table entries never carried the USER bit (only the leaf did),
+      which x86_64 requires at every level for CPL3 access to succeed at
+      all.
+- [ ] `SYSCALL`/`SYSRET` entry path with kernel stack switching and full
+      user-pointer validation on every argument — not started. GDT's user
+      segment ordering (`gdt.rs`) was deliberately chosen to match what
+      the `STAR` MSR will need, to avoid reshuffling indices when this
+      lands.
+- [ ] Process lifecycle: create, exit, reap — not started. `thread.rs`'s
+      `ThreadState::Exited` exists but nothing reaps a finished thread's
+      resources yet (its `Box<Thread>` and stack allocation currently just
+      get dropped when overwritten, not explicitly reclaimed/reported).
+
+**Phase 1 exit criteria (`docs/ROADMAP.md` §5)** — partially met: two
+processes run concurrently and are preempted by the timer (demonstrated,
+though with kernel threads rather than full user processes so far);
+process A cannot read process B's memory (demonstrated via the address-
+space isolation test). Not yet demonstrated: a user-space fault
+terminating only that process while the system continues (currently any
+unhandled exception halts the whole kernel — Phase 1's fault handlers are
+still Phase 0's "diagnose and halt," not "diagnose and recover"); a syscall
+rejecting a malicious pointer argument (no syscalls exist yet).
 
 ## Phase 2 — Capability And IPC Substrate — Not started
 

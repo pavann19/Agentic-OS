@@ -32,6 +32,7 @@ pub mod pmm;
 #[cfg(feature = "demo_ring3")]
 pub mod ring3;
 pub mod serial;
+pub mod syscall;
 pub mod thread;
 pub mod vmm;
 
@@ -280,7 +281,20 @@ extern "C" fn demo_ring3_thread() {
 
         let code_page = pmm::alloc_page();
         let code_bytes = pmm::p2v_pub(code_page);
-        *code_bytes = 0xF4; // hlt
+        // mov edi, 0x1234 ; mov eax, 1 ; syscall ; hlt
+        // (mov r32,imm32 zero-extends into the full r64 in long mode, so
+        // this is really `rdi = 0x1234; rax = 1` — arg0 and the syscall
+        // number syscall_dispatch expects.) The trailing hlt is the same
+        // CPL0-only-instruction proof as before: if SYSRET correctly
+        // returned to ring 3 (not silently staying at CPL0), this still
+        // faults with #GP exactly as it did without the syscall.
+        let program: [u8; 13] = [
+            0xBF, 0x34, 0x12, 0x00, 0x00, // mov edi, 0x1234
+            0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
+            0x0F, 0x05, // syscall
+            0xF4, // hlt
+        ];
+        core::ptr::copy_nonoverlapping(program.as_ptr(), code_bytes, program.len());
         vmm::map_page_in(space, USER_CODE_VADDR, code_page, vmm::PAGE_USER);
         // deliberately no PAGE_NO_EXECUTE -- this page must be executable
 
@@ -299,6 +313,16 @@ extern "C" fn demo_ring3_thread() {
         let rsp0_top = rsp0_stack.as_ptr() as u64 + 16384;
         core::mem::forget(rsp0_stack); // kept alive for the kernel's remaining lifetime
         gdt::set_kernel_stack(rsp0_top);
+        // Reusing the same stack for both TSS.RSP0 (interrupt/exception
+        // entry) and syscall.rs's KERNEL_RSP (syscall entry) is fine for
+        // this single demo thread specifically: the two entry paths are
+        // mutually exclusive in time (a syscall isn't preemptible mid-
+        // transition — IA32_FMASK masks IF for exactly that reason), not
+        // a general multi-thread answer. Real per-thread stack assignment
+        // for both is the same stated gap noted in both gdt.rs and
+        // syscall.rs.
+        syscall::set_kernel_stack(rsp0_top);
+        syscall::init();
 
         vmm::switch_address_space(space);
         klog_info!(
