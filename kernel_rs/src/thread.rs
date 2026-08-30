@@ -124,7 +124,29 @@ pub fn spawn(entry: extern "C" fn()) -> ThreadId {
 /// `vmm::new_address_space()`) instead of the shared kernel one —
 /// `schedule()` switches CR3 automatically when consecutive threads don't
 /// share an address space.
+///
+/// Real bug found and fixed (see `critical.rs`'s doc comment for the
+/// full investigation): this function runs from ORDINARY preemptible
+/// thread context (every caller in `main.rs`/`init.rs`/etc. calls it
+/// after interrupts are enabled), and used to mutate `NEXT_TID` and
+/// `THREADS` with no protection at all — the EXACT SAME `THREADS`
+/// `VecDeque` that `schedule()` mutates from inside the timer interrupt.
+/// A preemption landing mid-`push_back` here (e.g. while the VecDeque's
+/// internal ring buffer is being grown/shifted) let `schedule()`, running
+/// in the interrupt that preempted this call, operate on that SAME
+/// half-mutated structure — corrupting it in a way that could hand a
+/// LATER `pop_front()` a garbage `Box<Thread>` (a corrupted `saved_rsp`,
+/// among other fields), which `switch_to`'s `ret` would then jump to.
+/// `schedule()` itself doesn't need this same wrapping — it only ever
+/// runs already-inside an interrupt-gate entry (hardware IF=0) until its
+/// own deliberate `sti` right before `switch_to`'s `ret` — but every
+/// other public function here that touches this state from normal
+/// context does.
 pub fn spawn_in(entry: extern "C" fn(), address_space: u64) -> ThreadId {
+    crate::critical::without_interrupts(|| unsafe { spawn_in_locked(entry, address_space) })
+}
+
+unsafe fn spawn_in_locked(entry: extern "C" fn(), address_space: u64) -> ThreadId {
     unsafe {
         let tid = NEXT_TID;
         NEXT_TID += 1;
@@ -166,11 +188,44 @@ pub fn spawn_in(entry: extern "C" fn(), address_space: u64) -> ThreadId {
 }
 
 /// Raw asm: save callee-saved regs + RSP into `*old_rsp_slot`, load
-/// `new_rsp`, restore ITS callee-saved regs, `ret`. Never returns to its
-/// direct caller in the normal sense — control resumes wherever the target
-/// thread last left off (or thread_trampoline, first time).
+/// `new_rsp`, switch CR3 to `new_cr3`, restore ITS callee-saved regs,
+/// `ret`. Never returns to its direct caller in the normal sense —
+/// control resumes wherever the target thread last left off (or
+/// thread_trampoline, first time).
+///
+/// Real root-cause bug found and fixed (the actual explanation behind
+/// the multi-process scheduling investigation in critical.rs/
+/// PROGRESS.md — this is what remained after the pmm/heap/THREADS races
+/// AND the TSS.RSP0 issue were all fixed and a DIFFERENT, deterministic
+/// double-fault still reproduced): the CALLER used to switch CR3 itself,
+/// BEFORE calling this function, while still executing ON THE OUTGOING
+/// thread's OWN stack. That's harmless for every SPAWNED thread (their
+/// stacks are always heap-allocated, in the shared upper half every
+/// address space's PML4 copies at creation) — but thread 0 (kernel_main
+/// itself, `init_as_current_thread`) runs on the ORIGINAL boot-time
+/// stack, a LOW-half address that is NEVER copied into any process's own
+/// PML4 (`vmm::new_address_space` only copies indices 256-511; 0-255
+/// starts and stays empty, by design, for user-space isolation). The
+/// instant the caller wrote a PROCESS's own CR3 while still running on
+/// thread 0's low-half stack (or vice versa, switching FROM a process
+/// TO thread 0), that stack became unmapped under the just-loaded page
+/// tables — and the very next instruction needing to touch it (this
+/// function's own prologue pushes, or the caller's own `call` pushing a
+/// return address) faulted immediately: a page fault that itself
+/// couldn't be delivered (the stack needed to push ITS OWN exception
+/// frame was the very thing just unmapped), escalating straight to a
+/// double fault. Reproduced deterministically at the exact same
+/// `rip`/`rsp` every run — this is why: it's not a race, it's a genuine
+/// ordering bug that fires the first time thread 0 and a process ever
+/// swap directly across that CR3 boundary.
+///
+/// Fixed by moving the CR3 write to HERE, immediately after the RSP swap
+/// (`mov rsp, rsi`) and before anything touches memory through the new
+/// RSP — by the time any push/pop happens, translation already matches
+/// the stack being used, regardless of which direction (thread-0-to-
+/// process or process-to-thread-0) the switch goes.
 #[unsafe(naked)]
-unsafe extern "C" fn switch_to(old_rsp_slot: *mut u64, new_rsp: u64) {
+unsafe extern "C" fn switch_to(old_rsp_slot: *mut u64, new_rsp: u64, new_cr3: u64) {
     core::arch::naked_asm!(
         "push rbp",
         "push rbx",
@@ -179,7 +234,12 @@ unsafe extern "C" fn switch_to(old_rsp_slot: *mut u64, new_rsp: u64) {
         "push r14",
         "push r15",
         "mov [rdi], rsp",   // *old_rsp_slot = current RSP (after pushes)
-        "mov rsp, rsi",     // RSP = new_rsp
+        "mov rsp, rsi",     // RSP = new_rsp -- now on the INCOMING thread's own stack
+        "mov rax, cr3",
+        "cmp rax, rdx",
+        "je 2f",            // skip the TLB-flushing write if already loaded
+        "mov cr3, rdx",     // translation now matches the stack just switched to
+        "2:",
         "pop r15",
         "pop r14",
         "pop r13",
@@ -227,7 +287,18 @@ unsafe fn zombie_mut() -> &'static mut Option<Box<Thread>> {
 /// thread round-robin and switches to it; a no-op if there's nothing else
 /// runnable yet (Phase 1's early state, before more than one thread
 /// exists) or scheduling hasn't been initialized.
+///
+/// Wrapped in `without_interrupts` defensively — this already only ever
+/// runs with hardware IF=0 (interrupt-gate entry), so the wrapper is a
+/// documented no-op here today, not a fix in itself. It exists so the
+/// invariant ("nothing touches THREADS/CURRENT/ZOMBIE without interrupts
+/// disabled") is enforced uniformly and stays true even if this function
+/// is ever called from a differently-configured gate later.
 pub fn schedule() {
+    crate::critical::without_interrupts(|| unsafe { schedule_locked() });
+}
+
+unsafe fn schedule_locked() {
     unsafe {
         // Reap whatever the PREVIOUS tick's exiting thread left behind —
         // safe here specifically because this code is running on
@@ -278,33 +349,82 @@ pub fn schedule() {
         next.state = ThreadState::Running;
         let new_rsp = next.saved_rsp;
         let new_address_space = next.address_space;
+        // Real root-cause fix (the actual bug behind the multi-process
+        // scheduling investigation in critical.rs/PROGRESS.md, found
+        // after the pmm/heap/THREADS races above were fixed and the
+        // crash still reproduced): TSS.RSP0 -- the kernel stack the CPU
+        // switches to automatically on any ring3->ring0 transition
+        // (interrupt/exception/syscall) -- is ONE GLOBAL CPU-visible
+        // field, but every ring-3 driver thread's own setup code
+        // (user_driver.rs, init.rs) called gdt::set_kernel_stack /
+        // syscall::set_kernel_stack exactly ONCE, for ITSELF, right
+        // before its own first ring-3 entry. That was correct as long as
+        // only ONE ring-3 thread was ever alive at a time (every run in
+        // this kernel's history before this session's driver work) --
+        // whichever thread set it last simply owned it uncontested. With
+        // MULTIPLE real ring-3 threads now alive concurrently (init,
+        // serial_driver, framebuffer_driver), whichever one's setup code
+        // ran LAST overwrote the other two's claim on TSS.RSP0 -- so the
+        // NEXT timer interrupt landing while a DIFFERENT one of those
+        // threads is actually executing in ring 3 pushes its exception
+        // frame onto the WRONG thread's kernel stack, corrupting
+        // whatever that stack was actually being used for (that
+        // thread's own suspended state, or -- if it happened to be
+        // between allocations -- unrelated heap/page-table data the
+        // stack pointer no longer legitimately owned). gdt.rs's own doc
+        // comment on set_kernel_stack already named this precise gap:
+        // "Not yet wired into the scheduler per-thread ... for when
+        // ring-3 threads become first-class scheduled entities" -- they
+        // just did. Fixed by setting BOTH here, unconditionally, on
+        // EVERY switch, to the INCOMING thread's own kernel stack --
+        // two MOV-class writes are cheap enough not to bother skipping
+        // even when unchanged (unlike the CR3 write below, a full TLB
+        // flush, which stays conditional). Thread 0's zero-length
+        // `_stack` (kernel_main's own bootstrap context, never entering
+        // ring 3) computes a dangling-but-harmless pointer here -- TSS.RSP0
+        // is only ever CONSULTED by the CPU on a ring3->ring0 transition,
+        // and thread 0 is always already ring 0, so this value is simply
+        // never read while thread 0 is the one running.
+        let new_kernel_stack_top = next._stack.as_ptr() as u64 + next._stack.len() as u64;
+        crate::gdt::set_kernel_stack(new_kernel_stack_top);
+        crate::syscall::set_kernel_stack(new_kernel_stack_top);
         *current_mut() = Some(next);
 
-        // Only switch CR3 (a full non-global TLB flush) when the incoming
-        // thread actually uses a different address space than whatever is
-        // currently loaded — most switches so far are between kernel
-        // threads that all share vmm::kernel_pml4_phys(), where reloading
-        // CR3 would be pure overhead for zero isolation benefit.
-        let loaded = crate::vmm::current_cr3();
-        if new_address_space != loaded {
-            crate::vmm::switch_address_space(new_address_space);
-        }
+        // CR3 is switched INSIDE switch_to now, not here — see that
+        // function's own doc comment for the real double-fault bug this
+        // fixes (switching CR3 from out here, while still running on the
+        // OUTGOING thread's own stack, unmapped that very stack out from
+        // under itself whenever thread 0's special low-half boot stack
+        // was on either side of the switch). switch_to still only writes
+        // CR3 when it's actually changing (checked in the asm itself),
+        // so kernel-thread-to-kernel-thread switches stay free of the
+        // TLB-flush overhead exactly as before.
 
         // old_rsp_slot is a raw pointer into the outgoing thread's boxed
         // Thread struct — stable regardless of the VecDeque itself
         // reallocating (only the Box handle moves, never the heap-
         // allocated Thread it points to). See THREADS's doc comment.
-        switch_to(old_rsp_slot, new_rsp);
+        switch_to(old_rsp_slot, new_rsp, new_address_space);
     }
 }
 
+/// Real bug found and fixed alongside `spawn_in`'s (same investigation,
+/// see `critical.rs`): this runs from ordinary thread context (the tail
+/// of every thread's own execution, via `thread_trampoline`), and the
+/// take-then-reassign on `CURRENT` below is not a single atomic step. A
+/// preemption landing between them would leave `CURRENT` transiently
+/// `None`, and `schedule()` firing in that exact window would see
+/// "nothing to schedule" and silently no-op that tick instead of
+/// switching away from the exiting thread — wrapped now so this
+/// mutation, like every other one in this file, can't be interrupted
+/// mid-way.
 fn exit_current() -> ! {
-    unsafe {
+    crate::critical::without_interrupts(|| unsafe {
         if let Some(mut t) = current_mut().take() {
             t.state = ThreadState::Exited;
             *current_mut() = Some(t);
         }
-    }
+    });
     loop {
         unsafe { asm!("sti; hlt", options(nomem, nostack)) };
     }
@@ -341,12 +461,12 @@ pub fn init_as_current_thread() {
 /// context switch — nothing else can ever collide with it, because it's
 /// the same stack that thread already owns for its whole lifetime.
 pub fn current_kernel_stack_top() -> u64 {
-    unsafe {
+    crate::critical::without_interrupts(|| unsafe {
         current_mut()
             .as_ref()
             .map(|t| t._stack.as_ptr() as u64 + t._stack.len() as u64)
             .unwrap_or(0)
-    }
+    })
 }
 
 /// Updates the CURRENTLY RUNNING thread's tracked `address_space` field.
@@ -364,13 +484,13 @@ pub fn current_kernel_stack_top() -> u64 {
 /// address space. Any code that manually switches its own address space
 /// must call this right after, or preemption can and will undo it.
 pub fn set_current_address_space(pml4_phys: u64) {
-    unsafe {
+    crate::critical::without_interrupts(|| unsafe {
         if let Some(t) = current_mut().as_mut() {
             t.address_space = pml4_phys;
         }
-    }
+    });
 }
 
 pub fn current_id() -> ThreadId {
-    unsafe { current_mut().as_ref().map(|t| t.id).unwrap_or(0) }
+    crate::critical::without_interrupts(|| unsafe { current_mut().as_ref().map(|t| t.id).unwrap_or(0) })
 }

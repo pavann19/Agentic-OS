@@ -141,8 +141,10 @@ unsafe fn wrmsr(msr: u32, value: u64) {
 }
 
 /// Sets the kernel stack `syscall_entry` switches to — analogous to
-/// `gdt::set_kernel_stack` (TSS.RSP0), same "not yet wired per-thread into
-/// the scheduler" gap noted there applies here too.
+/// `gdt::set_kernel_stack` (TSS.RSP0). NOW wired into the scheduler
+/// per-thread too (`thread.rs::schedule_locked` calls this alongside
+/// `gdt::set_kernel_stack` on every switch) — same real bug, same fix,
+/// see `gdt::set_kernel_stack`'s doc comment for the full story.
 pub fn set_kernel_stack(rsp: u64) {
     unsafe { KERNEL_RSP = rsp };
 }

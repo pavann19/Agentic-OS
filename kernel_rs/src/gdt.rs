@@ -232,11 +232,17 @@ pub fn deny_port(port: u16) {
 
 /// Sets TSS.RSP0 — the kernel stack the CPU switches to automatically on
 /// any ring3->ring0 transition (interrupt, exception, or a future syscall
-/// entry that relies on it). Not yet wired into the scheduler per-thread
-/// (a stated gap for when ring-3 threads become first-class scheduled
-/// entities, see PHASE1_PROGRESS.md) — callers set this manually before
-/// entering user mode with whatever kernel stack should catch that
-/// thread's faults/interrupts.
+/// entry that relies on it). NOW wired into the scheduler per-thread
+/// (`thread.rs::schedule_locked` calls this on every switch, to the
+/// INCOMING thread's own kernel stack) — closing a real bug the previous
+/// version of this comment predicted: with multiple ring-3 threads alive
+/// concurrently, a single global RSP0 set once by each thread's own setup
+/// code meant whichever set it last silently corrupted every OTHER
+/// ring-3 thread's exception handling. Driver-setup code (user_driver.rs,
+/// init.rs) still calls this once before its OWN first ring-3 entry too —
+/// harmless now (the very next schedule() tick re-asserts the correct
+/// per-thread value regardless), kept mainly so a thread interrupted
+/// before ever being scheduled out even once still has a correct value.
 pub fn set_kernel_stack(rsp0: u64) {
     unsafe {
         TSS.rsp0 = rsp0;

@@ -18,6 +18,7 @@ pub mod apic;
 pub mod audit;
 pub mod bootinfo;
 pub mod capability;
+pub mod critical;
 pub mod device_manager;
 pub mod driver;
 pub mod elf;

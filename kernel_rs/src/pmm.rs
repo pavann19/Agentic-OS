@@ -288,7 +288,18 @@ pub unsafe fn init(boot_info: &BootInfo) {
 
 /// Allocates and zeroes one physical page. Returns 0 on exhaustion (matches
 /// the C original's sentinel — callers must check).
+///
+/// Real bug found and fixed (see `critical.rs`'s doc comment for the full
+/// investigation): the bitmap scan-then-mark below used to run with
+/// interrupts enabled, letting a preemption between the scan and the
+/// mark hand the SAME physical page to two different callers. Wrapped in
+/// `without_interrupts` now — the whole scan+mark is atomic w.r.t. the
+/// only thing that could ever interleave with it on a single core.
 pub unsafe fn alloc_page() -> u64 {
+    crate::critical::without_interrupts(|| unsafe { alloc_page_locked() })
+}
+
+unsafe fn alloc_page_locked() -> u64 {
     let mut i = LAST_SCANNED_PAGE;
     while i < TOTAL_SPAN_PAGES {
         if !bitmap_test(USED_BITMAP, i) {
@@ -304,13 +315,20 @@ pub unsafe fn alloc_page() -> u64 {
     }
     if LAST_SCANNED_PAGE > 0 {
         LAST_SCANNED_PAGE = 0;
-        return alloc_page();
+        return alloc_page_locked();
     }
     klog_info!("OUT OF MEMORY: no physical pages left");
     0
 }
 
+/// Same real-bug fix as `alloc_page` — the clear-and-update sequence
+/// below is now atomic w.r.t. preemption too, so a concurrent
+/// `alloc_page` can never observe a half-freed page.
 pub unsafe fn free_page(addr: u64) {
+    crate::critical::without_interrupts(|| unsafe { free_page_locked(addr) })
+}
+
+unsafe fn free_page_locked(addr: u64) {
     if addr == 0 {
         klog_info!("pmm_free_page: reject null/page 0");
         return;

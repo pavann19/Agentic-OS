@@ -17,11 +17,23 @@
 //! fragmentation to matter. Revisit before Phase 1's scheduler does
 //! sustained alloc/free churn.
 //!
-//! Not thread/interrupt-safe by itself (a `static mut` guarded only by the
-//! fact that nothing preempts kernel code yet — no timer, no scheduler).
-//! `docs/ROADMAP.md` Phase 0 item 6 (deferred interrupt work) and Phase 1
-//! both land before anything could actually race with this; revisit with
-//! real locking before either does.
+//! Real bug found and fixed (see `critical.rs`'s doc comment for the full
+//! investigation, triggered by a reproducible late-boot crash under
+//! sustained multi-process scheduling): this module's own doc used to
+//! read "Not thread/interrupt-safe by itself... revisit with real
+//! locking before Phase 1 [the scheduler] does [sustained alloc/free
+//! churn]" — Phase 1 landed a long time before this was actually
+//! revisited. A `SpinMutex` alone was never going to be enough here
+//! either: on a single core with PREEMPTIVE scheduling, a thread
+//! preempted WHILE HOLDING the lock (mid free-list mutation) can
+//! deadlock the scheduler itself if `schedule()` — running inside the
+//! very timer interrupt that preempted it — ever needs to allocate (its
+//! own `VecDeque<Box<Thread>>` growing, for instance): nothing could ever
+//! release that lock, since doing so requires resuming the very thread
+//! the stuck interrupt handler is blocking on. `GlobalAlloc::alloc`/
+//! `dealloc` below now wrap their entire lock-acquire-mutate-release
+//! sequence in `critical::without_interrupts` — no preemption can occur
+//! while any of this runs, so neither hazard is reachable anymore.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::null_mut;
@@ -129,19 +141,23 @@ impl LockedHeap {
 
 unsafe impl GlobalAlloc for spin_shim::SpinMutex<LockedHeap> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let size = layout.size().max(core::mem::size_of::<FreeListNode>());
-        let align = layout.align().max(8);
-        let mut guard = self.lock();
-        match guard.find_and_remove(size, align) {
-            Some((addr, _)) => addr as *mut u8,
-            None => null_mut(),
-        }
+        crate::critical::without_interrupts(|| {
+            let size = layout.size().max(core::mem::size_of::<FreeListNode>());
+            let align = layout.align().max(8);
+            let mut guard = self.lock();
+            match unsafe { guard.find_and_remove(size, align) } {
+                Some((addr, _)) => addr as *mut u8,
+                None => null_mut(),
+            }
+        })
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let size = layout.size().max(core::mem::size_of::<FreeListNode>());
-        let mut guard = self.lock();
-        guard.add_free_region(ptr as u64, size);
+        crate::critical::without_interrupts(|| {
+            let size = layout.size().max(core::mem::size_of::<FreeListNode>());
+            let mut guard = self.lock();
+            unsafe { guard.add_free_region(ptr as u64, size) };
+        })
     }
 }
 
@@ -208,11 +224,16 @@ mod spin_shim {
 static ALLOCATOR: spin_shim::SpinMutex<LockedHeap> = spin_shim::SpinMutex::new(LockedHeap::empty());
 
 pub fn init() {
-    unsafe {
+    // Runs before the kernel's first `sti` (main.rs enables interrupts
+    // well after this), so this particular call isn't actually exposed
+    // to the race critical.rs documents -- wrapped anyway for the same
+    // reason every other allocator entry point now is: consistency, and
+    // safety against this ordering ever changing later.
+    crate::critical::without_interrupts(|| unsafe {
         let mut guard = ALLOCATOR.lock();
         guard.heap_end = HEAP_VIRTUAL_BASE;
         guard.grow_by(INITIAL_HEAP_PAGES);
-    }
+    });
     klog_info!(
         "Heap initialized: {} MB at 0x{:x}",
         (INITIAL_HEAP_PAGES * pmm::PAGE_SIZE) / (1024 * 1024),
