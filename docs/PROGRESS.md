@@ -232,7 +232,7 @@ pass with zero regression; the `demo_ring3` feature build (gated, same as
 Phase 1's ring-3 proof) shows the complete capability→IPC→syscall→ring-3
 round-trip, including surviving a real timer preemption mid-syscall.
 
-## Phase 3 — User-Space Driver Framework (6/7 items complete, 1 partial — IN PROGRESS)
+## Phase 3 — User-Space Driver Framework (6/7 items complete, 1 partial (2/3 drivers) — IN PROGRESS)
 
 Depends on Phase 2 (done). Started 2026-08-30.
 
@@ -291,30 +291,73 @@ Depends on Phase 2 (done). Started 2026-08-30.
       that loader here just to move this one process to ring 3 would be
       wasted work.
 - [~] **First user-space drivers** (serial, framebuffer, PS/2 keyboard),
-      ported off the current in-kernel implementations — **serial done,
-      framebuffer and PS/2 keyboard not started.** `kernel_rs/src/elf.rs`
+      ported off the current in-kernel implementations — **serial and
+      framebuffer done, PS/2 keyboard not started.** `kernel_rs/src/elf.rs`
       (new) is a real ELF64 loader — validates the header, walks PT_LOAD
       program headers, maps each with the same real permission
-      discipline every other mapper in this kernel uses. `user_rs/
-      serial_driver/` (new crate) is a genuine standalone ELF64 binary,
-      built completely separately from the kernel, doing real unmediated
-      ring-3 port I/O to COM1 after a one-time capability-gated IOPB
-      grant. Verified live, unambiguously: the driver's own raw string
-      appears DIRECTLY in the serial log, written via real `out`
-      instructions — never touched `klog_info!` — proof this is genuine
-      CPL3 code loaded from a real compiled ELF and entered at ITS entry
-      point (`0x500000`, from the ELF header), not another
-      kernel-hardcoded demo. **Real bug found and fixed:** the linker
-      script packed `.text`(RX) and `.rodata`(R) into the same page since
-      the binary is tiny; `elf.rs` maps PT_LOAD segments page-by-page, so
-      the second segment's mapping silently clobbered the first's
-      executable permission, producing an instruction-fetch `#PF` at the
-      entry point on first boot — fixed with `ALIGN(4096)` between output
-      sections (plus a `build.rs` so cargo actually re-links when
-      `linker.ld` changes, since it has no dependency edge on the linker
-      script otherwise). The *current* serial/klog code in `boot_rs/` and
-      `kernel_rs/` itself still runs in the bootloader/kernel directly —
-      correct, since that's boot-time diagnostics, not this driver.
+      discipline every other mapper in this kernel uses.
+      `user_rs/serial_driver/` (new crate) is a genuine standalone ELF64
+      binary, built completely separately from the kernel, doing real
+      unmediated ring-3 port I/O to COM1 after a one-time
+      capability-gated IOPB grant. Verified live, unambiguously: the
+      driver's own raw string appears DIRECTLY in the serial log, written
+      via real `out` instructions — never touched `klog_info!` — proof
+      this is genuine CPL3 code loaded from a real compiled ELF and
+      entered at ITS entry point (`0x500000`, from the ELF header), not
+      another kernel-hardcoded demo. `user_rs/framebuffer_driver/` (new
+      crate) is a second such binary: granted a real `MmioRegion`
+      capability for the ACTUAL GOP framebuffer `boot_rs` found at boot,
+      writes a recognizable marker pattern into it, signals readiness via
+      a new capability-gated syscall, and — the strongest proof of the
+      three drivers so far — an independent KERNEL-side thread reads back
+      the SAME physical memory through a completely separate mapping and
+      confirms the marker, rather than trusting the driver's own
+      self-report. Verified live: `FRAMEBUFFER_FOUND base=0x80000000
+      size=4096000 width=1280 height=800` (real GOP geometry,
+      `1280*800*4` matches `buffer_size` exactly) → `USER_DRIVER_FB_READY`
+      → `USER_DRIVER_FB_VERIFIED pixel0=0xaabbccdd (matches expected
+      marker)`. **Real bugs found and fixed:** (1) the linker script for
+      each driver packed `.text`(RX) and `.rodata`(R) into the same page
+      since the binaries are tiny; `elf.rs` maps PT_LOAD segments
+      page-by-page, so the second segment's mapping silently clobbered
+      the first's executable permission, producing an instruction-fetch
+      `#PF` at the entry point on first boot — fixed with `ALIGN(4096)`
+      between output sections (plus a `build.rs` so cargo actually
+      re-links when `linker.ld` changes, since it has no dependency edge
+      on the linker script otherwise); (2)
+      `BootInfo.payload.framebuffer` is a PHYSICAL pointer from UEFI pool
+      memory, same class of bug as the earlier `info: &BootInfo`
+      dangling-reference fix — dereferencing it directly faulted
+      immediately, fixed the same way via `pmm::p2v_pub`; (3) `init.rs`
+      previously ended in a deliberate `hlt` (the Phase 1 CPL proof's
+      technique, where the resulting `#GP` was the point) — but `init` is
+      a real, ongoing process now, and its self-crash was taking the
+      WHOLE kernel down (exceptions still halt everything — Phase 1's
+      still-open gap) before the framebuffer driver's own concurrent work
+      finished; fixed by ending `init` in a benign infinite spin instead.
+      The *current* serial/klog code in `boot_rs/` and `kernel_rs/`
+      itself still runs in the bootloader/kernel directly — correct,
+      since that's boot-time diagnostics, not this driver.
+
+      **Known issue, disclosed and NOT yet root-caused:** fixing (3)
+      above — letting `init` survive past its one-shot job instead of
+      self-destructing within a few ticks, as every ring-3 process in
+      this kernel's history did before now — surfaced a SEPARATE,
+      genuinely pre-existing bug: with two real ring-3 processes staying
+      alive concurrently for far more scheduler ticks than any previous
+      run ever exercised, a live process's own previously-working page
+      mapping eventually reports not-present, producing a page fault
+      (and, per the same still-open exception-handling gap, halting the
+      machine) some time after the interesting proof work above has
+      already completed and been logged. Confirmed via bisection to
+      already exist on the prior commit with nothing else changed —
+      NOT introduced by the framebuffer driver, the MMIO capability path,
+      or its mapping size, all of which were ruled out. Root cause not
+      yet found; does not block any driver's own proof (which completes
+      first in every observed run) or the standard regression gate (which
+      doesn't check for it), but is real, reproducible, and tracked here
+      rather than hidden — worth a dedicated investigation before Phase 3
+      is called fully done.
 - [ ] **Tier 2 physical machine selected and brought to serial output**
       (`docs/ROADMAP.md` §4 — needs IOMMU present, serial reachable,
       NVMe/AHCI storage, documented chipset) — not started.
@@ -393,10 +436,15 @@ bring-up (DMAR discovery through a live translation-enabled root table and
 a real per-device DMA domain), a device manager (real classification,
 lifecycle state machine, bounded restart-on-crash), `init`/a service
 manager (a real ring-3 init process handing off to a service manager via
-a genuine capability-gated syscall), and a real ELF64 loader with the
-first genuine user-space driver (serial, running from a real compiled
-ELF binary, not a hand-built machine-code blob) are done; framebuffer and
-PS/2 keyboard drivers and Tier 2 hardware selection remain.
+a genuine capability-gated syscall), and a real ELF64 loader with two
+genuine user-space drivers running from real compiled ELF binaries (not
+hand-built machine-code blobs) — serial (real port I/O) and framebuffer
+(real MMIO, independently verified by an out-of-process kernel-side
+readback) — are done; PS/2 keyboard and Tier 2 hardware selection
+remain. A real, disclosed, not-yet-root-caused page-table stability bug
+under sustained multi-process ring-3 scheduling was found along the way
+(see the Phase 3 section above) — tracked, not hidden, doesn't block
+what's shipped so far.
 Phases 4 through 8 — storage/filesystem, the agent runtime, driver
 synthesis, shell, hardware consolidation — are entirely not started. This
 is a genuinely solid, tested foundation; it is not yet an OS with a
@@ -405,8 +453,12 @@ should be read as more than what's checked above.
 
 ## Next concrete increment
 
-Phase 3 (User-Space Driver Framework), remaining items: framebuffer and
-PS/2 keyboard user-space drivers (the ELF-loading path and pattern now
-exist, proven on the serial driver — porting these two is now mostly
-about MMIO/interrupt capability wiring, not new mechanism). Then Tier 2
-physical hardware selection, the last Phase 3 item.
+Phase 3 (User-Space Driver Framework), remaining items: the PS/2 keyboard
+user-space driver — needs real new mechanism beyond what serial/
+framebuffer proved (an unmasked PIC IRQ1, a new IDT vector, and syscalls
+letting a REAL ring-3 process block-wait on an `InterruptLine`
+capability, not just a one-time pre-ring-3 grant). Then Tier 2 physical
+hardware selection, the last Phase 3 item. Separately, the disclosed
+multi-process scheduling/page-table stability bug (Phase 3 section above)
+deserves its own dedicated root-cause investigation before Phase 3 is
+called fully done, even though it doesn't block either remaining item.
