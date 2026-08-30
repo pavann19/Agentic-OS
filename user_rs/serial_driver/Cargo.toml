@@ -1,0 +1,20 @@
+[package]
+name = "serial_driver"
+version = "0.1.0"
+edition = "2021"
+
+# First real user-space driver (Phase 3): a genuine freestanding ELF64
+# binary, built completely separately from kernel_rs, loaded at runtime
+# by kernel_rs/src/elf.rs -- not compiled into the kernel image. No
+# external crates, same reasoning as kernel_rs/boot_rs: only `core` and
+# `compiler_builtins`, built from source via -Zbuild-std.
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

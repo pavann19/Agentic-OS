@@ -18,18 +18,26 @@ OVMF_CODE ?= C:/Program Files/qemu/share/edk2-x86_64-code.fd
 
 BOOT_DIR    = boot_rs
 KERNEL_DIR  = kernel_rs
+USER_DIR    = user_rs/serial_driver
 FATDIR      = $(BOOT_DIR)/qemu_fatdir
 BOOT_EFI    = $(BOOT_DIR)/target/x86_64-unknown-uefi/release/agentic_bootloader.efi
 KERNEL_ELF  = $(KERNEL_DIR)/target/x86_64-unknown-none/release/agentic_kernel
 
-.PHONY: all bootloader kernel image run-qemu test-boot test-host clean
+.PHONY: all bootloader kernel userland image run-qemu test-boot test-host clean
 
 all: image
 
 bootloader:
 	cd $(BOOT_DIR) && $(CARGO) build --release
 
-kernel:
+# Built BEFORE kernel: kernel_rs/src/user_driver.rs embeds this crate's
+# compiled ELF64 output via include_bytes! at kernel compile time (no
+# filesystem exists yet to load it from at runtime — see elf.rs's doc
+# comment), so the kernel build fails outright if this hasn't run first.
+userland:
+	cd $(USER_DIR) && $(CARGO) build --release
+
+kernel: userland
 	cd $(KERNEL_DIR) && $(CARGO) build --release
 
 # "image" here means the QEMU virtual-FAT directory, not a real .img file —
@@ -89,5 +97,5 @@ test-host:
 	grep -q "test result: ok\. [0-9]* passed; 0 failed" _evidence/latest/host-tests.log
 
 clean:
-	rm -rf $(BOOT_DIR)/target $(KERNEL_DIR)/target $(FATDIR)
+	rm -rf $(BOOT_DIR)/target $(KERNEL_DIR)/target $(USER_DIR)/target $(FATDIR)
 	rm -rf _evidence/latest

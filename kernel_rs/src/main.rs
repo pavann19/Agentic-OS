@@ -20,6 +20,7 @@ pub mod bootinfo;
 pub mod capability;
 pub mod device_manager;
 pub mod driver;
+pub mod elf;
 pub mod init;
 pub mod events;
 pub mod interrupt_forward;
@@ -44,6 +45,7 @@ pub mod serial;
 pub mod service_manager;
 pub mod syscall;
 pub mod thread;
+pub mod user_driver;
 pub mod vmm;
 
 use bootinfo::BootInfo;
@@ -223,6 +225,14 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     klog_info!("INIT_SPAWN_START");
     init::spawn_init();
     klog_info!("INIT_SPAWN_DONE");
+
+    // Phase 3: first REAL user-space driver -- a genuine compiled ELF64
+    // binary (user_rs/serial_driver), loaded by elf.rs's real loader,
+    // granted a real PortIoRange capability for COM1, entered at its own
+    // real entry point. See user_driver.rs's module doc for scope.
+    klog_info!("USER_DRIVER_SPAWN_START");
+    user_driver::spawn_serial_driver();
+    klog_info!("USER_DRIVER_SPAWN_DONE");
 
     // Phase 3: ACPI table discovery -- the real RSDP boot_rs found via the
     // UEFI configuration table, walked to find DMAR (the IOMMU's register

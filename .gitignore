@@ -15,3 +15,4 @@ kernel_rs/target/
 kernel_common/target/
 host_tests/target/
 boot_rs/qemu_fatdir/
+user_rs/serial_driver/target/
