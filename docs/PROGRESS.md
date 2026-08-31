@@ -473,10 +473,66 @@ nightly hard-errors on this now; fixed with
 injection suite all pass with zero regression against this phase's work
 so far.
 
-## Phase 4 — Storage And Filesystem — Not started
+## Phase 4 — Storage And Filesystem (1/4 items complete — IN PROGRESS)
 
-Block device abstraction, on-disk filesystem, capability-scoped object
-store, audit log persistence — none started.
+Depends on Phase 3 (done). Started this session.
+
+- [x] **Block device abstraction + `virtio-blk` user-space driver
+      (Tier 1)** — real virtio 1.0 "modern" PCI transport: real
+      capability-list walking and BAR-sizing (`pci.rs`'s new
+      `find_virtio_caps`/`read_bar`), a real capability-gated MMIO
+      mapping for the device's BAR, a real IOMMU-backed DMA buffer
+      (the first device in this kernel to actually perform I/O through
+      its assigned domain, not just have one assigned), real feature
+      negotiation, a real virtqueue, and a real self-check: write a
+      known 512-byte pattern to sector 1, zero the buffer, read it back,
+      compare byte for byte. Verified live: `SELF_CHECK_PASS: write+
+      zero+read+compare all matched`, stable across repeated boot runs.
+      `scripts/test-boot.ps1` now attaches a real 16MB disk image,
+      created once and left in place across runs (not recreated every
+      time) — a later increment's "survives a reboot" exit criterion
+      needs that persistence to already exist.
+
+      **Two real bugs found and fixed, the second a genuinely deep,
+      previously-latent kernel bug spanning every phase before this
+      one:** (1) the driver's own raw-COM1-write proof needed a
+      `PortIoRange` grant for COM1, forgotten on first pass — fixed the
+      same way `serial_driver` already does it. (2) **The actual root
+      cause**, found by disassembling the exact faulting instruction and
+      directly verifying page-table entries with a new
+      `vmm::debug_translate` helper after ruling out every other theory:
+      `syscall.rs`'s `syscall_entry` stub used `r12`/`r13` as scratch
+      registers to reshuffle syscall arguments, WITHOUT saving/restoring
+      the caller's original values first. SysV ABI treats `r12-r15`/
+      `rbx`/`rbp` as callee-saved — silently clobbering two of them on
+      EVERY syscall broke that contract for every syscall this kernel
+      has ever executed, across every phase; it simply never had an
+      observed symptom, since no earlier caller's code needed `r12`/
+      `r13` to survive a syscall. `virtio_blk_driver` is the first
+      driver whose code keeps a value (the MMIO base address) live in a
+      callee-saved register across a syscall, which is what finally
+      exposed it. Fixed with a real push/pop, matching the same
+      discipline `rcx`/`r11` already had. Also hardened (not
+      crash-driven, found by inspection once the real bug was
+      understood): every user driver crate's own syscall wrapper was
+      separately missing `rsi`/`rdx`/`r8`/`r9`/`r10` from its OWN
+      clobber list too — correct in spirit (genuinely caller-saved,
+      clobbered by `syscall_dispatch` itself) but only silently correct
+      by accident before. Fixed in all four driver crates for real
+      consistency.
+- [ ] **On-disk filesystem** (documented format preferred — ext2
+      suggested by `docs/ROADMAP.md`, FAT32 already required for the
+      ESP) — not started.
+- [ ] **Object store with capability-scoped naming** (no global
+      namespace an unprivileged process can walk) — not started.
+- [ ] **Audit log persistence, with rotation** (deferred obligation from
+      ADR-005) — not started.
+
+None of Phase 4's exit criteria (`docs/ROADMAP.md` §5 — data survives a
+reboot byte-identical; capability-less processes can't discover a file's
+existence; power-loss leaves the filesystem mountable with bounded,
+detected corruption; audit records survive rotation) are demonstrable
+yet — they need the filesystem item above, not just the block device.
 
 ## Phase 5 — Agent Runtime Substrate — Not started
 
@@ -551,23 +607,27 @@ the Phase 3 section above). Also closed this session: Phase 1's own
 long-open exit criterion, per-process fault isolation — a real ring-3
 fault now kills only that process, with the whole system continuing,
 verified live and repeatedly.
-Phases 4 through 8 — storage/filesystem, the agent runtime, driver
-synthesis, shell, hardware consolidation — are entirely not started. This
-is a genuinely solid, tested foundation; it is not yet an OS with a
-filesystem or a real user-space driver running — no claim on this page
-should be read as more than what's checked above.
+Phase 4 (Storage And Filesystem) has started: a real virtio-blk
+user-space block driver, with a genuine self-verified write/read round
+trip through a real IOMMU-backed DMA buffer, is done — the first device
+in this kernel to actually perform I/O through its assigned IOMMU
+domain, not just have one assigned. Getting it working surfaced a real,
+previously-latent kernel bug spanning every phase before this one (see
+the Phase 4 section above) — now fixed. The on-disk filesystem, the
+capability-scoped object store, and audit log persistence remain.
+Phases 5 through 8 — the agent runtime, driver synthesis, shell, hardware
+consolidation — are entirely not started. This is a genuinely solid,
+tested foundation; it is not yet an OS with a filesystem — no claim on
+this page should be read as more than what's checked above.
 
 ## Next concrete increment
 
-Phase 3 (User-Space Driver Framework) has exactly one item left, and it
-is NOT code: physically bringing up the selected Tier 2 machine (Lenovo
+Phase 4 (Storage And Filesystem): the on-disk filesystem is next — a
+documented format (ext2 suggested by `docs/ROADMAP.md`) over inventing
+one, built on top of the real virtio-blk block device this session just
+proved. Separately, Phase 3 has exactly one item left, and it is NOT
+code: physically bringing up the selected Tier 2 machine (Lenovo
 ThinkPad T480, `docs/TIER2_HARDWARE.md`) and confirming this kernel's
-real boot chain over its real serial line. That step needs the user to
-actually acquire and wire up the hardware — it cannot be completed by
-further code changes in this repository. Every OTHER Phase 3 item, and
-every Phase 1/Phase 2 exit criterion, is done and verified as of this
-update — the multi-process scheduling crash and Phase 1's per-process
-fault-isolation exit criterion, both previously noted as open, are fixed
-and verified (see the Phase 1/Phase 3 sections above). Once the physical
-bring-up happens, Phase 3 is fully done and Phase 4 (Storage And
-Filesystem) is next.
+real boot chain over its real serial line — needs the user to actually
+acquire and wire up the hardware, not further code changes here. Every
+Phase 1/Phase 2 exit criterion is done and verified.
