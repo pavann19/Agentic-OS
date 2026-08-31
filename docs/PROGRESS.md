@@ -416,6 +416,27 @@ Depends on Phase 2 (done). Started 2026-08-30.
       reproducible before); full regression (`test-boot`, `test-host`
       23/23, `test-faults.ps1` 4/4 including the real double-fault case)
       stays clean.
+
+      **Follow-up hardening pass, self-audit-driven, not crash-driven:**
+      after fixing the three bugs above, a deliberate grep of every
+      `static mut` in `kernel_rs` (prompted by being asked directly
+      whether Phase 1-3 is genuinely robust) turned up the SAME
+      interrupts-enabled check-then-mutate gap in three more places, none
+      of which had caused an observed crash yet but all reachable from
+      ordinary preemptible thread context by multiple concurrent driver
+      setup threads — the same precondition that made the original bug
+      real: `capability.rs` (`create_object`, `object_kind`, `revoke`,
+      and `CapabilityTable::grant`/`resolve`/`derive` — the single
+      busiest shared structure in the kernel, since every capability-
+      gated operation anywhere goes through it), `audit.rs` (`record`,
+      called from every one of those operations plus every IPC send/
+      receive), and `ipc.rs` (`create_endpoint`'s Vec growth — `send`/
+      `receive` themselves were already correctly interrupt-safe via real
+      atomics, not touched). All wrapped in the same `critical::
+      without_interrupts` fix. Verified: 5 more consecutive clean boot
+      runs, the audit log still showing 21 correctly sequential records
+      with no gaps (the exact structure just hardened) — full regression
+      stays clean.
 - [~] **Tier 2 physical machine selected and brought to serial output**
       (`docs/ROADMAP.md` §4 — needs IOMMU present, serial reachable,
       NVMe/AHCI storage, documented chipset) — **selection done, physical
