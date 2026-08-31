@@ -53,8 +53,16 @@ unsafe fn log_mut() -> &'static mut VecDeque<AuditRecord> {
 /// structure with no eviction policy otherwise, not a silent data-loss
 /// bug — `MAX_RECORDS` is generous enough that Phase 2's own demos never
 /// come close to it.
+/// Real gap found and closed alongside pmm.rs/heap.rs/thread.rs/
+/// capability.rs (see critical.rs's doc comment): this function is
+/// called from ordinary preemptible thread context by MANY unrelated
+/// callers (every capability grant/derive/revoke/resolve, every IPC
+/// send/receive, interrupt_forward's wait/acknowledge) — a preemption
+/// mid-push on the shared `LOG` VecDeque let two callers corrupt it the
+/// same way every other unprotected global mutation in this kernel
+/// could before this pass.
 pub fn record(event: AuditEvent) {
-    unsafe {
+    crate::critical::without_interrupts(|| unsafe {
         let seq = NEXT_SEQ;
         NEXT_SEQ += 1;
         let log = log_mut();
@@ -62,27 +70,27 @@ pub fn record(event: AuditEvent) {
             log.pop_front();
         }
         log.push_back(AuditRecord { seq, event });
-    }
+    });
 }
 
 pub fn len() -> usize {
-    unsafe { log_mut().len() }
+    crate::critical::without_interrupts(|| unsafe { log_mut().len() })
 }
 
 pub fn last_n(n: usize) -> alloc::vec::Vec<AuditRecord> {
-    unsafe {
+    crate::critical::without_interrupts(|| unsafe {
         let log = log_mut();
         let skip = log.len().saturating_sub(n);
         log.iter().skip(skip).copied().collect()
-    }
+    })
 }
 
 /// Dumps the whole log to serial — a diagnostic/demo tool, not how a real
 /// consumer (a Phase 5 agent-facing audit query interface) would read it.
 pub fn dump_all() {
-    unsafe {
+    crate::critical::without_interrupts(|| unsafe {
         for r in log_mut().iter() {
             klog_info!("AUDIT seq={} event={:?}", r.seq, r.event);
         }
-    }
+    });
 }

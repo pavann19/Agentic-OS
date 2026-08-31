@@ -64,7 +64,10 @@ fn spin_yield() {
 /// another process) in `table`.
 pub fn create_endpoint(table: &mut CapabilityTable, rights: Rights) -> CapId {
     let object_id = capability::create_object(KernelObjectKind::IpcEndpoint);
-    unsafe {
+    // Same real gap class as capability.rs/audit.rs (see critical.rs) --
+    // this Vec growth ran with interrupts enabled, called from ordinary
+    // preemptible thread context by multiple driver setup threads.
+    crate::critical::without_interrupts(|| unsafe {
         let eps = endpoints_mut();
         while eps.len() <= object_id as usize {
             eps.push(Endpoint {
@@ -72,7 +75,7 @@ pub fn create_endpoint(table: &mut CapabilityTable, rights: Rights) -> CapId {
                 message: Message::default(),
             });
         }
-    }
+    });
     table.grant(object_id, rights)
 }
 

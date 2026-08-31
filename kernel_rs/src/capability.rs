@@ -116,7 +116,14 @@ unsafe fn objects_mut() -> &'static mut Vec<KernelObject> {
 /// bringing the object into existence); the CAPABILITY handed back to the
 /// caller by whoever calls this is what's gated from then on.
 pub fn create_object(kind: KernelObjectKind) -> ObjectId {
-    unsafe {
+    // Real gap found and closed in the same pass that fixed pmm.rs/
+    // heap.rs/thread.rs (see critical.rs's doc comment): this check-
+    // then-push on the GLOBAL `OBJECTS` Vec ran with interrupts enabled,
+    // and is called from ordinary preemptible thread context by every
+    // driver's own setup code (user_driver.rs spawns several such
+    // threads) -- a preemption mid-push here is the exact same hazard
+    // class already fixed elsewhere, just not caught in the first pass.
+    crate::critical::without_interrupts(|| unsafe {
         let objects = objects_mut();
         let id = objects.len() as ObjectId;
         objects.push(KernelObject {
@@ -125,7 +132,7 @@ pub fn create_object(kind: KernelObjectKind) -> ObjectId {
             alive: true,
         });
         id
-    }
+    })
 }
 
 /// Returns the kind (and any data it carries — physical range, vector,
@@ -135,12 +142,12 @@ pub fn create_object(kind: KernelObjectKind) -> ObjectId {
 /// AFTER `CapabilityTable::resolve` already did the real access check;
 /// this function only answers "what is this", not "may you see it".
 pub fn object_kind(object_id: ObjectId) -> Option<KernelObjectKind> {
-    unsafe {
+    crate::critical::without_interrupts(|| unsafe {
         objects_mut()
             .get(object_id as usize)
             .filter(|o| o.alive)
             .map(|o| o.kind)
-    }
+    })
 }
 
 /// Bumps the object's generation (and marks it dead if `destroy` is set).
@@ -149,14 +156,14 @@ pub fn object_kind(object_id: ObjectId) -> Option<KernelObjectKind> {
 /// instant it runs, no matter how many hops of derivation separate them
 /// from the original grant.
 pub fn revoke(object_id: ObjectId, destroy: bool) {
-    unsafe {
+    crate::critical::without_interrupts(|| unsafe {
         if let Some(obj) = objects_mut().get_mut(object_id as usize) {
             obj.generation += 1;
             if destroy {
                 obj.alive = false;
             }
         }
-    }
+    });
     audit::record(audit::AuditEvent::Revoke { object_id });
 }
 
@@ -177,24 +184,24 @@ impl CapabilityTable {
     /// being derived from one already held. Everything after object
     /// creation goes through `derive`.
     pub fn grant(&mut self, object_id: ObjectId, rights: Rights) -> CapId {
-        let generation = unsafe {
-            objects_mut()
+        crate::critical::without_interrupts(|| unsafe {
+            let generation = objects_mut()
                 .get(object_id as usize)
                 .map(|o| o.generation)
-                .unwrap_or(0)
-        };
-        let cap = Capability {
-            object_id,
-            rights,
-            generation,
-        };
-        let id = self.slots.len() as CapId;
-        self.slots.push(Some(cap));
-        audit::record(audit::AuditEvent::Grant {
-            object_id,
-            rights: rights.0,
-        });
-        id
+                .unwrap_or(0);
+            let cap = Capability {
+                object_id,
+                rights,
+                generation,
+            };
+            let id = self.slots.len() as CapId;
+            self.slots.push(Some(cap));
+            audit::record(audit::AuditEvent::Grant {
+                object_id,
+                rights: rights.0,
+            });
+            id
+        })
     }
 
     /// Looks up `cap_id`, checks it against the object's CURRENT
@@ -212,12 +219,12 @@ impl CapabilityTable {
             .and_then(|s| *s)
             .ok_or(CapError::NoSuchCapability)?;
 
-        let current_gen = unsafe {
+        let current_gen = crate::critical::without_interrupts(|| unsafe {
             objects_mut()
                 .get(cap.object_id as usize)
                 .filter(|o| o.alive)
                 .map(|o| o.generation)
-        };
+        });
 
         let result = match current_gen {
             Some(g) if g == cap.generation => {
@@ -272,18 +279,20 @@ impl CapabilityTable {
         if !source.rights.contains(requested_rights) {
             return Err(CapError::AttenuationViolation);
         }
-        let new_cap = Capability {
-            object_id: source.object_id,
-            rights: requested_rights,
-            generation: source.generation,
-        };
-        let id = target.slots.len() as CapId;
-        target.slots.push(Some(new_cap));
-        audit::record(audit::AuditEvent::Derive {
-            object_id: source.object_id,
-            rights: requested_rights.0,
-        });
-        Ok(id)
+        Ok(crate::critical::without_interrupts(|| {
+            let new_cap = Capability {
+                object_id: source.object_id,
+                rights: requested_rights,
+                generation: source.generation,
+            };
+            let id = target.slots.len() as CapId;
+            target.slots.push(Some(new_cap));
+            audit::record(audit::AuditEvent::Derive {
+                object_id: source.object_id,
+                rights: requested_rights.0,
+            });
+            id
+        }))
     }
 }
 
