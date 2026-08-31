@@ -1,0 +1,20 @@
+[package]
+name = "virtio_blk_driver"
+version = "0.1.0"
+edition = "2021"
+
+# Phase 4's first real user-space driver: a genuine standalone ELF64
+# binary speaking the real virtio 1.0 "modern" PCI transport wire
+# protocol, built completely separately from kernel_rs, loaded at
+# runtime by kernel_rs/src/elf.rs -- same pattern as every Phase 3
+# driver.
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

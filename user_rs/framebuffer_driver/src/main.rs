@@ -44,12 +44,22 @@ struct FbInfo {
 
 /// syscall(num=4, a0=token): framebuffer-driver-ready signal (syscall.rs).
 unsafe fn syscall4(value: u64) {
+    // Real bug found on virtio_blk_driver, fixed here for consistency
+    // (same class, see that crate's module doc): SYSCALL/SYSRET doesn't
+    // save/restore general-purpose registers, and syscall_dispatch is
+    // free to clobber every System V caller-saved register, not just
+    // rcx/r11. Full clobber list now.
     core::arch::asm!(
         "mov rax, 4",
         "syscall",
         in("rdi") value,
         lateout("rax") _,
+        lateout("rsi") _,
+        lateout("rdx") _,
         lateout("rcx") _,
+        lateout("r8") _,
+        lateout("r9") _,
+        lateout("r10") _,
         lateout("r11") _,
         options(nostack)
     );

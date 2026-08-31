@@ -18,3 +18,5 @@ boot_rs/qemu_fatdir/
 user_rs/serial_driver/target/
 user_rs/framebuffer_driver/target/
 user_rs/keyboard_driver/target/
+user_rs/virtio_blk_driver/target/
+_evidence/disk.img

@@ -48,6 +48,7 @@ pub mod service_manager;
 pub mod syscall;
 pub mod thread;
 pub mod user_driver;
+pub mod virtio_blk;
 pub mod vmm;
 
 use bootinfo::BootInfo;
@@ -198,6 +199,12 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     let pci_devices = pci::enumerate();
     pci::log_all(&pci_devices);
     klog_info!("PCI_ENUMERATE_DONE count={}", pci_devices.len());
+
+    // Phase 4: real virtio-blk block device driver, spawned (if the
+    // device is present) as a real ELF-loaded ring-3 process -- same
+    // capability-gated pattern as every Phase 3 driver, extended to a
+    // real DMA-safe buffer + IOMMU domain assignment.
+    virtio_blk::spawn_if_present(&pci_devices);
 
     // Phase 3: device manager -- discovery, driver binding, lifecycle,
     // restart-on-crash. Consumes the real device list above; the

@@ -80,6 +80,31 @@ fn indices(vaddr: u64) -> (usize, usize, usize, usize) {
     kernel_common::pagetable::split_indices(vaddr)
 }
 
+/// Debug-only: walks `pml4_phys`'s tables for `vaddr` and returns the
+/// raw leaf PTE value (0 if not present at any level -- distinguishable
+/// from a genuinely-zero-flags present PTE, which never happens since
+/// PAGE_PRESENT is always set on any real mapping). Not used by normal
+/// boot code; exists for exactly the kind of "does this address space
+/// actually map what I think it maps" question real bug-hunting in this
+/// kernel keeps needing.
+pub unsafe fn debug_translate(pml4_phys: u64, vaddr: u64) -> u64 {
+    let (i4, i3, i2, i1) = indices(vaddr);
+    let pml4 = pmm::p2v_pub(pml4_phys) as *mut u64;
+    if *pml4.add(i4) & PAGE_PRESENT == 0 {
+        return 0;
+    }
+    let pdpt = pmm::p2v_pub(*pml4.add(i4) & ADDR_MASK) as *mut u64;
+    if *pdpt.add(i3) & PAGE_PRESENT == 0 {
+        return 0;
+    }
+    let pd = pmm::p2v_pub(*pdpt.add(i3) & ADDR_MASK) as *mut u64;
+    if *pd.add(i2) & PAGE_PRESENT == 0 {
+        return 0;
+    }
+    let pt = pmm::p2v_pub(*pd.add(i2) & ADDR_MASK) as *mut u64;
+    *pt.add(i1)
+}
+
 /// Maps one 4K page. `flags` should be `PAGE_WRITABLE`/`PAGE_NO_EXECUTE` as
 /// needed — `PAGE_PRESENT` is always added. Intermediate tables are
 /// allocated on demand via the PMM (so this must only be called while the

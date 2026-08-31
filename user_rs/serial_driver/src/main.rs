@@ -68,11 +68,28 @@ fn write_str(s: &str) {
 /// process's proof-of-life is visible via the normal klog path too, as a
 /// second, independent confirmation alongside the raw COM1 bytes above.
 unsafe fn syscall1(value: u64) {
+    // Real bug found and fixed on virtio_blk_driver (first driver whose
+    // code relied on a register surviving a syscall -- see that crate's
+    // module doc): SYSCALL/SYSRET does NOT save/restore general-purpose
+    // registers the way an interrupt/iretq does, and the kernel's own
+    // syscall_dispatch is a normal extern "C" fn free to clobber every
+    // System V caller-saved register (rdi/rsi/rdx/rcx/r8-r11), not just
+    // the two (rcx/r11) the hardware itself repurposes. Marking only
+    // those two as clobbered (as this function used to) let the compiler
+    // believe rsi/rdx/r8/r9/r10 survive a syscall unchanged -- true only
+    // by accident whenever nothing after the call happens to still need
+    // them, which was true for every prior driver until virtio_blk_driver
+    // wasn't. Full clobber list now, matching the real ABI.
     core::arch::asm!(
         "syscall",
         inout("rax") 1u64 => _,
         in("rdi") value,
+        lateout("rsi") _,
+        lateout("rdx") _,
         lateout("rcx") _,
+        lateout("r8") _,
+        lateout("r9") _,
+        lateout("r10") _,
         lateout("r11") _,
         options(nostack)
     );

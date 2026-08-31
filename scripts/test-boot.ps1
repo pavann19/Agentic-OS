@@ -18,6 +18,7 @@ param(
     [string]$OvmfCode = "C:\Program Files\qemu\share\edk2-x86_64-code.fd",
     [string]$FatDir = "boot_rs\qemu_fatdir",
     [string]$SerialLog = "_evidence\latest\serial.log",
+    [string]$DiskImage = "_evidence\disk.img",
     [int]$TimeoutSeconds = 20
 )
 
@@ -37,6 +38,19 @@ $env:TEMP = $repoTemp
 
 New-Item -ItemType Directory -Force -Path (Split-Path $SerialLog) | Out-Null
 
+# Phase 4: a real, persistent-across-runs raw disk image for the virtio-blk
+# device below. Created once (16MB, zero-filled) if it doesn't already
+# exist -- deliberately NOT recreated every run, since a real Phase 4 exit
+# criterion is "data written survives a reboot," which this same file
+# staying around across consecutive test-boot.ps1 invocations is what lets
+# a later increment actually prove.
+New-Item -ItemType Directory -Force -Path (Split-Path $DiskImage) | Out-Null
+if (-not (Test-Path $DiskImage)) {
+    $fs = [System.IO.File]::Create($DiskImage)
+    $fs.SetLength(16MB)
+    $fs.Close()
+}
+
 # Start-Process -ArgumentList joins array elements with plain spaces — it
 # does NOT auto-quote elements containing spaces (unlike ProcessStartInfo's
 # newer ArgumentList property). $OvmfCode ("C:\Program Files\...") has a
@@ -48,6 +62,12 @@ $qemuArgs = @(
     "-device", "intel-iommu,intremap=on",
     "-drive", "if=pflash,format=raw,readonly=on,file=`"$OvmfCode`"",
     "-drive", "file=fat:rw:$FatDir,format=raw",
+    # Phase 4: real virtio-blk block device. disable-legacy=on forces the
+    # modern-only PCI transport (the virtio_pci_cap capability-list layout
+    # kernel_rs/src/pci.rs's find_virtio_caps parses) -- no legacy I/O-BAR
+    # fallback to also support.
+    "-device", "virtio-blk-pci,drive=disk0,disable-legacy=on",
+    "-drive", "file=$DiskImage,if=none,id=disk0,format=raw",
     "-serial", "file:$SerialLog",
     "-display", "none",
     "-no-reboot"

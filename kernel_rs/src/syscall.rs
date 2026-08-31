@@ -317,6 +317,22 @@ extern "C" fn syscall_entry() {
         // doesn't take effect until after the NEXT instruction), so
         // nothing can be preempted mid-push.
         "sti",
+        // Real bug found and fixed (root-caused via Phase 4's
+        // virtio_blk_driver, the first caller whose code actually kept a
+        // value live in a callee-saved register — r13 — across a
+        // syscall): r12/r13 were used here as scratch space to reshuffle
+        // arguments into dispatch's own calling convention, WITHOUT
+        // saving/restoring the caller's original r12/r13 first. SysV C
+        // ABI (and every user-space caller's own reasonable assumption)
+        // treats r12-r15/rbx/rbp as callee-saved — a syscall silently
+        // clobbering two of them broke that contract for every syscall
+        // this kernel has ever executed, it just never had an observed
+        // symptom before now, because no earlier caller's code needed
+        // r12/r13 to still hold anything meaningful after the call.
+        // Pushed/popped now, the same real save-then-restore discipline
+        // rcx/r11 already get two lines below.
+        "push r12",
+        "push r13",
         // Syscall args arrive in rdi/rsi/rdx/r10/r8/r9 (Linux convention,
         // r10 not rcx — rcx is consumed by SYSCALL itself); num is in rax.
         // syscall_dispatch(num=rax, a0=rdi, a1=rsi) via the C calling
@@ -328,6 +344,8 @@ extern "C" fn syscall_entry() {
         "mov rdx, r13",              // dispatch arg2 = a1
         "call {dispatch}",
         // return value already in rax, exactly where sysretq's caller expects it
+        "pop r13",
+        "pop r12",
         "pop r11",
         "pop rcx",
         // `cli` before swapping onto the user's own stack: right after

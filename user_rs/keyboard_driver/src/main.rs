@@ -60,9 +60,14 @@ fn com1_write_str(s: &str) {
 }
 
 unsafe fn syscall1(value: u64) {
+    // Real bug found on virtio_blk_driver, fixed here for consistency
+    // (same class -- see that crate's module doc): full System V
+    // caller-saved clobber list, not just rcx/r11.
     core::arch::asm!(
         "mov rax, 1", "syscall",
-        in("rdi") value, lateout("rax") _, lateout("rcx") _, lateout("r11") _,
+        in("rdi") value,
+        lateout("rax") _, lateout("rsi") _, lateout("rdx") _, lateout("rcx") _,
+        lateout("r8") _, lateout("r9") _, lateout("r10") _, lateout("r11") _,
         options(nostack)
     );
 }
@@ -70,7 +75,8 @@ unsafe fn syscall1(value: u64) {
 unsafe fn syscall5_wait_kbd_interrupt() {
     core::arch::asm!(
         "mov rax, 5", "syscall",
-        lateout("rax") _, lateout("rcx") _, lateout("r11") _,
+        lateout("rax") _, lateout("rdi") _, lateout("rsi") _, lateout("rdx") _, lateout("rcx") _,
+        lateout("r8") _, lateout("r9") _, lateout("r10") _, lateout("r11") _,
         options(nostack)
     );
 }
@@ -78,7 +84,8 @@ unsafe fn syscall5_wait_kbd_interrupt() {
 unsafe fn syscall6_ack_kbd_interrupt() {
     core::arch::asm!(
         "mov rax, 6", "syscall",
-        lateout("rax") _, lateout("rcx") _, lateout("r11") _,
+        lateout("rax") _, lateout("rdi") _, lateout("rsi") _, lateout("rdx") _, lateout("rcx") _,
+        lateout("r8") _, lateout("r9") _, lateout("r10") _, lateout("r11") _,
         options(nostack)
     );
 }
