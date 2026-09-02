@@ -15,7 +15,9 @@ The development and CI target. Every phase gate in this project (`docs/PROGRESS.
 | GOP framebuffer | Supported | Phase 3 — real MMIO write, independently verified by a separate kernel-side readback |
 | `virtio-blk` storage | Supported | Phase 4 — real ext2 filesystem, reboot-persistence, power-loss injection (`scripts/test-powerloss.ps1`, 7/7 trials) |
 | AHCI (SATA) storage (`ich9-ahci`, 00:1f.2) | Supported (read path) | Phase 8 — real IDENTIFY DEVICE command, real device Model Number decoded and independently verified (`scripts/test-ahci.ps1`). Write path not yet implemented. |
+| NVMe storage | Supported (admin/Identify path) | Phase 8 — real admin queue init + Identify Controller command, real device Model Number decoded (`scripts/test-nvme.ps1`). Matched by PCI class, not vendor ID. I/O queue pair / real block read-write not yet implemented. |
 | `virtio-net` networking | Supported | Phase 6 — real driver synthesized from spec, real ARP frame independently pcap-verified, real bidirectional traffic observed |
+| Intel e1000-class networking | Supported | Phase 8 — real MAC read from hardware registers, real ARP frame independently pcap-verified, real bidirectional traffic observed (`scripts/test-e1000.ps1`) |
 | PCIe enumeration | Supported | Phase 3 — real config-space walk, `q35`'s real device topology |
 
 **Not supported on Tier 1, by design:** legacy (non-modern) VirtIO transport, AMD-Vi (this kernel targets Intel VT-d only), SMP/multi-core (this kernel is single-core throughout).
@@ -28,8 +30,8 @@ The development and CI target. Every phase gate in this project (`docs/PROGRESS.
 
 | Component | Status |
 |---|---|
-| Storage (real NVMe/AHCI, not `virtio-blk`) | **AHCI driver now exists** (Phase 8, `user_rs/ahci_driver`) — real IDENTIFY DEVICE verified against QEMU's own `ich9-ahci` emulation. Read path only so far; write path and real-hardware confirmation both remain. **Honest gap, not glossed over:** `docs/TIER2_HARDWARE.md`'s own research says the T480's primary storage is NVMe M.2, a genuinely different PCI device class from AHCI/SATA (NVMe drives don't go through a SATA controller at all) — this driver targets the chipset's AHCI controller (present on the T480 for any secondary/legacy SATA bay), not the primary NVMe slot. A real NVMe driver is still separate, not-yet-started work if the boot drive itself is NVMe. |
-| Networking (real Intel-class NIC, not `virtio-net`) | **No driver exists yet.** Same gap, network side — real hardware needs something like an `e1000`-family driver, not built. |
+| Storage (real NVMe/AHCI, not `virtio-blk`) | **Both AHCI and NVMe drivers now exist** (Phase 8, `user_rs/ahci_driver` + `user_rs/nvme_driver`) — real IDENTIFY DEVICE / Identify Controller verified against QEMU's own emulation of each. NVMe covers `docs/TIER2_HARDWARE.md`'s own researched PRIMARY-storage answer for the T480; AHCI covers a real secondary/legacy SATA path. **Honest gap remaining:** both are read/identify-only so far — no write path, no real block I/O queue pair for NVMe, and neither has been confirmed against real hardware. |
+| Networking (real Intel-class NIC, not `virtio-net`) | **e1000-class driver now exists** (Phase 8, `user_rs/e1000_driver`) — real MAC read from hardware, real ARP frame independently pcap-verified against QEMU's own e1000 emulation. **Honest gap remaining:** not confirmed against real hardware; only ARP/TX exercised, no real IP-stack traffic. |
 | Input (PS/2 keyboard) | Driver exists (Tier 1-verified) but never exercised on real PS/2 controller hardware — QEMU's emulation, however faithful, is not a substitute for confirming this on silicon. |
 | Display (GOP framebuffer) | Driver exists (Tier 1-verified) but never exercised on real GPU/firmware framebuffer hardware. |
 | IOMMU (real VT-d, not QEMU's emulation) | Kernel-side code is real and spec-driven, but real VT-d hardware has documented erratas and quirks no emulator reproduces — never confirmed against real silicon. |
