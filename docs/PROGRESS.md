@@ -813,15 +813,78 @@ live:**
   violator), neither affecting the authorized agent or the rest of the
   system.
 
-## Phase 6 — Driver Synthesis Loop — Not started
+## Phase 6 — Driver Synthesis Loop (4/5 deliverables complete — IN PROGRESS)
 
-Depends on Phase 5 and unconditionally on ADR-006 IOMMU support. The
-self-healing driver-agent loop discussed early in this project (spec →
-generate → snapshot-test → retry ×5 → human escalation) has zero code
-behind it — it was scoped as a milestone (`M-DRIVER-0`) in conversation
-only, never started, and correctly sequenced last among the dependent
-phases per the roadmap's reasoning (containment must exist before
-agent-written driver code runs at all).
+Depends on Phase 5 (done) and ADR-006 IOMMU support "complete and
+verified" — resolved as satisfied on Tier 1/QEMU (see the Phase 3
+section's Tier 2 note and "Next concrete increment" below for the full
+reasoning); physical hardware is a LATER sub-step within this phase
+itself, not a gate before starting it.
+
+- [x] **Snapshot-restore test harness** — `scripts/test-synthesis.ps1`:
+      real disposability, not simulated. Each attempt gets a brand-new
+      throwaway disk image and a brand-new QEMU process; a hang or
+      panic costs nothing but that one attempt.
+- [x] **Failure-capture pipeline** — each attempt's serial log is
+      classified into exactly one of `SUCCESS` / `FAULT` (the real
+      `[ERROR] EXCEPTION ...` line captured verbatim) / `TIMEOUT_HANG`
+      / `QEMU_EXITED_EARLY` — structured, not a bare pass/fail bit.
+- [x] **Bounded retry** — up to 5 attempts; the FULL classified history
+      (every attempt, not just the last) prints regardless of outcome.
+- [x] **First target: `virtio-net` on Tier 1** — `user_rs/virtio_net_driver`
+      (new crate): a real virtio-net 1.0 driver built from the actual
+      VIRTIO spec (§5.1) + real PCI configuration space, per the
+      roadmap's own constraint on this deliverable — NOT copied from
+      `virtio_blk_driver`'s wire protocol (only the shared PCI/MMIO
+      transport scaffolding is genuinely reusable; two real virtqueues,
+      a real `virtio_net_config` read, real `virtio_net_hdr` framing are
+      all new). **Real synthesis-loop evidence, not staged:** the
+      FIRST attempt used the legacy 10-byte `virtio_net_hdr`. The
+      device's own TX-completion signal reported success regardless (it
+      doesn't validate frame contents) — but QEMU's `-object
+      filter-dump` packet capture, independent host-side evidence, not
+      self-reported, showed the transmitted frame arriving 2 bytes
+      short, corrupted at the very start. Root-caused by inspecting the
+      pcap byte-for-byte: VIRTIO_F_VERSION_1 mandates the 12-byte
+      `virtio_net_hdr_v1` (adds `num_buffers`), not the 10-byte legacy
+      header, once negotiated — the device had parsed this driver's own
+      first 2 frame bytes as that field. **Fixed and re-verified live:**
+      the pcap capture is now byte-correct (real broadcast dst, the real
+      negotiated MAC as src, the full intended ARP payload matching
+      exactly) — and a genuine ARP REPLY came back from QEMU's virtual
+      gateway, real independently-observed bidirectional network
+      traffic, not required by the exit criteria but real evidence
+      beyond what was asked. Reproduced clean on a second, independent
+      harness run.
+- [ ] **Physical-hardware harness** — explicitly sequenced by the
+      roadmap's own deliverable text as "only after Tier 1 succeeds
+      repeatedly" — correctly not started yet, not a gap.
+
+**Phase 6 exit criteria (`docs/ROADMAP.md` §5) — 2 of 4 demonstrated
+live, 1 partially, 1 not yet:**
+- "Agent-synthesized `virtio-net` driver loads, brings the link up, and
+  passes traffic in QEMU" — DONE, live evidence above (link-up bit read
+  from real config space; a real frame transmitted, completed, and
+  independently pcap-verified).
+- "An induced failure is captured, fed back, and corrected within the
+  retry budget" — PARTIALLY demonstrated: a real failure WAS found,
+  fed back (via pcap inspection, not the harness's own automated
+  classification), and corrected — but this was a naturally-occurring
+  synthesis bug caught by manual evidence review, not yet a
+  DELIBERATELY induced failure exercising the harness's own automated
+  `FAULT`/`TIMEOUT_HANG` classification paths end to end. A real
+  induced-fault trial (e.g. a deliberately bad descriptor address) is
+  worth doing to close this fully.
+- "Exhausting the budget produces a clean halt with a complete log
+  trail" — the harness code path exists and is real (`exit 1` +
+  full history on 5/5 failures) but has never actually been exercised
+  by 5 consecutive real failures, since this target succeeded on
+  attempt 1 both times it ran clean.
+- "A synthesized driver attempting out-of-domain DMA is blocked by the
+  IOMMU, and the block appears in the audit log" — NOT YET
+  demonstrated: this kernel's IOMMU code has no fault-capture/reporting
+  path yet (never previously needed one) — real follow-up work, stated
+  honestly as not done, not glossed over.
 
 ## Phase 7 — Shell And Operator Surface — Not started
 
