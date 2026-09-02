@@ -14,6 +14,7 @@ The development and CI target. Every phase gate in this project (`docs/PROGRESS.
 | PS/2 keyboard | Supported | `scripts/test-keyboard.ps1` — real synthetic keystroke via QEMU's own monitor, full IRQ1 → syscall → scancode path verified |
 | GOP framebuffer | Supported | Phase 3 — real MMIO write, independently verified by a separate kernel-side readback |
 | `virtio-blk` storage | Supported | Phase 4 — real ext2 filesystem, reboot-persistence, power-loss injection (`scripts/test-powerloss.ps1`, 7/7 trials) |
+| AHCI (SATA) storage (`ich9-ahci`, 00:1f.2) | Supported (read path) | Phase 8 — real IDENTIFY DEVICE command, real device Model Number decoded and independently verified (`scripts/test-ahci.ps1`). Write path not yet implemented. |
 | `virtio-net` networking | Supported | Phase 6 — real driver synthesized from spec, real ARP frame independently pcap-verified, real bidirectional traffic observed |
 | PCIe enumeration | Supported | Phase 3 — real config-space walk, `q35`'s real device topology |
 
@@ -27,7 +28,7 @@ The development and CI target. Every phase gate in this project (`docs/PROGRESS.
 
 | Component | Status |
 |---|---|
-| Storage (real NVMe/AHCI, not `virtio-blk`) | **No driver exists yet.** This kernel only speaks `virtio-blk`; real hardware needs a real NVMe or AHCI driver, not built (see `docs/PROGRESS.md`'s Phase 8 notes for scoped follow-up work). |
+| Storage (real NVMe/AHCI, not `virtio-blk`) | **AHCI driver now exists** (Phase 8, `user_rs/ahci_driver`) — real IDENTIFY DEVICE verified against QEMU's own `ich9-ahci` emulation. Read path only so far; write path and real-hardware confirmation both remain. **Honest gap, not glossed over:** `docs/TIER2_HARDWARE.md`'s own research says the T480's primary storage is NVMe M.2, a genuinely different PCI device class from AHCI/SATA (NVMe drives don't go through a SATA controller at all) — this driver targets the chipset's AHCI controller (present on the T480 for any secondary/legacy SATA bay), not the primary NVMe slot. A real NVMe driver is still separate, not-yet-started work if the boot drive itself is NVMe. |
 | Networking (real Intel-class NIC, not `virtio-net`) | **No driver exists yet.** Same gap, network side — real hardware needs something like an `e1000`-family driver, not built. |
 | Input (PS/2 keyboard) | Driver exists (Tier 1-verified) but never exercised on real PS/2 controller hardware — QEMU's emulation, however faithful, is not a substitute for confirming this on silicon. |
 | Display (GOP framebuffer) | Driver exists (Tier 1-verified) but never exercised on real GPU/firmware framebuffer hardware. |

@@ -1007,7 +1007,7 @@ live:**
   (which would have false-matched an unrelated, pre-existing kill from
   `fault_isolation_demo`'s own deliberate crash earlier in boot).
 
-## Phase 8 — Hardware Consolidation And Release (4/5 deliverables complete, everything achievable without physical hardware — IN PROGRESS)
+## Phase 8 — Hardware Consolidation And Release (4/5 deliverables complete, 1 partial — real progress on everything achievable without physical hardware — IN PROGRESS)
 
 Depends on Phases 6 and 7 (both done). Scoped explicitly against what
 does and doesn't need Tier 2 physical hardware, per the user's own
@@ -1055,17 +1055,52 @@ request — see below for exactly which parts are genuinely blocked.
       `virtio-blk` I/O round trip included): **5076ms**. Explicitly
       labeled as QEMU/TCG numbers for regression tracking, not
       real-hardware performance claims.
-- [ ] **Tier 2 machine fully supported** (storage, input, display,
+- [~] **Tier 2 machine fully supported** (storage, input, display,
       network) — genuinely blocked on physical hardware for the
       exit-criterion half ("Tier 2 hardware boots to shell..."), but
-      NOT entirely blocked for the driver-code half: this kernel only
-      has `virtio-blk`/`virtio-net` drivers, and real Tier 2 hardware
-      needs real NVMe-or-AHCI and Intel-NIC-class drivers instead —
-      both are spec-based driver work buildable and testable against
-      QEMU's OWN emulation of that hardware (`-device nvme`, ahci is
-      already enumerated as `00:1f.2`, `-device e1000`), same shape as
-      Phase 6's `virtio-net` synthesis. Not started this session —
-      real, scoped follow-up work, not a hardware-only blocker.
+      real driver-code progress made on the storage half:
+      `user_rs/ahci_driver` + `kernel_rs/src/ahci.rs` (new): a real
+      AHCI driver built from the spec + this device's own real PCI
+      config space, targeting QEMU's `ich9-ahci` controller (00:1f.2).
+      Enables AHCI mode, finds a real active SATA port
+      (`PxSSTS.DET`/`PxSIG` checked, not assumed), issues a real ATA
+      IDENTIFY DEVICE command through a real command list/FIS/command
+      table, and decodes the device's own real Model Number string —
+      **verified live, reproduced twice:**
+      `AHCI_SELF_CHECK_PASS: real IDENTIFY DEVICE completed,
+      model="QEMU HARDDISK"`. Read path only so far (write path is real,
+      scoped follow-up work, same "polled, not interrupt-driven" scope
+      note `virtio_blk_driver` already carries).
+
+      **Real, more significant bug found and fixed getting here, before
+      AHCI could even be added safely:** `iommu::assign_device`
+      allocated a FRESH context-table page and unconditionally
+      overwrote the PCI bus's root-table entry on EVERY call. Since a
+      context table is one page per BUS, not per device, a second call
+      for a different device on the SAME bus silently orphaned every
+      previously-assigned device's own context entry — with `virtio-blk`,
+      `virtio-net`, AND now AHCI all sharing bus 0, adding a third
+      same-bus device would have made this land for real. **Fixed** by
+      reusing the same context-table page for a bus across calls
+      (allocated once, on the first device assigned there); each call
+      now only ever writes its own slot. Domain-ID uniqueness fixed in
+      the same pass (was derived from bus alone, causing same-bus
+      devices to collide) with a real monotonic counter. `scripts/
+      test-ahci.ps1` directly checks the actual regression this
+      targets — `virtio-blk`'s own self-check still passes with AHCI
+      now also assigned on the same bus.
+
+      **Still genuinely missing, honestly scoped, not glossed over:**
+      no real Intel-NIC-class driver exists (`virtio-net` remains this
+      kernel's only network driver — real Tier 2 hardware won't have
+      virtio); NVMe M.2 is `docs/TIER2_HARDWARE.md`'s own researched
+      primary-storage answer for the T480, a genuinely different PCI
+      device class from AHCI/SATA that this driver does NOT cover — see
+      `docs/SUPPORTED_HARDWARE.md` for the honest distinction. Both are
+      real, scoped follow-up work, buildable against QEMU's own
+      emulation (`-device e1000`, `-device nvme`), same shape as this
+      increment and Phase 6's `virtio-net` synthesis — not attempted
+      this session.
 
 **Phase 8 exit criteria (`docs/ROADMAP.md` §5) — 1 of 3 fully
 demonstrated, 1 genuinely blocked, 1 not yet attempted:**
