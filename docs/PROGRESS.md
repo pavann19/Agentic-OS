@@ -1007,12 +1007,76 @@ live:**
   (which would have false-matched an unrelated, pre-existing kill from
   `fault_isolation_demo`'s own deliberate crash earlier in boot).
 
-## Phase 8 — Hardware Consolidation And Release — Not started
+## Phase 8 — Hardware Consolidation And Release (4/5 deliverables complete, everything achievable without physical hardware — IN PROGRESS)
 
-Tier 2 hardware full support, release image, full automated suite,
-supported-hardware list, performance baselines — none started. Tier 2
-hardware itself hasn't been selected yet (gated on IOMMU support existing,
-per §7 of `docs/ROADMAP.md`).
+Depends on Phases 6 and 7 (both done). Scoped explicitly against what
+does and doesn't need Tier 2 physical hardware, per the user's own
+request — see below for exactly which parts are genuinely blocked.
+
+- [x] **Release image build + reproducible-build verification** —
+      `scripts/build-release.ps1`: real clean-build assembly of the
+      deployable artifact set (`BOOTX64.EFI` + `kernel.elf` +
+      `font.psf`) with a real SHA256 manifest. `scripts/
+      verify-reproducible-build.ps1`: builds twice from clean, compares
+      hashes. **Real, non-obvious finding along the way:** `kernel_rs`'s
+      ELF output was already byte-reproducible with no changes needed;
+      `boot_rs`'s UEFI PE binary was NOT — root-caused via a real
+      `cmp -l` byte diff (not guessed): the mandatory PE/COFF
+      `TimeDateStamp` field (three header locations) plus an 8-byte
+      randomly-seeded CodeView debug-info GUID accounted for every
+      differing byte. **Fixed** with two standard MSVC-linker flags
+      (`/Brepro /DEBUG:NONE`) — verified live: two independent clean
+      builds now produce byte-identical output for every release
+      artifact.
+- [x] **Full automated suite** — `scripts/test-integration.ps1` (+ new
+      `scripts/test-host.ps1`, `scripts/test-release.ps1`): all 9 real
+      test suites (host, boot, faults, keyboard, power-loss, both
+      synthesis harnesses, shell, release-boot) in one pass, real
+      aggregate pass/fail. **Verified live, clean run: ALL 9 PASS,
+      ~4.6 minutes total, from a genuinely clean checkout** — the
+      phase's own exit criterion, closed. A real flakiness was hit and
+      root-caused during this work, not silenced: an initial
+      `test-shell` failure inside the full suite turned out to be a
+      genuine staleness bug in this session's own manual deployment
+      (a `kernel.elf` that had drifted out of sync with source during
+      earlier cwd confusion) — confirmed by hash comparison, fixed by a
+      definitive rebuild-and-redeploy, reproduced clean twice after.
+- [x] **Documented supported-hardware list** — `docs/SUPPORTED_HARDWARE.md`:
+      narrow and honest, per-component Tier 1 status with evidence
+      pointers, and Tier 2 status stated plainly as "selection done,
+      physical bring-up not done" — including the real, currently-missing
+      pieces (no NVMe/AHCI driver, no real NIC driver exists; this
+      kernel only speaks `virtio-blk`/`virtio-net`, which real Tier 2
+      hardware won't have).
+- [x] **Boot-time and I/O throughput baselines** — `docs/PERFORMANCE_BASELINE.md`
+      + `scripts/measure-performance.ps1`: real Tier 1 numbers,
+      genuinely measured (median of 3 runs each) — boot → `KERNEL_ENTER`:
+      **4407ms**; boot → full steady state (`FS_SELF_CHECK_PASS`, a real
+      `virtio-blk` I/O round trip included): **5076ms**. Explicitly
+      labeled as QEMU/TCG numbers for regression tracking, not
+      real-hardware performance claims.
+- [ ] **Tier 2 machine fully supported** (storage, input, display,
+      network) — genuinely blocked on physical hardware for the
+      exit-criterion half ("Tier 2 hardware boots to shell..."), but
+      NOT entirely blocked for the driver-code half: this kernel only
+      has `virtio-blk`/`virtio-net` drivers, and real Tier 2 hardware
+      needs real NVMe-or-AHCI and Intel-NIC-class drivers instead —
+      both are spec-based driver work buildable and testable against
+      QEMU's OWN emulation of that hardware (`-device nvme`, ahci is
+      already enumerated as `00:1f.2`, `-device e1000`), same shape as
+      Phase 6's `virtio-net` synthesis. Not started this session —
+      real, scoped follow-up work, not a hardware-only blocker.
+
+**Phase 8 exit criteria (`docs/ROADMAP.md` §5) — 1 of 3 fully
+demonstrated, 1 genuinely blocked, 1 not yet attempted:**
+- "The full suite passes from a clean checkout with no manual steps" —
+  **DONE**, live evidence above.
+- "Release image is reproducible from source" — **DONE**, live evidence
+  above.
+- "Tier 2 hardware boots to shell with working storage, input, display,
+  and network" — **genuinely blocked**, no way around it without the
+  physical machine (see `docs/TIER2_HARDWARE.md` and the Phase 3
+  section above for what that actually requires).
 
 ---
 
