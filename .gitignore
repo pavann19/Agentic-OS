@@ -40,3 +40,9 @@ user_rs/virtio_net_driver/variants/
 user_rs/shell/target/
 _evidence/disk-shell-debug.img
 _evidence/disk-shell-test.img
+dist/
+_evidence/disk-release-test.img
+_evidence/perf-result.json
+_evidence/perf-disk-a.img
+_evidence/perf-disk-b.img
+_evidence/perf-measure.log

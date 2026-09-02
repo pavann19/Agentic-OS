@@ -10,4 +10,4 @@ build-std-features = ["compiler-builtins-mem"]
 # EFI_APPLICATION; /entry is pinned explicitly rather than relying on
 # lld-link's default entry-symbol guess, so a rename of efi_main would fail
 # to link instead of silently producing an unbootable image.
-rustflags = ["-C", "link-args=/entry:efi_main"]
+rustflags = ["-C", "link-args=/entry:efi_main /Brepro /DEBUG:NONE"]

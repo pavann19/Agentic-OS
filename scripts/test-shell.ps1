@@ -28,7 +28,7 @@ param(
     [string]$DiskImage = "_evidence\disk-shell-test.img",
     [int]$ComPort = 45500,
     [int]$BootWaitSeconds = 9,
-    [int]$CommandWaitMs = 2000
+    [int]$CommandWaitMs = 2500
 )
 
 $ErrorActionPreference = "Stop"
@@ -112,6 +112,24 @@ try {
         $stream.Flush()
     }
 
+    # Real, disclosed structural fact this test has to work around, not
+    # paper over: COM1 is shared between the interactive shell AND
+    # ambient kernel logging (periodic heartbeat threads, a delayed
+    # boot-time audit dump) still running in the background this late
+    # in boot -- real output really can interleave mid-response. An
+    # early-exit "stop as soon as a prompt reappears" optimization was
+    # tried and made things WORSE (a lucky background print ending near
+    # "agentos> " could trigger a false-early exit before the actual
+    # command response had arrived) -- reverted in favor of simply
+    # reading for the full window every time and checking the ENTIRE
+    # accumulated transcript afterward, not an isolated per-command
+    # slice, for exactly this reason.
+    function Send-Command($text) {
+        Send-Line $text
+        Start-Sleep -Milliseconds $CommandWaitMs
+        [void]$transcript.Append((Read-Available))
+    }
+
     # Now connected before boot output begins -- drain until the
     # shell's own prompt has genuinely appeared (real content-based
     # wait, not a guessed delay), bounded so a real hang still fails
@@ -124,17 +142,13 @@ try {
     }
 
     foreach ($cmd in @("help", "ps", "tools", "audit")) {
-        Send-Line $cmd
-        Start-Sleep -Milliseconds $CommandWaitMs
-        [void]$transcript.Append((Read-Available))
+        Send-Command $cmd
     }
 
     # Real natural-language intent path (deliverable 4): the SAME
     # underlying command, reached via a free-text sentence instead of
     # the exact command name.
-    Send-Line "show me the processes"
-    Start-Sleep -Milliseconds $CommandWaitMs
-    [void]$transcript.Append((Read-Available))
+    Send-Command "show me the processes"
 
     # The real capability-boundary demo: port 0x64 (PS/2 controller) is
     # NOT in this shell's COM1-only PortIoRange grant. Real bug found
