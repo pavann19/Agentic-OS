@@ -87,6 +87,16 @@ pub enum KernelObjectKind {
     /// not full IOPL=3 (which would open ALL ports, defeating the point of
     /// a capability grant).
     PortIoRange { base: u16, count: u16 },
+    /// Phase 4's object store: one file, named by its real ext2 inode
+    /// number, not a human-readable path — `object_store.rs`. There is
+    /// no separate "list files" or "open by name" API anywhere in this
+    /// kernel; a capability IS the only way to name a file at all. A
+    /// process without one cannot enumerate, guess into, or otherwise
+    /// discover that a given inode's file exists — `resolve()` returns
+    /// the exact same `NoSuchCapability` for "this table never held it"
+    /// as it would for a bare made-up index, by construction, not by a
+    /// separate access-control check layered on top.
+    FileObject { inode: u32 },
 }
 
 pub struct KernelObject {

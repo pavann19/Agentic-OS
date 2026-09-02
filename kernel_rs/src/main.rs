@@ -39,6 +39,7 @@ pub mod heap;
 pub mod idt;
 pub mod iommu;
 pub mod klog;
+pub mod object_store;
 pub mod pci;
 pub mod pic;
 pub mod pmm;
@@ -461,6 +462,39 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         }
     }
     klog_info!("CAPABILITIES_GRANTED_AND_DERIVED");
+
+    // Phase 4's object store exit criterion, demonstrated directly: "A
+    // process without a capability to a file cannot discover that the
+    // file exists." Two SEPARATE, otherwise-empty capability tables --
+    // one gets a real FileObject capability for the real ext2 file this
+    // session's virtio_blk_driver created (inode 11, kernel_common::
+    // ext2::FILE_INODE); the other never does. The proof isn't a
+    // separate "permission denied" message -- it's that the SAME cap_id
+    // in the table that never held it produces the EXACT SAME
+    // NoSuchCapability error a bare made-up index would, because there
+    // is no separate existence check to fail differently.
+    {
+        let mut holder_table = capability::CapabilityTable::new();
+        let stranger_table = capability::CapabilityTable::new();
+
+        let file_cap = object_store::create_file_capability(
+            &mut holder_table,
+            11, // kernel_common::ext2::FILE_INODE -- the real file on disk
+            capability::Rights::MAP,
+        );
+
+        match object_store::resolve_to_inode(&holder_table, file_cap, capability::Rights::MAP) {
+            Ok(inode) => klog_info!("OBJSTORE_RESOLVED_OK inode={} (holder table)", inode),
+            Err(e) => klog_info!("OBJSTORE_RESOLVE_UNEXPECTED_FAILURE {:?}", e),
+        }
+
+        match object_store::resolve_to_inode(&stranger_table, file_cap, capability::Rights::MAP) {
+            Err(object_store::ObjectStoreError::Cap(capability::CapError::NoSuchCapability)) => {
+                klog_info!("OBJSTORE_DISCOVERY_DENIED_OK (stranger table: NoSuchCapability, indistinguishable from nonexistent)");
+            }
+            other => klog_info!("OBJSTORE_DISCOVERY_TEST_UNEXPECTED result={:?}", other.is_ok()),
+        }
+    }
 
     thread::spawn(demo_ipc_sender);
     thread::spawn(demo_ipc_receiver);
