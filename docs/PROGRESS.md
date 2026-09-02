@@ -473,7 +473,7 @@ nightly hard-errors on this now; fixed with
 injection suite all pass with zero regression against this phase's work
 so far.
 
-## Phase 4 — Storage And Filesystem (1/4 items complete — IN PROGRESS)
+## Phase 4 — Storage And Filesystem (2/4 items complete — IN PROGRESS)
 
 Depends on Phase 3 (done). Started this session.
 
@@ -520,19 +520,50 @@ Depends on Phase 3 (done). Started this session.
       clobbered by `syscall_dispatch` itself) but only silently correct
       by accident before. Fixed in all four driver crates for real
       consistency.
-- [ ] **On-disk filesystem** (documented format preferred — ext2
-      suggested by `docs/ROADMAP.md`, FAT32 already required for the
-      ESP) — not started.
+- [x] **On-disk filesystem** (documented format preferred — ext2
+      suggested by `docs/ROADMAP.md`) — real, spec-correct, minimal
+      ext2: `kernel_common::ext2` (new, pure logic, zero unsafe) builds
+      real on-disk superblock/group-descriptor/bitmap/inode-table/
+      directory-entry structures; `virtio_blk_driver` runs it for real
+      against the actual disk. Explicitly scoped for this increment
+      (stated in the module doc): one block group, direct blocks only
+      (12KB file cap), a fixed layout rather than a general allocator.
+      **Verified across two SEPARATE real QEMU boots on the same disk
+      image** — boot 1 formats and writes one real file; boot 2 finds it
+      already formatted, does NOT reformat, and reads the SAME file back
+      byte-identical. This is Phase 4's core exit criterion, demonstrated
+      directly. 8 new `host_tests` assertions verify the real on-disk
+      bytes independently (not via the same helpers that built them).
+      **A genuinely deep toolchain bug found and fixed here, affecting
+      every freestanding crate in the repo, not just this one:** this is
+      the first code in the project to zero-init/copy buffers large
+      enough for LLVM to lower into `memset`/`memcpy` calls, and on this
+      project's toolchain those calls are emitted as INDIRECT calls
+      through a permanently-unpopulated slot — regardless of whether a
+      real, correctly-linked symbol exists. Providing one
+      (`kernel_common::mem_intrinsics`) fixed the symbol but not the call
+      site. The real fix has two parts: rebuilding `compiler_builtins`
+      with the `mem` feature via `[unstable] build-std` in every affected
+      crate's own `.cargo/config.toml`, AND rewriting every zero-fill/
+      copy pattern (including plain `[0u8; N]` array literals and even a
+      function *returning* `[u8; 1024]` by value) to use volatile writes
+      and in-place `MaybeUninit` construction, since LLVM's loop-idiom
+      recognition converts even hand-written loops into the same broken
+      call at any optimization level — volatile semantics are what
+      reliably defeats that recognition. Applied defensively to all four
+      driver crates, even though only `virtio_blk_driver` had a symptom.
 - [ ] **Object store with capability-scoped naming** (no global
       namespace an unprivileged process can walk) — not started.
 - [ ] **Audit log persistence, with rotation** (deferred obligation from
       ADR-005) — not started.
 
-None of Phase 4's exit criteria (`docs/ROADMAP.md` §5 — data survives a
-reboot byte-identical; capability-less processes can't discover a file's
-existence; power-loss leaves the filesystem mountable with bounded,
-detected corruption; audit records survive rotation) are demonstrable
-yet — they need the filesystem item above, not just the block device.
+Phase 4's core exit criterion (`docs/ROADMAP.md` §5 — "data written
+survives a reboot and reads back byte-identical") is now demonstrated
+directly, live, across two separate boots. The other three exit
+criteria (capability-less processes can't discover a file's existence;
+power-loss leaves the filesystem mountable with bounded, detected
+corruption; audit records survive rotation) need the two remaining
+items above.
 
 ## Phase 5 — Agent Runtime Substrate — Not started
 
