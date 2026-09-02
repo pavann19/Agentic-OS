@@ -24,9 +24,20 @@ const DRIVER_STACK_VADDR: u64 = 0x0000_0000_0070_0000;
 const INFO_VADDR: u64 = 0x0000_0000_0051_0000;
 const DMA_VADDR: u64 = 0x0000_0000_0052_0000;
 
-static VIRTIO_NET_DRIVER_ELF: &[u8] = include_bytes!(
-    "../../user_rs/virtio_net_driver/target/x86_64-unknown-none/release/virtio_net_driver"
-);
+// Real induced-failure trial support (this crate's own Cargo feature
+// `synthesis_induced_fault`, off by default): embeds the SAME crate's
+// deliberately-buggy build (its own `induced_fault` feature -- a TX
+// descriptor pointing outside its assigned IOMMU domain) instead of the
+// normal one, so `scripts/test-synthesis-fault-demo.ps1` can boot a
+// kernel that genuinely exercises Phase 6's induced-failure and IOMMU
+// containment exit criteria, real hardware-level DMA blocking included,
+// not simulated.
+#[cfg(not(feature = "synthesis_induced_fault"))]
+static VIRTIO_NET_DRIVER_ELF: &[u8] =
+    include_bytes!("../../user_rs/virtio_net_driver/variants/virtio_net_driver_good");
+#[cfg(feature = "synthesis_induced_fault")]
+static VIRTIO_NET_DRIVER_ELF: &[u8] =
+    include_bytes!("../../user_rs/virtio_net_driver/variants/virtio_net_driver_induced_fault");
 
 #[repr(C)]
 struct VirtioNetInfo {

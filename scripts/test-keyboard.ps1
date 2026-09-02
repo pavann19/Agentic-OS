@@ -60,7 +60,7 @@ $qemuArgs = @(
     "-device", "intel-iommu,intremap=on",
     "-drive", "if=pflash,format=raw,readonly=on,file=`"$OvmfCode`"",
     "-drive", "file=fat:rw:$FatDir,format=raw",
-    "-device", "virtio-blk-pci,drive=disk0,disable-legacy=on",
+    "-device", "virtio-blk-pci,drive=disk0,disable-legacy=on,iommu_platform=on,ats=on",
     "-drive", "file=$DiskImage,if=none,id=disk0,format=raw",
     "-serial", "file:$SerialLog",
     "-monitor", "tcp:127.0.0.1:$MonitorPort,server,nowait",

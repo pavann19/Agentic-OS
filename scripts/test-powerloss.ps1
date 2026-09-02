@@ -65,7 +65,7 @@ function Start-Qemu($diskPath, $serialLog) {
         "-device", "intel-iommu,intremap=on",
         "-drive", "if=pflash,format=raw,readonly=on,file=`"$OvmfCode`"",
         "-drive", "file=fat:rw:$FatDir,format=raw",
-        "-device", "virtio-blk-pci,drive=disk0,disable-legacy=on",
+        "-device", "virtio-blk-pci,drive=disk0,disable-legacy=on,iommu_platform=on,ats=on",
         "-drive", "file=$diskPath,if=none,id=disk0,format=raw",
         "-serial", "file:$serialLog",
         "-display", "none",

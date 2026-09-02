@@ -10,6 +10,16 @@ edition = "2021"
 [dependencies]
 kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
 
+[features]
+# Phase 6's real induced-failure trial (docs/ROADMAP.md Phase 6 exit
+# criteria: "an induced failure is captured, fed back, and corrected
+# within the retry budget" + the IOMMU containment criterion). When
+# enabled, this driver deliberately points its TX descriptor at a real
+# physical address OUTSIDE the one page its IOMMU domain actually
+# covers (kernel_rs/src/virtio_net.rs grants exactly one page) -- a
+# real out-of-domain DMA attempt, not a simulated one.
+induced_fault = []
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

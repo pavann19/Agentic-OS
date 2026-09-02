@@ -103,6 +103,7 @@ fn event_discriminant(event: crate::audit::AuditEvent) -> (u32, u32, u32) {
         InterruptDelivered { vector } => (6, vector as u32, 0),
         InterruptAcknowledged { vector } => (7, vector as u32, 0),
         PolicyDenied { rights } => (8, rights, 0),
+        IommuFault { source_id, reason } => (9, source_id as u32, reason as u32),
     }
 }
 

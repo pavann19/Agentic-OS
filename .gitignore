@@ -32,3 +32,8 @@ _evidence/disk-timing-test.img
 _evidence/timing-test.log
 _evidence/synthesis/
 _evidence/synthesis-attempt1-bug-found/
+_evidence/synthesis-fault-demo/
+_evidence/disk-fault-manual.img
+_evidence/fault-manual.log
+boot_rs/kernel_variants/
+user_rs/virtio_net_driver/variants/

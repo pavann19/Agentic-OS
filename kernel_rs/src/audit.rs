@@ -33,6 +33,14 @@ pub enum AuditEvent {
     /// grant-time refusal: the capability was never minted in the first
     /// place.
     PolicyDenied { rights: u32 },
+    /// Phase 6's IOMMU containment exit criterion: a real VT-d DMA
+    /// remapping fault was observed (via the Fault Recording Register,
+    /// `iommu.rs::poll_and_log_fault`) — a device attempted to DMA
+    /// somewhere outside its assigned domain and hardware, not this
+    /// kernel's own policy, blocked it. `source_id` is the real
+    /// bus/device/function that triggered it (VT-d's own SID field,
+    /// bus in the high byte); `reason` is VT-d's own fault-reason code.
+    IommuFault { source_id: u16, reason: u8 },
 }
 
 #[derive(Clone, Copy)]

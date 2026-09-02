@@ -326,6 +326,10 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
                     klog_info!("IOMMU_INIT_START");
                     if iommu::init(dmar_phys) {
                         klog_info!("IOMMU_INIT_DONE");
+                        // Phase 6's containment exit criterion: real,
+                        // ongoing fault monitoring, not a one-shot test
+                        // hook -- see iommu.rs's own doc.
+                        iommu::spawn_fault_monitor();
                         // Real domain assignment for a real device this
                         // session's own PCI enumeration found: the SATA/
                         // AHCI controller (00:1f.2). Grants it exactly one

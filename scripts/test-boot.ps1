@@ -66,7 +66,7 @@ $qemuArgs = @(
     # modern-only PCI transport (the virtio_pci_cap capability-list layout
     # kernel_rs/src/pci.rs's find_virtio_caps parses) -- no legacy I/O-BAR
     # fallback to also support.
-    "-device", "virtio-blk-pci,drive=disk0,disable-legacy=on",
+    "-device", "virtio-blk-pci,drive=disk0,disable-legacy=on,iommu_platform=on,ats=on",
     "-drive", "file=$DiskImage,if=none,id=disk0,format=raw",
     "-serial", "file:$SerialLog",
     "-display", "none",

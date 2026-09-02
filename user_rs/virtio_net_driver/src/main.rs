@@ -110,7 +110,19 @@ const DESC_F_WRITE: u16 = 2;
 // unlike the transport constants above.
 const VIRTIO_NET_F_MAC: u32 = 1 << 5;
 const VIRTIO_NET_F_STATUS: u32 = 1 << 16;
-const VIRTIO_F_VERSION_1_HI: u32 = 1; // bit 32 overall == bit 0 of the high dword (feature_select=1)
+const VIRTIO_F_VERSION_1_HI: u32 = 1 << 0; // bit 32 overall == bit 0 of the high dword (feature_select=1)
+// Real bug found and fixed via this crate's own induced-fault trial:
+// once the device is given `iommu_platform=on` (QEMU's own flag for
+// actually routing this device's DMA through the emulated VT-d IOMMU
+// -- see the module doc's own note on this), the VIRTIO spec requires
+// the driver to negotiate VIRTIO_F_IOMMU_PLATFORM (bit 33 overall) as
+// part of its own feature set, or the device refuses FEATURES_OK
+// outright. Without this, "IOMMU-backed DMA" was a claim this driver's
+// own module doc made that QEMU had never actually been configured to
+// enforce -- discovered because turning enforcement ON (to make the
+// induced-fault trial meaningful) immediately broke feature
+// negotiation, not because anyone suspected it beforehand.
+const VIRTIO_F_IOMMU_PLATFORM_HI: u32 = 1 << 1; // bit 33 overall == bit 1 of the high dword
 
 const QUEUE_SIZE: u16 = 4;
 const QUEUE_RX: u16 = 0;
@@ -260,7 +272,8 @@ pub extern "C" fn _start() -> ! {
 
         let want_lo = VIRTIO_NET_F_MAC | VIRTIO_NET_F_STATUS;
         let negotiated_lo = dev_feat_lo & want_lo;
-        let negotiated_hi = dev_feat_hi & VIRTIO_F_VERSION_1_HI;
+        let want_hi = VIRTIO_F_VERSION_1_HI | VIRTIO_F_IOMMU_PLATFORM_HI;
+        let negotiated_hi = dev_feat_hi & want_hi;
 
         mmio_write32(common, REG_DRIVER_FEATURE_SELECT, 0);
         mmio_write32(common, REG_DRIVER_FEATURE, negotiated_lo);
@@ -351,8 +364,21 @@ pub extern "C" fn _start() -> ! {
         let frame_len = build_arp_request(frame_ptr, mac);
         let total_len = 12 + frame_len;
 
+        // Real induced-failure trial (this crate's Cargo.toml
+        // `induced_fault` feature, off by default): deliberately submit
+        // a descriptor pointing 1MB past this driver's OWN DMA page --
+        // real, genuinely outside the one-page domain
+        // `kernel_rs/src/virtio_net.rs` assigned via `iommu::
+        // assign_device`. The device will attempt a real DMA read
+        // there; VT-d, not this kernel's own policy, is what actually
+        // blocks it (see `iommu.rs::poll_and_log_faults`).
+        #[cfg(feature = "induced_fault")]
+        let tx_addr = dma_phys + 0x10_0000;
+        #[cfg(not(feature = "induced_fault"))]
+        let tx_addr = dma_phys + TX_BUF_OFF;
+
         let tx_desc = (dma + TX_DESC_OFF) as *mut Desc;
-        core::ptr::write_volatile(tx_desc, Desc { addr: dma_phys + TX_BUF_OFF, len: total_len as u32, flags: 0, next: 0 });
+        core::ptr::write_volatile(tx_desc, Desc { addr: tx_addr, len: total_len as u32, flags: 0, next: 0 });
         let target = submit(dma, TX_AVAIL_OFF, tx_notify, QUEUE_TX, 0);
         poll_used(dma, TX_USED_OFF, target);
 

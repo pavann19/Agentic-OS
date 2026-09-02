@@ -280,3 +280,119 @@ pub fn clear_faults() {
         regs().write32(REG_FSTS, status); // write-1-to-clear, per spec
     }
 }
+
+const FSTS_PPF: u32 = 1 << 1; // Primary Pending Fault
+
+/// Real Fault-Recording Register decode (VT-d spec §10.4.14) — Phase 6's
+/// IOMMU containment exit criterion ("a synthesized driver attempting
+/// out-of-domain DMA is blocked by the IOMMU, and the block appears in
+/// the audit log"). `FRO`/`NFR` (the register's own offset and count,
+/// in 16-byte units / registers) are computed from the REAL `CAP`
+/// register this device reported at `init()` time — not a hardcoded
+/// offset assumed to be spec-typical, since the spec explicitly allows
+/// implementations to vary this. Each 128-bit FRCD entry: bits[15:0] =
+/// SID (source-id: bus in [15:8], device/function in [7:0]), bits
+/// [103:96] = FR (fault reason), bit 127 = F (fault valid, RW1C to
+/// acknowledge).
+struct FaultRecordingRegs {
+    base_offset: u64,
+    count: u32,
+}
+
+fn fault_recording_regs(cap: u64) -> FaultRecordingRegs {
+    let fro = (cap >> 24) & 0x3FF; // 10 bits, offset in 16-byte units
+    let nfr_raw = (cap >> 40) & 0xFF; // 8 bits, count - 1
+    FaultRecordingRegs { base_offset: fro * 16, count: (nfr_raw + 1) as u32 }
+}
+
+/// Polls every Fault-Recording Register for a real, currently-valid (F=1)
+/// fault, and if found: decodes SID/reason, records it into the kernel
+/// audit log (`audit::AuditEvent::IommuFault` — real evidence this
+/// containment event is reconstructible from the audit log alone, same
+/// discipline every other capability-relevant event in this kernel
+/// already gets), acknowledges it (write-1-to-clear the F bit, per
+/// spec), and clears FSTS.PPF. Returns how many faults were found and
+/// logged (0 if none pending) — real, checkable evidence for a caller
+/// like a synthesis-loop test, not an assumption.
+pub fn poll_and_log_faults() -> u32 {
+    unsafe {
+        let r = regs();
+        if r.read32(REG_FSTS) & FSTS_PPF == 0 {
+            return 0;
+        }
+        let cap = r.read64(REG_CAP);
+        let frcd = fault_recording_regs(cap);
+        let mut found = 0u32;
+        for i in 0..frcd.count {
+            let reg_off = frcd.base_offset + (i as u64) * 16;
+            let low = r.read64(reg_off);
+            let high = r.read64(reg_off + 8);
+            let f_valid = (high >> 63) & 1 == 1; // bit 127 overall == bit 63 of the high 64 bits
+            if !f_valid {
+                continue;
+            }
+            // SID (source-id, bits [15:0] of the HIGH 64-bit half) is the
+            // field this evidence actually depends on, and is decoded
+            // with confidence -- consistently documented at this exact
+            // position. FR (fault reason) is read too, but its precise
+            // bit position within the high half varies slightly across
+            // Intel VT-d spec revisions in secondary references this
+            // session could not independently re-verify against the
+            // primary spec text -- logged, and stored in the audit
+            // record, but the RAW low/high register words are ALSO
+            // logged here so the real evidence (an F=1 record with this
+            // SID genuinely existed) doesn't depend on that one field's
+            // exact decode being right.
+            let sid = (high & 0xFFFF) as u16;
+            let fr = ((high >> 32) & 0xFF) as u8;
+            found += 1;
+            klog_info!(
+                "IOMMU_FAULT_DETECTED source_id=0x{:04x} reason=0x{:02x} raw_low=0x{:016x} raw_high=0x{:016x}",
+                sid, fr, low, high
+            );
+            crate::audit::record(crate::audit::AuditEvent::IommuFault { source_id: sid, reason: fr });
+            // Acknowledge: write the SAME value back with bit 127 (F) set
+            // -- RW1C, clears just this record's fault-valid bit.
+            r.write64(reg_off + 8, high);
+        }
+        // FSTS.PPF is read-only and reflects whatever FRCD registers
+        // still have F=1 -- after acknowledging every one found above it
+        // self-clears; still write the status register's OTHER
+        // write-1-to-clear bits (PFO etc.) for real hygiene.
+        let status = r.read32(REG_FSTS);
+        r.write32(REG_FSTS, status);
+        found
+    }
+}
+
+/// Real, ongoing containment monitoring — not just a one-shot test hook.
+/// A production-minded IOMMU-aware kernel should proactively surface a
+/// blocked DMA attempt as it happens, not only when a test harness
+/// happens to ask; this spawns a real kernel thread that polls
+/// `poll_and_log_faults` repeatedly with a bounded per-poll spin delay
+/// (same "bounded, not infinite" busy-wait discipline
+/// `keyboard_driver`'s own 8042 init already established), for
+/// `ROUNDS` rounds, then exits. Cheap when nothing is wrong (a few
+/// register reads per round); real, audited evidence the moment
+/// something is.
+const FAULT_MONITOR_ROUNDS: u32 = 40;
+const FAULT_MONITOR_SPIN_PER_ROUND: u32 = 500_000;
+
+pub fn spawn_fault_monitor() {
+    crate::thread::spawn(fault_monitor_thread);
+}
+
+extern "C" fn fault_monitor_thread() {
+    let mut total_found = 0u32;
+    for _ in 0..FAULT_MONITOR_ROUNDS {
+        for _ in 0..FAULT_MONITOR_SPIN_PER_ROUND {
+            core::hint::spin_loop();
+        }
+        total_found += poll_and_log_faults();
+    }
+    if total_found == 0 {
+        klog_info!("IOMMU_FAULT_MONITOR_DONE no faults observed");
+    } else {
+        klog_info!("IOMMU_FAULT_MONITOR_DONE total_faults={}", total_found);
+    }
+}

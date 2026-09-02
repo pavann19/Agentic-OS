@@ -485,17 +485,35 @@ pub extern "C" fn _start() -> ! {
         mmio_write8(common, REG_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
         mmio_write8(common, REG_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
 
-        // Feature negotiation: accept ONLY VIRTIO_F_VERSION_1 (bit 32 --
-        // feature_select=1, bit 0 of that dword). Required for a modern
-        // device to proceed at all; every optional feature (indirect
-        // descriptors, event index, etc.) deliberately left unnegotiated
-        // to keep this first increment's protocol surface minimal.
+        // Feature negotiation: VIRTIO_F_VERSION_1 (bit 32 -- feature_select=1,
+        // bit 0 of that dword), required for a modern device to proceed
+        // at all, PLUS VIRTIO_F_IOMMU_PLATFORM (bit 33, bit 1 of that
+        // dword). Every other optional feature (indirect descriptors,
+        // event index, etc.) deliberately left unnegotiated to keep
+        // this first increment's protocol surface minimal.
+        //
+        // Real bug found and fixed this session (Phase 6's virtio-net
+        // induced-fault trial is what surfaced it, applying identically
+        // here): `scripts/test-boot.ps1` et al. grant this device a
+        // real IOMMU domain (`iommu::assign_device`) but the QEMU
+        // device itself was never told `iommu_platform=on` -- meaning
+        // its DMA was NEVER actually routed through the emulated VT-d
+        // IOMMU at all, in any test this project has ever run. Now that
+        // the QEMU device args enable real enforcement, VIRTIO_F_
+        // IOMMU_PLATFORM must be negotiated or the device refuses
+        // FEATURES_OK outright -- this bit was always semantically
+        // correct for this driver to claim (it genuinely operates
+        // through a kernel-mediated IOMMU domain, not raw physical
+        // access), it just was never actually exercised as a real
+        // requirement until enforcement was actually turned on.
         mmio_write32(common, REG_DEVICE_FEATURE_SELECT, 1);
-        let _hi_features = mmio_read32(common, REG_DEVICE_FEATURE);
+        let hi_features = mmio_read32(common, REG_DEVICE_FEATURE);
+        let want_hi = (1u32 << 0) | (1u32 << 1); // VERSION_1 | IOMMU_PLATFORM
+        let negotiated_hi = hi_features & want_hi;
         mmio_write32(common, REG_DRIVER_FEATURE_SELECT, 0);
         mmio_write32(common, REG_DRIVER_FEATURE, 0);
         mmio_write32(common, REG_DRIVER_FEATURE_SELECT, 1);
-        mmio_write32(common, REG_DRIVER_FEATURE, 1); // VERSION_1
+        mmio_write32(common, REG_DRIVER_FEATURE, negotiated_hi);
 
         mmio_write8(common, REG_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK);
         let status_check = mmio_read8(common, REG_DEVICE_STATUS);
