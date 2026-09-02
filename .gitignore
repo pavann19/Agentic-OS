@@ -24,3 +24,7 @@ _evidence/disk-keyboard-test.img
 _evidence/disk-powerloss-test.img
 _evidence/qemu_stderr.log
 _evidence/qemu_stdout.log
+_evidence/disk-powerloss-trial*.img
+_evidence/powerloss-trial*.log
+_evidence/disk-timing-test.img
+_evidence/timing-test.log

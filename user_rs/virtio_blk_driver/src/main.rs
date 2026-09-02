@@ -317,10 +317,23 @@ unsafe fn run_filesystem_proof(common: u64, notify_base: u64, dma: u64, dma_phys
         com1_write_str("[VIRTIO_BLK_DRIVER] FS_NOT_FORMATTED -- formatting a real ext2 filesystem\n");
         syscall1(0xF5A1_0000);
 
+        // Crash-safety ordering (this is the real fix for Phase 4's
+        // "pulling power mid-write leaves the filesystem mountable"
+        // exit criterion -- previously the superblock, the ONE block
+        // `is_formatted` trusts, was written FIRST: a power loss between
+        // it and the metadata that follows left a disk that claimed to
+        // be formatted while its group descriptor / bitmaps / inode
+        // table / root dir were still garbage -- silent corruption, not
+        // detected. Every other structure is written first here; the
+        // superblock -- a single 1024-byte, sector-aligned block write,
+        // the smallest atomic unit this backing store gives us -- is
+        // written LAST, as the actual commit point. Interrupted before
+        // it: `is_formatted` correctly reports false and the next boot
+        // reformats cleanly from scratch, bounded and detected, not
+        // silent. Interrupted during it: not fully solved by a
+        // non-journaled filesystem -- disclosed honestly in this
+        // driver's module doc and in PROGRESS.md, not claimed as met.
         let mut b = zeroed_block!();
-
-        ext2::build_superblock(&mut b);
-        ext2_write_block(common, notify_base, dma, dma_phys, ext2::SUPERBLOCK_BLOCK, &b);
 
         ext2::build_group_desc(&mut b);
         ext2_write_block(common, notify_base, dma, dma_phys, ext2::GROUP_DESC_BLOCK, &b);
@@ -356,6 +369,13 @@ unsafe fn run_filesystem_proof(common: u64, notify_base: u64, dma: u64, dma_phys
         let mut file_data = zeroed_block!();
         ext2::build_file_data_block(&mut file_data, FILE_CONTENT);
         ext2_write_block(common, notify_base, dma, dma_phys, ext2::FILE_DATA_BLOCK, &file_data);
+
+        // Commit point: writing the superblock last means this single
+        // write is what flips a partially-formatted disk into one
+        // `is_formatted` will recognize on the next boot.
+        let mut sb = zeroed_block!();
+        ext2::build_superblock(&mut sb);
+        ext2_write_block(common, notify_base, dma, dma_phys, ext2::SUPERBLOCK_BLOCK, &sb);
 
         com1_write_str("[VIRTIO_BLK_DRIVER] FS_FORMAT_DONE\n");
         syscall1(0xF5A1_0002);
