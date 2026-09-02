@@ -1141,6 +1141,27 @@ request — see below for exactly which parts are genuinely blocked.
       to `scripts/test-integration.ps1` — the full suite is now **12
       real test scripts, all passing**, ~5.5 minutes total.
 
+      **AHCI write path — attempted, honestly not resolved, reverted.**
+      A real `WRITE DMA EXT` (0x35) command was built following the
+      same AHCI 1.3.1 command-table layout as the working read path
+      (generalized `issue_ata_command` covering both IDENTIFY and
+      read/write). It hung: `PxCI` never cleared. Two real, plausible
+      hypotheses were tested and both falsified against the actual
+      hardware behavior — the Device register byte convention (`0x40`
+      vs `0xE0`), and a stale `PxIS` blocking the next command — neither
+      changed the outcome. A bounded diagnostic (dropping the spin
+      timeout from 200M to 5M iterations, so a real timeout message
+      would print within a 25s window if the loop were merely slow)
+      still produced no timeout message and no return from the call —
+      confirming this is a genuine stuck `PxCI`, not an underprovisioned
+      spin budget. Root cause not found within the time available.
+      Rather than leave hanging/broken code in the tree, the change was
+      reverted (`git checkout -- user_rs/ahci_driver/src/main.rs`) back
+      to the last committed, fully-working, read-only AHCI driver — the
+      one verified above and covered by `scripts/test-ahci.ps1`. The
+      write path remains a real, open gap, honestly stated rather than
+      silently dropped or falsely claimed done.
+
 **Phase 8 exit criteria (`docs/ROADMAP.md` §5) — 2 of 3 fully
 demonstrated, 1 genuinely blocked:**
 - "The full suite passes from a clean checkout with no manual steps" —
