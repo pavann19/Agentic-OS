@@ -165,13 +165,24 @@ extern "C" fn virtio_blk_driver_thread() {
             }
         };
 
-        let stack_page = pmm::alloc_page();
-        vmm::map_page_in(
-            space,
-            DRIVER_STACK_VADDR,
-            stack_page,
-            vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE | vmm::PAGE_WRITABLE,
-        );
+        // 4 pages (16KB), not 1 -- the real ext2 formatting logic this
+        // driver runs (kernel_common::ext2) keeps several 1024-byte
+        // block buffers live on the stack at once (building one block
+        // while a previous one is still being written, plus the
+        // inode-table/data-block/output buffers the final read-back
+        // verification needs simultaneously). A single 4KB page was
+        // enough for the raw-sector self-check alone but would overflow
+        // once the filesystem logic was added.
+        const STACK_PAGES: u64 = 4;
+        for i in 0..STACK_PAGES {
+            let stack_page = pmm::alloc_page();
+            vmm::map_page_in(
+                space,
+                DRIVER_STACK_VADDR + i * 4096,
+                stack_page,
+                vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE | vmm::PAGE_WRITABLE,
+            );
+        }
 
         // Real MmioRegion capability for the device's real BAR.
         let mut table = CapabilityTable::new();
@@ -251,7 +262,7 @@ extern "C" fn virtio_blk_driver_thread() {
 
         vmm::switch_address_space(space);
         thread::set_current_address_space(space);
-        klog_info!("VIRTIO_BLK_ELF_ENTER entry=0x{:x} stack=0x{:x}", entry, DRIVER_STACK_VADDR + 4096);
-        ring3::enter_user_mode(entry, DRIVER_STACK_VADDR + 4096);
+        klog_info!("VIRTIO_BLK_ELF_ENTER entry=0x{:x} stack=0x{:x}", entry, DRIVER_STACK_VADDR + STACK_PAGES * 4096);
+        ring3::enter_user_mode(entry, DRIVER_STACK_VADDR + STACK_PAGES * 4096);
     }
 }

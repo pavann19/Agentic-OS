@@ -9,6 +9,13 @@ edition = "2021"
 # external crates, same reasoning as kernel_rs/boot_rs: only `core` and
 # `compiler_builtins`, built from source via -Zbuild-std.
 [dependencies]
+# Real strong memset/memcpy/memmove/memcmp symbols -- see
+# kernel_common/src/mem_intrinsics.rs's doc for the real bug (found in
+# user_rs/virtio_blk_driver, fixed defensively here too) this exists to
+# prevent: an indirect call through an unpopulated import-table-style
+# slot whenever LLVM lowers a large zero-init/copy into a memset/memcpy
+# call on this toolchain.
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
 
 [profile.dev]
 panic = "abort"

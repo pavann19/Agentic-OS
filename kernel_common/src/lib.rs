@@ -6,6 +6,15 @@
 #![no_std]
 
 pub mod bitmap;
+pub mod ext2;
+// Feature-gated: defines real, strong #[no_mangle] memset/memcpy/
+// memmove/memcmp symbols (see mem_intrinsics.rs's own doc for why) --
+// ONLY the freestanding binaries (kernel_rs, user_rs/*_driver) enable
+// this. host_tests runs on the real host toolchain, which already links
+// a real libc memset/memcpy; defining our own there would be a hard
+// duplicate-symbol link error, not just redundant.
+#[cfg(feature = "provide_mem_intrinsics")]
+pub mod mem_intrinsics;
 pub mod pagetable;
 
 /// Rounds `addr` up to the nearest multiple of `align` (`align` must be a

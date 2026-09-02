@@ -7,6 +7,9 @@ edition = "2021"
 # binary, built completely separately from kernel_rs, loaded at runtime
 # by kernel_rs/src/elf.rs -- same pattern as user_rs/serial_driver.
 [dependencies]
+# See user_rs/serial_driver/Cargo.toml's comment / kernel_common/src/
+# mem_intrinsics.rs's doc for the real bug this prevents.
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
 
 [profile.dev]
 panic = "abort"

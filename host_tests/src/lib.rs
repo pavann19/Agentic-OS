@@ -202,3 +202,148 @@ mod align_tests {
         assert_eq!(pages_for(0, 4096), 0);
     }
 }
+
+/// Real assertions against `kernel_common::ext2` -- Phase 4's on-disk
+/// filesystem, exercised here exactly the way `virtio_blk_fs.rs` (the
+/// real driver) does it: build every block in memory, then verify the
+/// resulting layout by independently re-parsing the raw bytes (not by
+/// calling the same private helpers that built them -- a bug in a
+/// shared helper would otherwise pass its own test trivially).
+#[cfg(test)]
+mod ext2_tests {
+    use kernel_common::ext2::*;
+
+    fn ru16(b: &[u8], off: usize) -> u16 {
+        u16::from_le_bytes([b[off], b[off + 1]])
+    }
+    fn ru32(b: &[u8], off: usize) -> u32 {
+        u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+    }
+
+    /// Builds a complete, real, in-memory filesystem image (every block
+    /// this increment's fixed layout defines) containing one file with
+    /// `content`. Mirrors exactly what the real virtio-blk driver does,
+    /// block by block, just without going through real disk I/O.
+    fn build_test_fs(file_name: &str, content: &[u8]) -> Vec<u8> {
+        let mut disk = vec![0u8; (TOTAL_BLOCKS as usize) * BLOCK_SIZE];
+        fn blk(n: u32) -> core::ops::Range<usize> {
+            let start = n as usize * BLOCK_SIZE;
+            start..start + BLOCK_SIZE
+        }
+        build_superblock(&mut disk[blk(SUPERBLOCK_BLOCK)]);
+        build_group_desc(&mut disk[blk(GROUP_DESC_BLOCK)]);
+        build_block_bitmap(&mut disk[blk(BLOCK_BITMAP_BLOCK)]);
+        build_inode_bitmap(&mut disk[blk(INODE_BITMAP_BLOCK)]);
+        write_root_inode(&mut disk[blk(INODE_TABLE_START_BLOCK)]);
+        write_file_inode(&mut disk[blk(INODE_TABLE_START_BLOCK + 1)], content.len() as u32);
+        build_root_dir_block(&mut disk[blk(ROOT_DATA_BLOCK)], file_name);
+        build_file_data_block(&mut disk[blk(FILE_DATA_BLOCK)], content);
+        disk
+    }
+
+    #[test]
+    fn zeroed_disk_is_not_formatted() {
+        let disk = vec![0u8; (TOTAL_BLOCKS as usize) * BLOCK_SIZE];
+        let sb = &disk[(SUPERBLOCK_BLOCK as usize) * BLOCK_SIZE..][..BLOCK_SIZE];
+        assert!(!is_formatted(sb));
+    }
+
+    #[test]
+    fn formatted_disk_reports_formatted() {
+        let disk = build_test_fs("hello.txt", b"hi");
+        let sb = &disk[(SUPERBLOCK_BLOCK as usize) * BLOCK_SIZE..][..BLOCK_SIZE];
+        assert!(is_formatted(sb));
+    }
+
+    #[test]
+    fn superblock_fields_match_real_ext2_layout() {
+        let disk = build_test_fs("hello.txt", b"hi");
+        let sb = &disk[(SUPERBLOCK_BLOCK as usize) * BLOCK_SIZE..][..BLOCK_SIZE];
+        assert_eq!(ru16(sb, 0x38), MAGIC, "s_magic at the real 0x38 offset");
+        assert_eq!(ru32(sb, 0x00), NUM_INODES, "s_inodes_count");
+        assert_eq!(ru32(sb, 0x04), TOTAL_BLOCKS, "s_blocks_count");
+        assert_eq!(ru32(sb, 0x14), 1, "s_first_data_block == 1 for 1024-byte blocks");
+        assert_eq!(ru32(sb, 0x18), 0, "s_log_block_size == 0 => 1024 byte blocks");
+    }
+
+    #[test]
+    fn block_bitmap_marks_exactly_the_used_blocks() {
+        let disk = build_test_fs("hello.txt", b"hi");
+        let bm = &disk[(BLOCK_BITMAP_BLOCK as usize) * BLOCK_SIZE..][..BLOCK_SIZE];
+        // Real bit-to-block mapping: bit i => block i+1 (s_first_data_block).
+        for block in 1..=FILE_DATA_BLOCK {
+            let bit = (block - 1) as usize;
+            assert!(bm[bit / 8] & (1 << (bit % 8)) != 0, "block {} should be marked used", block);
+        }
+        let first_free_bit = FILE_DATA_BLOCK as usize; // block FILE_DATA_BLOCK+1
+        assert!(bm[first_free_bit / 8] & (1 << (first_free_bit % 8)) == 0, "block past FILE_DATA_BLOCK should be free");
+    }
+
+    #[test]
+    fn root_dir_has_dot_dotdot_and_the_real_file_entry() {
+        let disk = build_test_fs("greeting.txt", b"hi");
+        let root = &disk[(ROOT_DATA_BLOCK as usize) * BLOCK_SIZE..][..BLOCK_SIZE];
+
+        // "." at offset 0
+        assert_eq!(ru32(root, 0), ROOT_INODE);
+        assert_eq!(root[6], 1); // name_len
+        assert_eq!(&root[8..9], b".");
+
+        // ".." at offset 12 (rec_len of "." entry)
+        let dotdot_off = ru16(root, 4) as usize;
+        assert_eq!(dotdot_off, 12);
+        assert_eq!(ru32(root, dotdot_off), ROOT_INODE);
+        assert_eq!(root[dotdot_off + 6], 2);
+        assert_eq!(&root[dotdot_off + 8..dotdot_off + 10], b"..");
+
+        // the file entry, right after ".."
+        let file_off = dotdot_off + ru16(root, dotdot_off + 4) as usize;
+        assert_eq!(ru32(root, file_off), FILE_INODE);
+        let name_len = root[file_off + 6] as usize;
+        assert_eq!(name_len, "greeting.txt".len());
+        assert_eq!(&root[file_off + 8..file_off + 8 + name_len], b"greeting.txt");
+        // last entry's rec_len must reach the real block boundary
+        let rec_len = ru16(root, file_off + 4) as usize;
+        assert_eq!(file_off + rec_len, BLOCK_SIZE, "last dir entry must extend to the block's end");
+    }
+
+    #[test]
+    fn file_inode_size_and_block_pointer_are_real() {
+        let content = b"Agentic OS Phase 4 persisted this.\n";
+        let disk = build_test_fs("greeting.txt", content);
+        let inode_table1 = &disk[((INODE_TABLE_START_BLOCK + 1) as usize) * BLOCK_SIZE..][..BLOCK_SIZE];
+        let entry_index = (FILE_INODE - INODES_PER_BLOCK - 1) as usize;
+        let off = entry_index * 128;
+        assert_eq!(ru32(inode_table1, off + 0x04), content.len() as u32, "i_size");
+        assert_eq!(ru32(inode_table1, off + 0x28), FILE_DATA_BLOCK, "i_block[0]");
+        let mode = ru16(inode_table1, off + 0x00);
+        assert_eq!(mode & 0x8000, 0x8000, "S_IFREG bit set");
+    }
+
+    #[test]
+    fn write_then_read_round_trip_is_byte_identical() {
+        let content = b"Agentic OS Phase 4 persisted this.\n";
+        let disk = build_test_fs("greeting.txt", content);
+        let inode_table1 = &disk[((INODE_TABLE_START_BLOCK + 1) as usize) * BLOCK_SIZE..][..BLOCK_SIZE];
+        let data_block = &disk[(FILE_DATA_BLOCK as usize) * BLOCK_SIZE..][..BLOCK_SIZE];
+        let mut out = [0u8; BLOCK_SIZE];
+        let n = read_file_data(inode_table1, data_block, &mut out);
+        assert_eq!(n, content.len());
+        assert_eq!(&out[..n], &content[..], "round-tripped content must be byte-identical");
+    }
+
+    #[test]
+    fn read_file_data_trusts_the_real_inode_size_not_a_full_block() {
+        // A real regression this test guards against: read_file_data must
+        // use the inode's OWN i_size, not just hand back a full BLOCK_SIZE
+        // of (possibly stale/garbage-padded) data.
+        let content = b"short";
+        let disk = build_test_fs("f.txt", content);
+        let inode_table1 = &disk[((INODE_TABLE_START_BLOCK + 1) as usize) * BLOCK_SIZE..][..BLOCK_SIZE];
+        let data_block = &disk[(FILE_DATA_BLOCK as usize) * BLOCK_SIZE..][..BLOCK_SIZE];
+        let mut out = [0xFFu8; BLOCK_SIZE];
+        let n = read_file_data(inode_table1, data_block, &mut out);
+        assert_eq!(n, 5);
+        assert_eq!(&out[..5], b"short");
+    }
+}

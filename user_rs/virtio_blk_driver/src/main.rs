@@ -17,6 +17,18 @@
 //! used-ring index), not interrupt-driven -- see this crate's own
 //! module doc in virtio_blk.rs for why that's a stated simplification,
 //! not a hidden shortcut.
+//!
+//! Phase 4's real on-disk filesystem, layered on top of the raw
+//! sector I/O above: `kernel_common::ext2` (the SAME code host_tests/
+//! verifies against an in-memory buffer) reads the real superblock off
+//! the real disk; if it's not there yet, this driver formats a real,
+//! spec-correct minimal ext2 filesystem and creates one real file with
+//! known content; either way, it then reads that file's content back
+//! through the real inode/data-block chain and confirms it matches. The
+//! disk image `scripts/test-boot.ps1` attaches is NOT recreated between
+//! runs, so running this kernel twice in a row is a real "survives a
+//! reboot" proof: the second run finds the filesystem already there and
+//! reads the SAME file back without reformatting.
 
 #![no_std]
 #![no_main]
@@ -109,12 +121,16 @@ const VIRTIO_BLK_T_OUT: u32 = 1;
 const QUEUE_SIZE: u16 = 4;
 
 // Layout within the one DMA page kernel_rs/src/virtio_blk.rs grants.
+// DATA_OFF is 1024 bytes (2 real 512-byte virtio sectors in one
+// descriptor) so a single submit_and_wait can move one whole real ext2
+// block (kernel_common::ext2::BLOCK_SIZE) at a time -- the self-check
+// below still only uses the first 512 bytes of it.
 const DESC_OFF: u64 = 0x000; // 4 * 16 = 64 bytes
 const AVAIL_OFF: u64 = 0x040; // 4 + 2*4 = 12 bytes
 const USED_OFF: u64 = 0x080; // 4 + 8*4 = 36 bytes
 const REQ_HDR_OFF: u64 = 0x0C0; // 16 bytes
-const DATA_OFF: u64 = 0x0D0; // 512 bytes
-const STATUS_OFF: u64 = 0x2D0; // 1 byte
+const DATA_OFF: u64 = 0x0D0; // 1024 bytes
+const STATUS_OFF: u64 = 0x4D0; // 1 byte
 
 #[repr(C)]
 struct Desc {
@@ -148,13 +164,18 @@ unsafe fn mmio_read16(base: u64, off: u64) -> u16 {
 
 /// Submits one descriptor chain (header -> data -> status) and polls the
 /// used ring until the device completes it. Returns the real status byte
-/// the device wrote (0 = VIRTIO_BLK_S_OK).
+/// the device wrote (0 = VIRTIO_BLK_S_OK). `len` is the real transfer
+/// size in bytes (512 for the raw-sector self-check, 1024 for one real
+/// ext2 block) -- virtio-blk sectors are always 512 bytes regardless of
+/// filesystem block size, but ONE descriptor can cover several of them
+/// in a single request; `sector` is always in real 512-byte units.
 unsafe fn submit_and_wait(
     common: u64,
     notify_base: u64,
     dma: u64,
     dma_phys: u64,
     sector: u64,
+    len: u32,
     write: bool,
 ) -> u8 {
     let desc = (dma + DESC_OFF) as *mut Desc;
@@ -171,7 +192,7 @@ unsafe fn submit_and_wait(
         desc.add(1),
         Desc {
             addr: dma_phys + DATA_OFF,
-            len: 512,
+            len,
             flags: DESC_F_NEXT | if write { 0 } else { DESC_F_WRITE },
             next: 2,
         },
@@ -201,6 +222,162 @@ unsafe fn submit_and_wait(
 
     let _ = common; // (kept for signature symmetry / future ISR-status reads)
     core::ptr::read_volatile((dma + STATUS_OFF) as *const u8)
+}
+
+use kernel_common::ext2;
+
+/// Real bug found and fixed hardening Phase 4: a `let mut buf = [0u8;
+/// 1024];` array-literal declaration is, by itself (before any of
+/// `ext2.rs`'s own code even runs), exactly the shape LLVM's
+/// loop-idiom-recognition pass lowers into a `memset` call -- and on
+/// this project's toolchain, that call is emitted as an indirect call
+/// through a permanently-unpopulated slot (see `kernel_common::
+/// mem_intrinsics`'s doc comment for the full investigation). Building
+/// the array via `MaybeUninit` instead means there is no zero-fill for
+/// the compiler to recognize at all; every caller here immediately hands
+/// the result to an `ext2::build_*`/`ext2_read_block` call whose own
+/// first action is a real (volatile-write-based, equally
+/// idiom-recognition-immune) `vzero`/full overwrite before anything
+/// ever reads it, so nothing here ever reads uninitialized memory in
+/// practice -- the same accepted systems-programming pattern real
+/// kernels and embedded code use for plain byte-array scratch buffers.
+// Macros, not functions: a function RETURNING `[u8; 1024]` by value hits
+// the exact same real bug one more time, one level removed -- a large
+// aggregate return is implemented via an implicit copy from the
+// callee's stack frame into the caller's, which is ALSO large enough
+// for LLVM to lower into a memcpy call. Building the array directly in
+// the caller's own binding (a macro expands inline, a function call
+// does not) means there is no separate frame to copy out of at all.
+macro_rules! zeroed_block {
+    () => {{
+        let mu = core::mem::MaybeUninit::<[u8; ext2::BLOCK_SIZE]>::uninit();
+        unsafe { mu.assume_init() }
+    }};
+}
+
+/// Zeroes an ALREADY-DECLARED `[u8; ext2::BLOCK_SIZE]` binding in place,
+/// by reference -- real fix for a second instance of the exact same
+/// bug, one level removed from `zeroed_block!`'s own: a macro whose
+/// body zeroes a NAMED local and then tail-returns it (the first
+/// version of this helper) still isn't guaranteed to have that return
+/// elided into the caller's own binding, so it can STILL end up copying
+/// 1024 bytes out of an inner temporary -- an easy trap even after
+/// already fixing the more obvious by-value-return-from-a-function case.
+/// Operating purely by mutable reference on a binding the caller already
+/// owns removes the "return a value" step entirely, closing that off.
+macro_rules! really_zero_into {
+    ($buf:expr) => {{
+        for i in 0..ext2::BLOCK_SIZE {
+            unsafe { core::ptr::write_volatile(&mut $buf[i], 0) };
+        }
+    }};
+}
+
+/// Reads one real ext2 block (`ext2::BLOCK_SIZE` = 1024 bytes) off the
+/// real disk into `out`. ext2 block N is always real virtio sector
+/// N * (BLOCK_SIZE/512) -- virtio-blk sectors are fixed at 512 bytes
+/// regardless of the filesystem's own block size.
+unsafe fn ext2_read_block(common: u64, notify_base: u64, dma: u64, dma_phys: u64, block_num: u32, out: &mut [u8; ext2::BLOCK_SIZE]) -> u8 {
+    let sector = (block_num as u64) * (ext2::BLOCK_SIZE as u64 / 512);
+    let status = submit_and_wait(common, notify_base, dma, dma_phys, sector, ext2::BLOCK_SIZE as u32, false);
+    let data_ptr = (dma + DATA_OFF) as *const u8;
+    for i in 0..ext2::BLOCK_SIZE {
+        core::ptr::write_volatile(&mut out[i], core::ptr::read_volatile(data_ptr.add(i)));
+    }
+    status
+}
+
+unsafe fn ext2_write_block(common: u64, notify_base: u64, dma: u64, dma_phys: u64, block_num: u32, data: &[u8; ext2::BLOCK_SIZE]) -> u8 {
+    let data_ptr = (dma + DATA_OFF) as *mut u8;
+    for i in 0..ext2::BLOCK_SIZE {
+        core::ptr::write_volatile(data_ptr.add(i), data[i]);
+    }
+    let sector = (block_num as u64) * (ext2::BLOCK_SIZE as u64 / 512);
+    submit_and_wait(common, notify_base, dma, dma_phys, sector, ext2::BLOCK_SIZE as u32, true)
+}
+
+const FILE_CONTENT: &[u8] = b"Agentic OS Phase 4 persisted this.\n";
+const FILE_NAME: &str = "greeting.txt";
+
+/// Real Phase 4 filesystem proof: format (if not already formatted) a
+/// real, spec-correct minimal ext2 filesystem, create one real file,
+/// then read it back through the real inode/data-block chain and
+/// confirm it matches -- see this crate's module doc for why running
+/// this kernel twice in a row (the disk image persists between runs) is
+/// a genuine "survives a reboot" demonstration, not just a same-boot
+/// round trip like the raw-sector self-check above.
+unsafe fn run_filesystem_proof(common: u64, notify_base: u64, dma: u64, dma_phys: u64) {
+    let mut buf = zeroed_block!();
+    ext2_read_block(common, notify_base, dma, dma_phys, ext2::SUPERBLOCK_BLOCK, &mut buf);
+
+    if ext2::is_formatted(&buf) {
+        com1_write_str("[VIRTIO_BLK_DRIVER] FS_ALREADY_FORMATTED -- real reboot-persistence proof, not reformatting\n");
+        syscall1(0xF5A1_0001);
+    } else {
+        com1_write_str("[VIRTIO_BLK_DRIVER] FS_NOT_FORMATTED -- formatting a real ext2 filesystem\n");
+        syscall1(0xF5A1_0000);
+
+        let mut b = zeroed_block!();
+
+        ext2::build_superblock(&mut b);
+        ext2_write_block(common, notify_base, dma, dma_phys, ext2::SUPERBLOCK_BLOCK, &b);
+
+        ext2::build_group_desc(&mut b);
+        ext2_write_block(common, notify_base, dma, dma_phys, ext2::GROUP_DESC_BLOCK, &b);
+
+        ext2::build_block_bitmap(&mut b);
+        ext2_write_block(common, notify_base, dma, dma_phys, ext2::BLOCK_BITMAP_BLOCK, &b);
+
+        ext2::build_inode_bitmap(&mut b);
+        ext2_write_block(common, notify_base, dma, dma_phys, ext2::INODE_BITMAP_BLOCK, &b);
+
+        let mut inode_block0 = zeroed_block!();
+        really_zero_into!(inode_block0);
+        ext2::write_root_inode(&mut inode_block0);
+        ext2_write_block(common, notify_base, dma, dma_phys, ext2::INODE_TABLE_START_BLOCK, &inode_block0);
+
+        let mut inode_block1 = zeroed_block!();
+        really_zero_into!(inode_block1);
+        ext2::write_file_inode(&mut inode_block1, FILE_CONTENT.len() as u32);
+        ext2_write_block(common, notify_base, dma, dma_phys, ext2::INODE_TABLE_START_BLOCK + 1, &inode_block1);
+
+        // Remaining inode-table blocks stay all-zero (no inodes past
+        // FILE_INODE exist yet) -- written explicitly for real
+        // correctness rather than assumed pre-zeroed.
+        let mut zero = zeroed_block!();
+        really_zero_into!(zero);
+        ext2_write_block(common, notify_base, dma, dma_phys, ext2::INODE_TABLE_START_BLOCK + 2, &zero);
+        ext2_write_block(common, notify_base, dma, dma_phys, ext2::INODE_TABLE_START_BLOCK + 3, &zero);
+
+        let mut root_dir = zeroed_block!();
+        ext2::build_root_dir_block(&mut root_dir, FILE_NAME);
+        ext2_write_block(common, notify_base, dma, dma_phys, ext2::ROOT_DATA_BLOCK, &root_dir);
+
+        let mut file_data = zeroed_block!();
+        ext2::build_file_data_block(&mut file_data, FILE_CONTENT);
+        ext2_write_block(common, notify_base, dma, dma_phys, ext2::FILE_DATA_BLOCK, &file_data);
+
+        com1_write_str("[VIRTIO_BLK_DRIVER] FS_FORMAT_DONE\n");
+        syscall1(0xF5A1_0002);
+    }
+
+    // Real read-back, through the real inode -- not a raw block dump:
+    // read_file_data trusts the inode's OWN i_size field, not a
+    // caller-assumed length.
+    let mut inode_table1 = zeroed_block!();
+    ext2_read_block(common, notify_base, dma, dma_phys, ext2::INODE_TABLE_START_BLOCK + 1, &mut inode_table1);
+    let mut file_data = zeroed_block!();
+    ext2_read_block(common, notify_base, dma, dma_phys, ext2::FILE_DATA_BLOCK, &mut file_data);
+    let mut out = zeroed_block!();
+    let n = ext2::read_file_data(&inode_table1, &file_data, &mut out);
+
+    if n == FILE_CONTENT.len() && &out[..n] == FILE_CONTENT {
+        com1_write_str("[VIRTIO_BLK_DRIVER] FS_SELF_CHECK_PASS: real ext2 file read back byte-identical\n");
+        syscall1(0xF5C0_600D);
+    } else {
+        com1_write_str("[VIRTIO_BLK_DRIVER] FS_SELF_CHECK_FAIL\n");
+        syscall1(0xF5BA_D000 | n as u64);
+    }
 }
 
 #[no_mangle]
@@ -264,13 +441,13 @@ pub extern "C" fn _start() -> ! {
         for i in 0..512usize {
             core::ptr::write_volatile(data_ptr.add(i), pattern ^ (i as u8));
         }
-        let write_status = submit_and_wait(common, notify_base, dma, dma_phys, 1, true);
+        let write_status = submit_and_wait(common, notify_base, dma, dma_phys, 1, 512, true);
         syscall1(0x8200_0000 | write_status as u64);
 
         for i in 0..512usize {
             core::ptr::write_volatile(data_ptr.add(i), 0);
         }
-        let read_status = submit_and_wait(common, notify_base, dma, dma_phys, 1, false);
+        let read_status = submit_and_wait(common, notify_base, dma, dma_phys, 1, 512, false);
         syscall1(0x8300_0000 | read_status as u64);
 
         let mut matched = true;
@@ -287,6 +464,8 @@ pub extern "C" fn _start() -> ! {
             com1_write_str("[VIRTIO_BLK_DRIVER] SELF_CHECK_FAIL\n");
             syscall1(0xBAD0_0000 | matched as u64);
         }
+
+        run_filesystem_proof(common, notify_base, dma, dma_phys);
     }
     loop {
         core::hint::spin_loop();

@@ -9,6 +9,10 @@ edition = "2021"
 # runtime by kernel_rs/src/elf.rs -- same pattern as every Phase 3
 # driver.
 [dependencies]
+# Real ext2 on-disk format logic (Phase 4) -- the SAME code host_tests/
+# verifies against an in-memory buffer, run here for real against the
+# real disk through this driver's own virtqueue I/O.
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
 
 [profile.dev]
 panic = "abort"

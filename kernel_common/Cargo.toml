@@ -13,3 +13,10 @@ edition = "2021"
 # it — host_tests/ verifying THIS crate is what makes those tests meaningful
 # evidence about the real kernel, not evidence about a reimplementation.
 [dependencies]
+
+# See mem_intrinsics.rs's own doc comment for the real bug this exists
+# to fix. Off by default (host_tests, which links the real host libc,
+# must never enable it -- a hard duplicate-symbol link error otherwise);
+# kernel_rs and every user_rs/*_driver crate turn it on.
+[features]
+provide_mem_intrinsics = []

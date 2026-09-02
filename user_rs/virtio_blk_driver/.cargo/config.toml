@@ -1,6 +1,21 @@
 [build]
 target = "x86_64-unknown-none"
 
+# Real bug found and fixed: this crate's own real ext2 formatting logic
+# is the first code in this whole repo to zero-init an array large
+# enough (kernel_common::ext2::BLOCK_SIZE = 1024 bytes) for LLVM to
+# lower it to a memset() call -- and this target's PREBUILT
+# compiler_builtins (rustup ships one for x86_64-unknown-none) doesn't
+# include the mem intrinsics by default, so the call resolved through an
+# unpopulated, always-zero symbol: a genuine call-through-a-null-pointer
+# page fault. Same fix boot_rs's own config.toml already needed (its
+# target has no prebuilt std at all, so it always needed this) --
+# rebuild compiler_builtins with the `mem` feature so memset/memcpy/
+# memmove/memcmp are real, linked functions.
+[unstable]
+build-std = ["core", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]
+
 [target.x86_64-unknown-none]
 rustflags = [
     "-C", "relocation-model=static",

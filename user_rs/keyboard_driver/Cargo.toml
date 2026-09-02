@@ -10,6 +10,9 @@ edition = "2021"
 # capability-gated syscall pair (5=wait, 6=ack) instead of a one-shot
 # signal, since a keyboard genuinely produces a stream of events, not one.
 [dependencies]
+# See user_rs/serial_driver/Cargo.toml's comment / kernel_common/src/
+# mem_intrinsics.rs's doc for the real bug this prevents.
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
 
 [profile.dev]
 panic = "abort"
