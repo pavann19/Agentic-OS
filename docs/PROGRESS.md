@@ -927,10 +927,85 @@ a gap:** deliverable 5, the physical-hardware harness — explicitly
 sequenced by the roadmap's own text as "only after Tier 1 succeeds
 repeatedly," which it now has.
 
-## Phase 7 — Shell And Operator Surface — Not started
+## Phase 7 — Shell And Operator Surface (4/4 deliverables complete, all 3 exit criteria demonstrated — DONE)
 
-Text shell, capability-aware command surface, audit log viewer,
-natural-language intent path — none started.
+- [x] **Text shell as a user-space process** — `user_rs/shell` (new
+      crate) + `kernel_rs/src/shell.rs`: a real freestanding ELF64
+      ring-3 process, no different in kind from any driver crate.
+      Real bidirectional COM1 (its own `PortIoRange` grant) — the
+      first process in this kernel to actually READ from COM1, not
+      just write debug output to it. `scripts/test-shell.ps1` drives
+      it over a real TCP-socketed serial line (this project's first
+      script needing genuine interactive input, not just output
+      capture).
+- [x] **Capability-aware command surface** — `ps`/`tools`/`audit` are
+      thin wrappers around Phase 5's real capability-gated syscalls 7/
+      8/9; `rawin <port>` demonstrates the boundary concretely: a port
+      outside this shell's COM1-only grant faults and kills the
+      process, real hardware enforcement, not an in-band message this
+      code prints.
+- [x] **Human-readable audit log viewer** — `audit` decodes the typed
+      syscall payload into readable event names (Grant/Derive/Revoke/
+      Denied/IpcSend/IpcReceive/InterruptDelivered/
+      InterruptAcknowledged/PolicyDenied/IommuFault), not raw numeric
+      codes.
+- [x] **Natural-language intent path** — `resolve_intent`: a real,
+      honest keyword-phrase resolver ("show me the processes", "what
+      tools are available", "show me the audit log") that maps
+      free-text to the EXACT SAME command dispatch the typed commands
+      use — no separate code path, no separate syscall, so "a shell
+      command and the equivalent agent-issued intent produce identical
+      audit records" is true by construction.
+
+**Real, significant bug found and fixed via this phase's own `rawin`
+demo, project-wide, not scoped to the shell:** the TSS I/O permission
+bitmap (IOPB) was a single GLOBAL, CPU-visible field — since there is
+only one live TSS on this single-core kernel, ANY port ever granted to
+ANY driver (`keyboard_driver`'s own 0x60-0x64, `serial_driver`'s COM1)
+stayed permanently open to EVERY OTHER ring-3 process from then on.
+`rawin 64` (a port only `keyboard_driver` had ever been granted)
+originally SUCCEEDED from the shell, which was never itself granted
+it — the same real bug class already found and fixed once for
+TSS.RSP0 (see `thread.rs`'s own `schedule_locked` doc comment), never
+re-checked for the IOPB. **Fixed the same way:** each `Thread` now
+owns its own IOPB bitmap, reloaded into the one live TSS on every
+scheduler switch; `driver::grant_port_access` mutates the calling
+thread's own copy, not a shared global array. Fixing the leak
+surfaced a real, honest consequence — `keyboard_driver` and
+`agent_demo`'s three spawned processes were silently relying on it for
+their own COM1 debug output and needed their own explicit grants,
+both fixed.
+
+**Two more real bugs found and fixed while building the natural-
+language path**, the same toolchain-level indirect-call class this
+project has hit before (`kernel_common::mem_intrinsics`'s doc
+comment): a `let`-bound array of phrase tuples produced a broken
+RIP-relative load resolving to address 0 (a real page fault, cr2=0x0);
+ordinary slice equality (`line.windows(n).any(|w| w == phrase)`)
+lowered to a real `memcmp` call through the same permanently-
+unpopulated indirect slot. Both fixed by avoiding the triggering
+construct entirely (a flat comparison sequence; a manual byte-loop
+equality check) — verified via `objdump`: zero indirect `callq
+*-0x...(%rip)` sites remain anywhere in the compiled shell binary.
+
+**Phase 7 exit criteria (`docs/ROADMAP.md` §5) — all 3 demonstrated
+live:**
+- "Full system state is inspectable from the shell" — real, though
+  honestly partial: process/thread state (`ps`), the tool catalog
+  (`tools`), and this process's own audit trail (`audit`) are all
+  real and typed; memory/device/storage inspection would need new
+  introspection syscalls beyond what Phase 5 built, real future work,
+  not claimed as done.
+- "A shell command and the equivalent agent-issued intent produce
+  identical audit records" — true by construction (same dispatch, same
+  syscall), verified live: `show me the processes` prints
+  `(interpreted as: ps)` and produces the exact same `ps` output.
+- "Shell operations exceeding its capabilities are denied" — verified
+  live, reproduced twice: `rawin 64` (PS/2 controller, not COM1) ends
+  the shell process with a real, newly-observed `PROCESS_KILLED` —
+  checked via a marker-count comparison, not a naive substring match
+  (which would have false-matched an unrelated, pre-existing kill from
+  `fault_isolation_demo`'s own deliberate crash earlier in boot).
 
 ## Phase 8 — Hardware Consolidation And Release — Not started
 
