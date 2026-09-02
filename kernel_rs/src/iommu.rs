@@ -74,6 +74,11 @@ impl Regs {
 
 static mut REGS: Option<Regs> = None;
 static mut ROOT_TABLE_PHYS: u64 = 0;
+// One context-table page per PCI bus, allocated on the FIRST device
+// assigned there and reused by every subsequent one -- see
+// assign_device's own doc comment for the real bug this fixes.
+static mut BUS_CONTEXT_PHYS: [u64; 256] = [0; 256];
+static mut NEXT_DOMAIN_ID: u16 = 0;
 
 #[allow(static_mut_refs)]
 unsafe fn regs() -> &'static Regs {
@@ -198,20 +203,55 @@ pub fn assign_device(bus: u8, device: u8, function: u8, phys_ranges: &[(u64, u64
             }
         }
 
-        // Context table: one page per bus, 32 devices x 8 functions x 16
-        // bytes = 4096 bytes exactly (one page per bus, matches the spec).
-        let context_phys = pmm::alloc_page();
-        let root = pmm::p2v_pub(ROOT_TABLE_PHYS) as *mut u64;
-        // Root entry for this bus: [context_table_ptr | present]
-        *root.add(bus as usize * 2) = context_phys | 1;
+        // Real bug found and fixed here (Phase 8's AHCI driver is what
+        // surfaced it, adding a THIRD same-bus device alongside the
+        // existing virtio-blk/virtio-net assignments made it worth
+        // checking rather than assuming): this function used to
+        // allocate a FRESH context-table page and unconditionally
+        // overwrite the bus's ROOT TABLE entry on every single call —
+        // since a context table is one page per BUS (32 devices x 8
+        // functions x 16 bytes = 4096 bytes exactly), a second call for
+        // a DIFFERENT device on the SAME bus silently orphaned the
+        // first device's own context entry (root no longer points to
+        // the page it lives in), even though nothing about that first
+        // device's own capability grant or driver code changed. Fixed
+        // by reusing the SAME context-table page for a bus across
+        // multiple calls (`BUS_CONTEXT_PHYS`, allocated once per bus,
+        // on the FIRST device assigned there) — each call now only ever
+        // writes its OWN `ctx_index` slot within that shared page,
+        // never touching any other device's already-live entry.
+        let context_phys = {
+            let existing = BUS_CONTEXT_PHYS[bus as usize];
+            if existing != 0 {
+                existing
+            } else {
+                let fresh = pmm::alloc_page();
+                BUS_CONTEXT_PHYS[bus as usize] = fresh;
+                let root = pmm::p2v_pub(ROOT_TABLE_PHYS) as *mut u64;
+                *root.add(bus as usize * 2) = fresh | 1; // [context_table_ptr | present]
+                fresh
+            }
+        };
 
         let context = pmm::p2v_pub(context_phys) as *mut u64;
         let ctx_index = ((device as usize & 0x1F) << 3) | (function as usize & 0x7);
+        // Real hygiene fix alongside the context-table one above: a
+        // domain ID derived from `bus` alone collided for every device
+        // on the same bus (three, as of this driver) — each still got
+        // its own correct, independent `domain_pml4` (so translation
+        // itself was never wrong), but the IOMMU's own IOTLB
+        // invalidation is scoped by domain ID, so a collision meant
+        // invalidating one device's domain could over-invalidate
+        // (harmless here, just imprecise) or under-invalidate a
+        // DIFFERENT device sharing the same ID. A real monotonic
+        // counter gives every assignment a genuinely unique ID.
+        NEXT_DOMAIN_ID += 1;
+        let domain_id = NEXT_DOMAIN_ID;
         // Context entry (2 x u64 = 16 bytes): low = [SLPTPTR | present],
         // high = [address-width | domain-id]. Address width field 0b010 =
         // 4-level page tables (matches our domain_pml4 layout).
         *context.add(ctx_index * 2) = domain_pml4 | 1;
-        *context.add(ctx_index * 2 + 1) = (0b010u64 << 0) | ((bus as u64) << 8); // AW + a domain id derived from bus for uniqueness
+        *context.add(ctx_index * 2 + 1) = (0b010u64 << 0) | ((domain_id as u64) << 8);
 
         // Flush the context cache (global) so hardware picks up the new
         // entry — without this, the IOMMU may keep using a cached "not
@@ -229,7 +269,7 @@ pub fn assign_device(bus: u8, device: u8, function: u8, phys_ranges: &[(u64, u64
             "IOMMU: assigned {:02x}:{:02x}.{} to a domain with {} mapped range(s)",
             bus, device, function, phys_ranges.len()
         );
-        DomainId(bus as u16)
+        DomainId(domain_id)
     }
 }
 

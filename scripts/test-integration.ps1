@@ -22,6 +22,7 @@ $suite = @(
     @{ Name = "test-powerloss";                Script = "scripts\test-powerloss.ps1" },
     @{ Name = "test-synthesis";                Script = "scripts\test-synthesis.ps1" },
     @{ Name = "test-synthesis-fault-demo";     Script = "scripts\test-synthesis-fault-demo.ps1" },
+    @{ Name = "test-ahci";                     Script = "scripts\test-ahci.ps1" },
     @{ Name = "test-shell";                    Script = "scripts\test-shell.ps1" },
     @{ Name = "test-release";                  Script = "scripts\test-release.ps1" }
 )

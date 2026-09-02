@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod acpi;
+pub mod ahci;
 pub mod agent;
 pub mod apic;
 pub mod audit;
@@ -213,6 +214,7 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     // real DMA-safe buffer + IOMMU domain assignment.
     virtio_blk::spawn_if_present(&pci_devices);
     virtio_net::spawn_if_present(&pci_devices);
+    ahci::spawn_if_present(&pci_devices);
 
     // Phase 3: device manager -- discovery, driver binding, lifecycle,
     // restart-on-crash. Consumes the real device list above; the

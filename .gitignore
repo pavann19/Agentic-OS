@@ -46,3 +46,6 @@ _evidence/perf-result.json
 _evidence/perf-disk-a.img
 _evidence/perf-disk-b.img
 _evidence/perf-measure.log
+_evidence/disk-ahci-test.img
+_evidence/disk-ahci-sata.img
+user_rs/ahci_driver/target/

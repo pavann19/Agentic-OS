@@ -1,0 +1,22 @@
+[package]
+name = "ahci_driver"
+version = "0.1.0"
+edition = "2021"
+
+# Phase 8's storage half of "Tier 2 machine fully supported" -- a real
+# AHCI (SATA) driver, spec-based, targeting the SAME ich9-ahci
+# controller (00:1f.2) real Tier 2 hardware's own chipset provides --
+# unlike virtio-blk, this is the transport real Tier 2 storage will
+# actually need. Same freestanding-ELF64 pattern as every other
+# user_rs/* driver crate.
+[dependencies]
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true
