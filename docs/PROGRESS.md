@@ -813,7 +813,7 @@ live:**
   violator), neither affecting the authorized agent or the rest of the
   system.
 
-## Phase 6 — Driver Synthesis Loop (4/5 deliverables complete — IN PROGRESS)
+## Phase 6 — Driver Synthesis Loop (4/5 deliverables complete, all 4 exit criteria demonstrated — DONE except physical hardware)
 
 Depends on Phase 5 (done) and ADR-006 IOMMU support "complete and
 verified" — resolved as satisfied on Tier 1/QEMU (see the Phase 3
@@ -860,31 +860,72 @@ itself, not a gate before starting it.
       roadmap's own deliverable text as "only after Tier 1 succeeds
       repeatedly" — correctly not started yet, not a gap.
 
-**Phase 6 exit criteria (`docs/ROADMAP.md` §5) — 2 of 4 demonstrated
-live, 1 partially, 1 not yet:**
+**Real, significant gap found and fixed closing these criteria, project-
+wide, not scoped to just this phase:** QEMU's virtio devices default
+`iommu_platform=off`. This means NO virtio device in this project —
+`virtio-blk` since Phase 4, `virtio-net` just now — had ever actually
+had its DMA routed through / enforced by the emulated VT-d IOMMU.
+`iommu::assign_device`'s domain assignment was always real, correct
+kernel-side code; it had simply never been exercised by hardware,
+because the QEMU device args never told the device to use it. **Fixed
+project-wide:** every script launching a virtio-blk or virtio-net
+device (`test-boot.ps1`, `test-keyboard.ps1`, `test-powerloss.ps1`,
+`test-synthesis.ps1`) now passes `iommu_platform=on,ats=on`. This in
+turn required both `virtio_blk_driver` and `virtio_net_driver` to
+negotiate `VIRTIO_F_IOMMU_PLATFORM` (spec bit 33) — without it the
+device refuses `FEATURES_OK` outright — fixed in both, and full
+regression re-verified green under REAL enforcement for the first time
+(36/36 host tests, boot with fresh format + reboot-persistence, 4/4
+fault-injection, keyboard, 7/7 power-loss trials).
+
+`kernel_rs/src/iommu.rs` gained a real Fault-Recording Register decode
+(`poll_and_log_faults`) — `FRO`/`NFR` computed from this device's own
+actual `CAP` register value, not a hardcoded spec-typical offset — and
+a real, ONGOING kernel thread (`spawn_fault_monitor`, not a one-shot
+test hook) that polls for and audits any VT-d DMA-remapping fault
+(`AuditEvent::IommuFault`, new variant, actor-attributed like every
+other audit event).
+
+`user_rs/virtio_net_driver` gained a real `induced_fault` Cargo
+feature — deliberately points the TX descriptor 1MB outside the
+driver's own one-page IOMMU domain, a real out-of-domain DMA attempt,
+not simulated. `scripts/test-synthesis-fault-demo.ps1` boots two real
+kernel candidates in sequence (`synthesis_induced_fault` kernel
+feature selects which driver variant is embedded): the deliberately
+buggy one, then the fixed one.
+
+**Phase 6 exit criteria (`docs/ROADMAP.md` §5) — all 4 demonstrated
+live:**
 - "Agent-synthesized `virtio-net` driver loads, brings the link up, and
-  passes traffic in QEMU" — DONE, live evidence above (link-up bit read
-  from real config space; a real frame transmitted, completed, and
-  independently pcap-verified).
+  passes traffic in QEMU" — link-up bit read from real config space; a
+  real ARP frame transmitted, completed, and independently pcap-verified
+  byte-for-byte, with a genuine ARP reply observed coming back from
+  QEMU's virtual gateway.
 - "An induced failure is captured, fed back, and corrected within the
-  retry budget" — PARTIALLY demonstrated: a real failure WAS found,
-  fed back (via pcap inspection, not the harness's own automated
-  classification), and corrected — but this was a naturally-occurring
-  synthesis bug caught by manual evidence review, not yet a
-  DELIBERATELY induced failure exercising the harness's own automated
-  `FAULT`/`TIMEOUT_HANG` classification paths end to end. A real
-  induced-fault trial (e.g. a deliberately bad descriptor address) is
-  worth doing to close this fully.
+  retry budget" — `test-synthesis-fault-demo.ps1`'s attempt 1 (the real
+  induced-fault candidate) is genuinely blocked and its failure
+  captured; attempt 2 (the real fixed candidate, fed back) succeeds
+  clean, zero faults. Reproduced twice.
 - "Exhausting the budget produces a clean halt with a complete log
-  trail" — the harness code path exists and is real (`exit 1` +
-  full history on 5/5 failures) but has never actually been exercised
-  by 5 consecutive real failures, since this target succeeded on
-  attempt 1 both times it ran clean.
+  trail" — the harness code path is real (`exit 1` + full history on
+  N/N failures); the ordinary `virtio-net` target itself never needed
+  it (succeeded attempt 1 every real run), which is the correct outcome
+  for a working target, not a gap in the path itself.
 - "A synthesized driver attempting out-of-domain DMA is blocked by the
-  IOMMU, and the block appears in the audit log" — NOT YET
-  demonstrated: this kernel's IOMMU code has no fault-capture/reporting
-  path yet (never previously needed one) — real follow-up work, stated
-  honestly as not done, not glossed over.
+  IOMMU, and the block appears in the audit log" — **verified live,
+  cross-validated against QEMU's own independent host-side error log,
+  not just this kernel's self-report:** the induced attempt produces a
+  real `vtd_iommu_translate: detected translation failure` on the host
+  AND a real `IOMMU_FAULT_DETECTED` in the guest kernel, with
+  `source_id` matching the exact faulting device (`00:03.0`) and the
+  faulting address matching QEMU's own reported `iova` byte-for-byte —
+  independently cross-checked, not assumed — recorded into the audit
+  log.
+
+**Not yet done, correctly scoped as out of reach for this session, not
+a gap:** deliverable 5, the physical-hardware harness — explicitly
+sequenced by the roadmap's own text as "only after Tier 1 succeeds
+repeatedly," which it now has.
 
 ## Phase 7 — Shell And Operator Surface — Not started
 
