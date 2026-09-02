@@ -380,6 +380,73 @@ unsafe fn run_filesystem_proof(common: u64, notify_base: u64, dma: u64, dma_phys
     }
 }
 
+use kernel_common::audit_ring;
+
+// Ring lives right after the ext2 filesystem's own fixed 64-block
+// footprint -- same real disk, a real, separate on-disk region, no
+// overlap.
+const AUDIT_HEADER_BLOCK: u32 = ext2::TOTAL_BLOCKS;
+const AUDIT_RECORD_BLOCK_START: u32 = ext2::TOTAL_BLOCKS + 1;
+
+/// Real Phase 4 audit-persistence-with-rotation proof: read the real
+/// on-disk ring header (initializing it on the first-ever boot), write
+/// ONE real record for this boot, read it back to self-verify, and log
+/// whether real rotation has genuinely begun (`total_written_count`
+/// exceeding `RING_SLOTS` means the record just written landed on top
+/// of a real, previously-persisted one, not an empty slot). Running
+/// this kernel `RING_SLOTS + 1` or more times in a row on the same disk
+/// image is a direct, live demonstration of real rotation -- the exact
+/// same "don't recreate the disk image between test-boot.ps1 runs"
+/// property the ext2 reboot-persistence proof already relies on.
+unsafe fn run_audit_persistence_proof(common: u64, notify_base: u64, dma: u64, dma_phys: u64) {
+    let mut header_block = zeroed_block!();
+    ext2_read_block(common, notify_base, dma, dma_phys, AUDIT_HEADER_BLOCK, &mut header_block);
+
+    let mut header = if audit_ring::is_initialized(&header_block) {
+        com1_write_str("[VIRTIO_BLK_DRIVER] AUDIT_RING_ALREADY_INITIALIZED\n");
+        audit_ring::read_header(&header_block)
+    } else {
+        com1_write_str("[VIRTIO_BLK_DRIVER] AUDIT_RING_INITIALIZING\n");
+        audit_ring::RingHeader { next_write_index: 0, total_written_count: 0 }
+    };
+
+    let seq = header.total_written_count;
+    let slot = header.next_write_index;
+    let message = b"VIRTIO_BLK_DRIVER: real boot audit record (format/write/read/self-check)";
+
+    let mut record_block = zeroed_block!();
+    audit_ring::build_record(&mut record_block, seq, message);
+    ext2_write_block(common, notify_base, dma, dma_phys, AUDIT_RECORD_BLOCK_START + slot, &record_block);
+
+    header.next_write_index = (slot + 1) % audit_ring::RING_SLOTS;
+    header.total_written_count = seq + 1;
+    let mut new_header_block = zeroed_block!();
+    audit_ring::build_header(&mut new_header_block, &header);
+    ext2_write_block(common, notify_base, dma, dma_phys, AUDIT_HEADER_BLOCK, &new_header_block);
+
+    // Real self-check: read the SAME slot back and confirm it matches
+    // what was just written.
+    let mut readback = zeroed_block!();
+    ext2_read_block(common, notify_base, dma, dma_phys, AUDIT_RECORD_BLOCK_START + slot, &mut readback);
+    let mut out = zeroed_block!();
+    let (read_seq, read_len) = audit_ring::read_record(&readback, &mut out);
+
+    if read_seq == seq && read_len == message.len() && &out[..read_len] == message {
+        com1_write_str("[VIRTIO_BLK_DRIVER] AUDIT_SELF_CHECK_PASS: record written and read back byte-identical\n");
+        syscall1(0xACD0_0000 | seq);
+    } else {
+        com1_write_str("[VIRTIO_BLK_DRIVER] AUDIT_SELF_CHECK_FAIL\n");
+        syscall1(0xACBA_D000);
+    }
+
+    if header.total_written_count > audit_ring::RING_SLOTS as u64 {
+        com1_write_str("[VIRTIO_BLK_DRIVER] AUDIT_ROTATION_ACTIVE: this write genuinely overwrote a previously-persisted record\n");
+        syscall1(0xACD0_7A7E);
+    } else {
+        com1_write_str("[VIRTIO_BLK_DRIVER] AUDIT_ROTATION_NOT_YET_ACTIVE: ring not full yet\n");
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     unsafe {
@@ -466,6 +533,7 @@ pub extern "C" fn _start() -> ! {
         }
 
         run_filesystem_proof(common, notify_base, dma, dma_phys);
+        run_audit_persistence_proof(common, notify_base, dma, dma_phys);
     }
     loop {
         core::hint::spin_loop();

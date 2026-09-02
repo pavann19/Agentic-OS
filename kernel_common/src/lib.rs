@@ -5,6 +5,7 @@
 //! caller-provided slices/values only.
 #![no_std]
 
+pub mod audit_ring;
 pub mod bitmap;
 pub mod ext2;
 // Feature-gated: defines real, strong #[no_mangle] memset/memcpy/

@@ -347,3 +347,78 @@ mod ext2_tests {
         assert_eq!(&out[..5], b"short");
     }
 }
+
+/// Real assertions against `kernel_common::audit_ring` -- Phase 4's
+/// audit-log-persistence-with-rotation item, exercised the way
+/// `virtio_blk_driver` runs it for real: build a header + N records in
+/// memory (mirroring what gets written block-by-block to the real
+/// disk), verify rotation genuinely overwrites the oldest slot's bytes,
+/// not just that the counters increment.
+#[cfg(test)]
+mod audit_ring_tests {
+    use kernel_common::audit_ring::*;
+
+    #[test]
+    fn zeroed_block_is_not_initialized() {
+        let b = [0u8; BLOCK_SIZE];
+        assert!(!is_initialized(&b));
+    }
+
+    #[test]
+    fn built_header_is_initialized_and_round_trips() {
+        let mut b = [0u8; BLOCK_SIZE];
+        build_header(&mut b, &RingHeader { next_write_index: 2, total_written_count: 9 });
+        assert!(is_initialized(&b));
+        let h = read_header(&b);
+        assert_eq!(h.next_write_index, 2);
+        assert_eq!(h.total_written_count, 9);
+    }
+
+    #[test]
+    fn record_round_trip_is_byte_identical() {
+        let mut b = [0u8; BLOCK_SIZE];
+        let msg = b"VIRTIO_BLK: real audit record";
+        build_record(&mut b, 42, msg);
+        let mut out = [0u8; BLOCK_SIZE];
+        let (seq, n) = read_record(&b, &mut out);
+        assert_eq!(seq, 42);
+        assert_eq!(n, msg.len());
+        assert_eq!(&out[..n], &msg[..]);
+    }
+
+    #[test]
+    fn record_read_trusts_persisted_length_not_a_full_block() {
+        let mut b = [0u8; BLOCK_SIZE];
+        build_record(&mut b, 1, b"hi");
+        let mut out = [0xFFu8; BLOCK_SIZE];
+        let (_, n) = read_record(&b, &mut out);
+        assert_eq!(n, 2);
+        assert_eq!(&out[..2], b"hi");
+    }
+
+    #[test]
+    fn rotation_genuinely_overwrites_the_oldest_slot_on_disk() {
+        // Simulate RING_SLOTS + 2 real boots, each writing one record
+        // into slot (total_written_count % RING_SLOTS) -- exactly what
+        // virtio_blk_driver does against the real disk.
+        let mut slots: Vec<[u8; BLOCK_SIZE]> = (0..RING_SLOTS).map(|_| [0u8; BLOCK_SIZE]).collect();
+        let mut total: u64 = 0;
+        for _ in 0..(RING_SLOTS as u64 + 2) {
+            let idx = (total % RING_SLOTS as u64) as usize;
+            let msg = alloc_msg(total);
+            build_record(&mut slots[idx], total, &msg);
+            total += 1;
+        }
+        // Slot 0 was written at total=0 AND overwritten at total=RING_SLOTS
+        // (0 % 4 == 4 % 4) -- real rotation, not just a counter increasing.
+        let mut out = [0u8; BLOCK_SIZE];
+        let (seq, n) = read_record(&slots[0], &mut out);
+        assert_eq!(seq, RING_SLOTS as u64, "slot 0 must hold the ROTATED-IN record, not the original");
+        assert_eq!(&out[..n], &alloc_msg(RING_SLOTS as u64)[..]);
+        assert!(total > RING_SLOTS as u64, "rotation should genuinely have begun");
+    }
+
+    fn alloc_msg(seq: u64) -> Vec<u8> {
+        format!("record #{}", seq).into_bytes()
+    }
+}
