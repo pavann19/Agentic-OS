@@ -23,7 +23,7 @@
 //! (it lands on the TSS's second 8-byte slot) is fine.
 
 use crate::klog_info;
-use crate::{capability, driver, ipc};
+use crate::{capability, driver, ipc, thread, vmm};
 
 // Phase 2's syscall-surface proof: a dedicated table/capability reachable
 // from ring 3 via syscall number 2, independent of the kernel-thread-level
@@ -156,6 +156,16 @@ fn kbd_cap() -> capability::CapId {
     KBD_CAP.load(core::sync::atomic::Ordering::SeqCst)
 }
 
+// Phase 5's structured introspection API deliberately has NO dedicated
+// static table here, unlike syscalls 2-6 above: those all serve exactly
+// one fixed process each, so a single kernel-wide static table/capability
+// pair is correct for them. Syscall 7 below serves MULTIPLE, independent
+// agent processes (`agent.rs`), each with its OWN capability set — see
+// `thread::Thread::cap_table` and `thread::spawn_with_capability`/
+// `resolve_current_capability`, the real per-process mechanism this
+// needed instead.
+const AGENT_INTROSPECT_CAP: capability::CapId = 0; // by convention: an agent's own cap_table holds this at slot 0, if granted at all
+
 const IA32_EFER: u32 = 0xC000_0080;
 const IA32_STAR: u32 = 0xC000_0081;
 const IA32_LSTAR: u32 = 0xC000_0082;
@@ -188,16 +198,20 @@ pub fn set_kernel_stack(rsp: u64) {
 
 /// Dispatches one syscall. `num` is RAX at entry; `a0`/`a1` are the first
 /// two Linux-convention argument registers (RDI, RSI) — only as many as
-/// this Phase 1 proof-of-concept's demo syscalls need, not a complete ABI
-/// yet. Returns the value placed back into RAX for the caller.
+/// this kernel's syscalls need so far, not a complete ABI yet. Returns
+/// the value placed back into RAX for the caller.
 ///
-/// NO user-pointer validation exists yet for syscalls that would take one
-/// — none of the demo syscalls below dereference a user-supplied address,
-/// so there's nothing to validate yet. `docs/ROADMAP.md`'s "syscalls
-/// validate all user pointers" requirement stays open until a syscall
-/// that actually takes a pointer argument exists — see PHASE1_PROGRESS.md.
+/// Real user-pointer validation now exists (Phase 5, syscall 7 below is
+/// the first to dereference a caller-supplied address) —
+/// `vmm::validate_user_buffer_writable` walks the CALLING process's own
+/// page tables (`vmm::current_cr3()`, never a trusted kernel one) and
+/// requires PRESENT+WRITABLE+USER on every page in range before the
+/// kernel ever writes through it. The long-standing "no user-pointer
+/// validation exists yet" note (open since Phase 1, see PROGRESS.md) is
+/// closed for the syscall that actually needed it; syscalls 1-6 above
+/// still take no pointer arguments, so there's nothing there to validate.
 #[no_mangle]
-extern "C" fn syscall_dispatch(num: u64, a0: u64, _a1: u64) -> u64 {
+extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
     match num {
         1 => {
             klog_info!("SYSCALL_LOG value=0x{:x}", a0);
@@ -282,6 +296,39 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, _a1: u64) -> u64 {
             // moments here too.
             match driver::ack_interrupt(kbd_table(), kbd_cap()) {
                 Ok(()) => 0,
+                Err(_) => u64::MAX,
+            }
+        }
+        7 => {
+            // Phase 5's structured introspection API
+            // (`docs/ROADMAP.md` §5 Phase 5, deliverable 2): a0 = the
+            // calling process's own buffer address, a1 = its capacity in
+            // ThreadInfo-sized entries. Capability-gated on the CALLING
+            // thread's OWN cap_table (`thread::resolve_current_capability`
+            // — see that function's doc for why a per-process table,
+            // not a shared global, is what makes two agent processes
+            // with different grants genuinely behave differently here) —
+            // enforced by the kernel's own check, not the agent's
+            // cooperation, exactly Phase 5's second exit criterion.
+            match thread::resolve_current_capability(AGENT_INTROSPECT_CAP, capability::Rights::INTROSPECT) {
+                Ok(_) => {
+                    let max_entries = a1 as usize;
+                    let entries = crate::introspect::snapshot_threads(max_entries);
+                    let total_bytes = entries.len() as u64 * crate::introspect::THREAD_INFO_SIZE;
+                    let pml4 = vmm::current_cr3();
+                    if total_bytes == 0
+                        || !unsafe { vmm::validate_user_buffer_writable(pml4, a0, total_bytes) }
+                    {
+                        klog_info!("SYSCALL_INTROSPECT_BAD_BUFFER");
+                        return u64::MAX;
+                    }
+                    for (i, info) in entries.iter().enumerate() {
+                        let bytes = crate::introspect::thread_info_bytes(info);
+                        let dst = a0 + (i as u64) * crate::introspect::THREAD_INFO_SIZE;
+                        unsafe { vmm::write_user_bytes(pml4, dst, &bytes) };
+                    }
+                    entries.len() as u64
+                }
                 Err(_) => u64::MAX,
             }
         }

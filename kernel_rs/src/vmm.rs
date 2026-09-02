@@ -105,6 +105,61 @@ pub unsafe fn debug_translate(pml4_phys: u64, vaddr: u64) -> u64 {
     *pt.add(i1)
 }
 
+/// Real user-pointer validation — Phase 5's introspection syscall is the
+/// first one in this kernel to actually dereference a caller-supplied
+/// address (see `syscall.rs`'s long-standing "NO user-pointer validation
+/// exists yet" note, open since Phase 1). Walks `pml4_phys` (the CALLING
+/// process's own tables — pass `current_cr3()` from inside a syscall,
+/// never a trusted/kernel PML4) page by page across `[vaddr, vaddr+len)`
+/// and requires every page be PRESENT, WRITABLE, and USER-accessible.
+/// Rejects on the first page that fails any of those, on overflow, and on
+/// a zero-length range (nothing to write into is not a valid target). This
+/// is what makes it safe for the kernel to write INTO a buffer a ring-3
+/// caller named, rather than trusting the caller's own claim about what
+/// it mapped.
+pub unsafe fn validate_user_buffer_writable(pml4_phys: u64, vaddr: u64, len: u64) -> bool {
+    if len == 0 {
+        return false;
+    }
+    let Some(end) = vaddr.checked_add(len) else {
+        return false;
+    };
+    let mut page = vaddr & !0xFFF;
+    while page < end {
+        let pte = debug_translate(pml4_phys, page);
+        let required = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+        if pte & required != required {
+            return false;
+        }
+        page += 0x1000;
+    }
+    true
+}
+
+/// Writes `data` into a already-`validate_user_buffer_writable`-checked
+/// user range, one byte at a time via `write_volatile` — not a slice copy
+/// (see `kernel_common::mem_intrinsics`'s module doc and this crate's own
+/// `.cargo/config.toml`: any pattern LLVM can lower into a `memcpy` call
+/// hits the same indirect-call toolchain bug that cost a full investigation
+/// in Phase 4; a real, explicit, volatile per-byte loop is what reliably
+/// avoids it here too). Physical translation is redone per byte rather
+/// than cached across a page boundary — deliberately simple, since this
+/// path only ever moves a few hundred bytes of small `#[repr(C)]` structs,
+/// not a bulk data-transfer fast path.
+pub unsafe fn write_user_bytes(pml4_phys: u64, vaddr: u64, data: &[u8]) {
+    for (i, &byte) in data.iter().enumerate() {
+        let addr = vaddr + i as u64;
+        let (i4, i3, i2, i1) = indices(addr);
+        let pml4 = pmm::p2v_pub(pml4_phys) as *mut u64;
+        let pdpt = pmm::p2v_pub(*pml4.add(i4) & ADDR_MASK) as *mut u64;
+        let pd = pmm::p2v_pub(*pdpt.add(i3) & ADDR_MASK) as *mut u64;
+        let pt = pmm::p2v_pub(*pd.add(i2) & ADDR_MASK) as *mut u64;
+        let leaf_phys = (*pt.add(i1)) & ADDR_MASK;
+        let dst = pmm::p2v_pub(leaf_phys + (addr & 0xFFF)) as *mut u8;
+        core::ptr::write_volatile(dst, byte);
+    }
+}
+
 /// Maps one 4K page. `flags` should be `PAGE_WRITABLE`/`PAGE_NO_EXECUTE` as
 /// needed — `PAGE_PRESENT` is always added. Intermediate tables are
 /// allocated on demand via the PMM (so this must only be called while the

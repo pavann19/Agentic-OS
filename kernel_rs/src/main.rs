@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod acpi;
+pub mod agent;
 pub mod apic;
 pub mod audit;
 pub mod bootinfo;
@@ -26,6 +27,7 @@ pub mod fault_isolation_demo;
 pub mod init;
 pub mod events;
 pub mod interrupt_forward;
+pub mod introspect;
 pub mod ipc;
 #[cfg(any(
     feature = "fault_test_null_deref",
@@ -298,6 +300,13 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     klog_info!("FAULT_ISOLATION_DEMO_SPAWN_START");
     fault_isolation_demo::spawn_fault_isolation_demo();
     klog_info!("FAULT_ISOLATION_DEMO_SPAWN_DONE");
+
+    // Phase 5's agent process model + structured introspection API --
+    // see agent.rs's module doc for the full mapping of this one call to
+    // three of Phase 5's four exit criteria.
+    klog_info!("AGENT_DEMO_SPAWN_START");
+    agent::spawn_agent_demo();
+    klog_info!("AGENT_DEMO_SPAWN_DONE");
 
     // Phase 3: ACPI table discovery -- the real RSDP boot_rs found via the
     // UEFI configuration table, walked to find DMAR (the IOMMU's register

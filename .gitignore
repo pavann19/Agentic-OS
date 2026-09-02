@@ -19,6 +19,7 @@ user_rs/serial_driver/target/
 user_rs/framebuffer_driver/target/
 user_rs/keyboard_driver/target/
 user_rs/virtio_blk_driver/target/
+user_rs/agent_demo/target/
 _evidence/disk.img
 _evidence/disk-keyboard-test.img
 _evidence/disk-powerloss-test.img

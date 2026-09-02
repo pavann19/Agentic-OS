@@ -54,6 +54,13 @@ impl Rights {
     pub const MAP: Rights = Rights(1 << 4); // may map an MmioRegion into its own address space
     pub const WAIT: Rights = Rights(1 << 5); // may wait_for_interrupt/acknowledge an InterruptLine
     pub const PORT_IO: Rights = Rights(1 << 6); // may issue in/out on a PortIoRange
+    // Phase 5: may invoke the structured introspection syscall
+    // (`introspect.rs`/`syscall.rs` syscall 7) — enumerate real,
+    // typed system state. Its own dedicated right, not reuse of an
+    // existing one, so a process holding e.g. `WAIT` on an interrupt
+    // never incidentally gains introspection just because some other
+    // capability happened to share a bit.
+    pub const INTROSPECT: Rights = Rights(1 << 7);
 
     pub fn contains(self, other: Rights) -> bool {
         (self.0 & other.0) == other.0
@@ -97,6 +104,12 @@ pub enum KernelObjectKind {
     /// as it would for a bare made-up index, by construction, not by a
     /// separate access-control check layered on top.
     FileObject { inode: u32 },
+    /// Phase 5's introspection handle: names no physical resource at all
+    /// (unlike every kind above it) — holding it is purely the
+    /// permission to call the structured introspection syscall. Carries
+    /// no data of its own; `resolve()`'s `Rights::INTROSPECT` check is
+    /// the entire access-control surface for it.
+    IntrospectionHandle,
 }
 
 pub struct KernelObject {
@@ -222,12 +235,34 @@ impl CapabilityTable {
     /// "invocation and audit-record emission are one code path" for the
     /// revocation-check half of that guarantee (audit emission itself
     /// happens in the specific operation that calls this, e.g. ipc.rs).
+    ///
+    /// Real bug found and fixed here (Phase 5's adversarial agent demo,
+    /// `agent.rs`, is what surfaced it): the ORIGINAL version of this
+    /// function used `?` to bail out immediately on a missing/never-
+    /// granted slot (`CapError::NoSuchCapability`), before ever reaching
+    /// the `audit::record` call this doc comment claims is unconditional
+    /// ("not left to each caller to remember ... regardless of what the
+    /// caller does next"). That claim was actually FALSE for exactly the
+    /// denial that matters most — a capability-less caller being refused
+    /// — while genuinely true for `Revoked`/`InsufficientRights` (the two
+    /// error variants reachable past that early return). Concretely: the
+    /// stranger process in `agent.rs`'s adversarial demo (and, on closer
+    /// inspection, Phase 4's own `OBJSTORE_DISCOVERY_DENIED_OK` stranger-
+    /// table case before it) was denied correctly but left ZERO audit
+    /// trail of that denial — silently contradicting Phase 5's own exit
+    /// criterion ("every agent action ... reconstructible from the audit
+    /// log alone"). Fixed by routing the missing-slot case through the
+    /// SAME single `result`/audit-on-`Err` path every other failure
+    /// already used, rather than a separate early return.
     pub fn resolve(&self, cap_id: CapId, required: Rights) -> Result<Capability, CapError> {
-        let cap = self
-            .slots
-            .get(cap_id as usize)
-            .and_then(|s| *s)
-            .ok_or(CapError::NoSuchCapability)?;
+        let slot = self.slots.get(cap_id as usize).and_then(|s| *s);
+        let cap = match slot {
+            Some(c) => c,
+            None => {
+                audit::record(audit::AuditEvent::Denied { cap_id });
+                return Err(CapError::NoSuchCapability);
+            }
+        };
 
         let current_gen = crate::critical::without_interrupts(|| unsafe {
             objects_mut()

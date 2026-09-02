@@ -64,6 +64,16 @@ pub struct Thread {
     /// thread bound to a process (`vmm::new_address_space()`) gets its own,
     /// isolated from every other process's.
     pub address_space: u64,
+    /// Phase 5: this thread's OWN capability set — "an ordinary user-space
+    /// process holding a restricted capability set" (`docs/ROADMAP.md`
+    /// Phase 5, deliverable 1) has to live somewhere per-process, and this
+    /// is the per-process object this kernel already has. Every thread
+    /// gets one (kernel threads' stays empty and unused — no real cost,
+    /// an empty `Vec`). See `spawn_with_capability` for how a capability
+    /// gets into a specific thread's table before it's ever reachable by
+    /// the scheduler, and `resolve_current_capability` for how a syscall
+    /// checks it.
+    pub cap_table: crate::capability::CapabilityTable,
 }
 
 static mut NEXT_TID: ThreadId = 1;
@@ -177,6 +187,7 @@ unsafe fn spawn_in_locked(entry: extern "C" fn(), address_space: u64) -> ThreadI
             saved_rsp: sp,
             _stack: stack,
             address_space,
+            cap_table: crate::capability::CapabilityTable::new(),
         });
 
         if threads_mut().is_none() {
@@ -185,6 +196,61 @@ unsafe fn spawn_in_locked(entry: extern "C" fn(), address_space: u64) -> ThreadI
         threads_mut().as_mut().unwrap().push_back(thread);
         tid
     }
+}
+
+/// Same as `spawn`, but grants ONE capability (`object_id`/`rights`) into
+/// the new thread's OWN `cap_table` before it is ever pushed onto
+/// `THREADS` — i.e. before the scheduler can possibly run it. This is
+/// what makes Phase 5's capability grant race-free: `spawn_in_locked`
+/// above builds the thread and calls `threads_mut().push_back` as its
+/// LAST step, all inside one `critical::without_interrupts` section: a
+/// thread that isn't in that queue yet cannot be picked by `schedule()`
+/// no matter when a timer tick lands, so there is no window where the
+/// new thread could run before holding the capability it's meant to
+/// start with. (Contrast: granting AFTER `spawn`/`spawn_in` returns would
+/// reopen exactly that race — this exists so callers never have to.)
+pub fn spawn_with_capability(
+    entry: extern "C" fn(),
+    address_space: u64,
+    object_id: crate::capability::ObjectId,
+    rights: crate::capability::Rights,
+) -> ThreadId {
+    crate::critical::without_interrupts(|| unsafe {
+        let tid = spawn_in_locked(entry, address_space);
+        // Find the thread we just built (it's always the most recently
+        // pushed one, but look it up by id rather than assume queue
+        // position — cheap, and future-proof against this function ever
+        // being called concurrently with itself).
+        if let Some(threads) = threads_mut().as_mut() {
+            if let Some(t) = threads.iter_mut().find(|t| t.id == tid) {
+                t.cap_table.grant(object_id, rights);
+            }
+        }
+        tid
+    })
+}
+
+/// Real, typed, capability-gated introspection primitive: resolves
+/// `cap_id` against the CURRENTLY RUNNING thread's OWN `cap_table` — never
+/// a shared global table, so two agent processes calling the same
+/// syscall genuinely get judged on what THEY, individually, were
+/// granted, exactly the "an agent's policy is a restriction on its own
+/// capability set" model Phase 5 exists to demonstrate. Runs the whole
+/// resolve under `critical::without_interrupts`, matching every other
+/// CURRENT/THREADS accessor in this file — a preemption mid-resolve here
+/// would otherwise risk observing a different thread's table entirely if
+/// a reference leaked across a reschedule; keeping it inside one locked
+/// call makes that impossible by construction.
+pub fn resolve_current_capability(
+    cap_id: crate::capability::CapId,
+    required: crate::capability::Rights,
+) -> Result<crate::capability::Capability, crate::capability::CapError> {
+    crate::critical::without_interrupts(|| unsafe {
+        match current_mut().as_ref() {
+            Some(t) => t.cap_table.resolve(cap_id, required),
+            None => Err(crate::capability::CapError::NoSuchCapability),
+        }
+    })
 }
 
 /// Raw asm: save callee-saved regs + RSP into `*old_rsp_slot`, load
@@ -474,6 +540,7 @@ pub fn init_as_current_thread() {
             saved_rsp: 0, // never read until this thread is switched OUT of, which fills it in
             _stack: stack,
             address_space: crate::vmm::kernel_pml4_phys(),
+            cap_table: crate::capability::CapabilityTable::new(),
         }));
     }
 }
@@ -525,4 +592,32 @@ pub fn set_current_address_space(pml4_phys: u64) {
 
 pub fn current_id() -> ThreadId {
     crate::critical::without_interrupts(|| unsafe { current_mut().as_ref().map(|t| t.id).unwrap_or(0) })
+}
+
+/// Real, typed snapshot of every live thread — `(id, state, is_user)`,
+/// `is_user` meaning this thread runs in its own process address space
+/// rather than the shared kernel one. Phase 5's introspection API
+/// (`introspect.rs`) builds its `ThreadInfo` structs from exactly this,
+/// not from any text-formatted log line — the whole point of "typed
+/// interfaces, no text scraping" (`docs/ROADMAP.md`'s Phase 5 exit
+/// criteria) is that this function returns real struct data, the same
+/// data the scheduler itself operates on, not a re-parsed rendering of
+/// it. Takes the same `critical::without_interrupts` lock every other
+/// THREADS/CURRENT accessor in this file does — a caller (a syscall
+/// handler) walking this while `schedule()` is mid-mutation would be the
+/// exact same TOCTOU class already fixed everywhere else here.
+pub fn snapshot() -> alloc::vec::Vec<(ThreadId, ThreadState, bool)> {
+    crate::critical::without_interrupts(|| unsafe {
+        let kernel_pml4 = crate::vmm::kernel_pml4_phys();
+        let mut out = alloc::vec::Vec::new();
+        if let Some(t) = current_mut().as_ref() {
+            out.push((t.id, ThreadState::Running, t.address_space != kernel_pml4));
+        }
+        if let Some(threads) = threads_mut().as_ref() {
+            for t in threads.iter() {
+                out.push((t.id, t.state, t.address_space != kernel_pml4));
+            }
+        }
+        out
+    })
 }
