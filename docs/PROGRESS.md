@@ -926,13 +926,23 @@ checked above.
 ## Next concrete increment
 
 Phase 6 (Driver Synthesis Loop) is next per the roadmap's own
-dependency ordering — but it depends UNCONDITIONALLY on ADR-006 IOMMU
-support "complete and verified," which this project has only ever
-verified in QEMU; whether that's sufficient to start Phase 6's own work
-or whether it, too, wants real hardware confirmation first is worth
-deciding explicitly before starting, not assumed either way. Separately,
-Phase 3 has exactly one item left, and it is NOT code: physically
-bringing up the selected Tier 2 machine (Lenovo ThinkPad T480,
-`docs/TIER2_HARDWARE.md`) and confirming this kernel's real boot chain
-over its real serial line — needs the user to actually acquire and wire
-up the hardware, not further code changes here.
+dependency ordering. Resolved, not left open: physical Tier 2 hardware
+is NOT a precondition to starting Phase 6. Re-reading the roadmap's own
+text settles this rather than assuming either way: (1) §4 states Tier 1
+(QEMU) is "the development and CI target... every phase gate is
+validated here" — this project's IOMMU support (DMAR discovery, a live
+translation-enabled root table, real per-device domain assignment,
+deny-by-default) is genuinely complete and verified there, satisfying
+Phase 6's own "IOMMU support complete and verified" dependency line; (2)
+Phase 6's OWN deliverable list makes the sequencing explicit —
+deliverable 4 is "First target: virtio-net on Tier 1," deliverable 5 is
+"Only after Tier 1 succeeds repeatedly: a physical-hardware harness,"
+and its exit criteria are entirely QEMU-scoped. Physical hardware is a
+LATER sub-step INSIDE Phase 6, not a gate before it starts. Separately,
+Phase 3 still has exactly one item left, and it is NOT code: physically
+bringing up the selected Tier 2 machine (any machine meeting the
+roadmap's 4 criteria — the Lenovo ThinkPad T480, `docs/TIER2_HARDWARE.md`,
+is the researched recommendation, not a strict requirement) and
+confirming this kernel's real boot chain over its real serial line —
+needs the user to actually acquire and wire up hardware, not further
+code changes here. It stays open, honestly, alongside Phase 6 starting.
