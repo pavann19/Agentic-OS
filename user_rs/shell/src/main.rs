@@ -183,6 +183,28 @@ fn cmd_tools() {
     }
 }
 
+/// Phase 7's human-readable audit log viewer (deliverable 3): the raw
+/// syscall payload is a typed `(kind, a, b)` triple -- this decodes it
+/// into the SAME English `AuditEvent` shape `kernel_rs::audit::
+/// AuditEvent`'s own `{:?}` debug-log line uses (see
+/// `introspect.rs::event_discriminant`'s documented kind ordering),
+/// instead of leaving a human to memorize what "kind=0" means.
+fn print_audit_event(kind: u32, a: u32, b: u32) {
+    match kind {
+        0 => { write_str("Grant           object="); write_u64_dec(a as u64); write_str(" rights="); write_hex_u64(b as u64); }
+        1 => { write_str("Derive          object="); write_u64_dec(a as u64); write_str(" rights="); write_hex_u64(b as u64); }
+        2 => { write_str("Revoke          object="); write_u64_dec(a as u64); }
+        3 => { write_str("Denied          cap_id="); write_u64_dec(a as u64); }
+        4 => { write_str("IpcSend         object="); write_u64_dec(a as u64); }
+        5 => { write_str("IpcReceive      object="); write_u64_dec(a as u64); }
+        6 => { write_str("InterruptDelivered  vector="); write_hex_u64(a as u64); }
+        7 => { write_str("InterruptAcknowledged  vector="); write_hex_u64(a as u64); }
+        8 => { write_str("PolicyDenied    rights="); write_hex_u64(a as u64); }
+        9 => { write_str("IommuFault      source_id="); write_hex_u64(a as u64); write_str(" reason="); write_hex_u64(b as u64); }
+        _ => { write_str("(unknown event kind "); write_u64_dec(kind as u64); write_str(")"); }
+    }
+}
+
 fn cmd_audit() {
     let buf_addr = unsafe { core::ptr::addr_of!(BUF.bytes) as u64 };
     let result = unsafe { syscall_buf(9, buf_addr, MAX_ENTRIES as u64) };
@@ -194,7 +216,6 @@ fn cmd_audit() {
         write_str("(no audit records attributed to this shell process yet)\r\n");
         return;
     }
-    write_str("  SEQ  KIND  A  B\r\n");
     let count = core::cmp::min(result as usize, MAX_ENTRIES);
     for i in 0..count {
         let base = unsafe { buf_base().add(i * AUDIT_ENTRY_SIZE) };
@@ -202,14 +223,10 @@ fn cmd_audit() {
         let kind = unsafe { read_u32_le(base, 8) };
         let a = unsafe { read_u32_le(base, 12) };
         let b = unsafe { read_u32_le(base, 16) };
-        write_str("  ");
+        write_str("  #");
         write_u64_dec(seq);
-        write_str("    ");
-        write_u64_dec(kind as u64);
-        write_str("    ");
-        write_u64_dec(a as u64);
-        write_str("    ");
-        write_u64_dec(b as u64);
+        write_str("  ");
+        print_audit_event(kind, a, b);
         write_str("\r\n");
     }
 }
@@ -271,6 +288,9 @@ fn cmd_help() {
     write_str("  rawin <port>    read one byte from a raw port -- ONLY COM1 is granted;\r\n");
     write_str("                  anything else demonstrates real capability enforcement\r\n");
     write_str("                  by ending this process (see module doc)\r\n");
+    write_str("\r\nplain-English requests also work, e.g. 'show me the processes',\r\n");
+    write_str("'what tools are available', 'show me the audit log' -- each resolves\r\n");
+    write_str("to the EXACT SAME command above, same syscall, same audit record.\r\n");
 }
 
 const LINE_MAX: usize = 128;
@@ -312,17 +332,100 @@ fn split_first_word(line: &[u8]) -> (&[u8], &[u8]) {
     (word, &line[rest..])
 }
 
+/// Real bug found and fixed here: `line.windows(n).any(|w| w == phrase)`
+/// -- ordinary, idiomatic Rust slice comparison -- lowers to a real
+/// `memcmp` call on this toolchain (confirmed via disassembly: a real
+/// `callq *-0x...(%rip)` through the exact same permanently-unpopulated
+/// indirect slot `kernel_common::mem_intrinsics`'s own doc comment
+/// documents at length). A manual, explicit byte-by-byte comparison
+/// loop has no such call site to begin with -- same "avoid the
+/// construct, not just the symptom" fix `resolve_intent`'s own doc
+/// comment right below already applies to a DIFFERENT instance of the
+/// same underlying toolchain issue.
+fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+    }
+    true
+}
+
+fn contains_phrase(line: &[u8], phrase: &[u8]) -> bool {
+    if phrase.len() > line.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i + phrase.len() <= line.len() {
+        if bytes_eq(&line[i..i + phrase.len()], phrase) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Phase 7's natural-language intent path (deliverable 4): "resolving
+/// to the same capability invocations a human-typed command would,
+/// never a separate privileged path." This is that resolution step --
+/// a small, honest, keyword-based match (not a real NLP model; this is
+/// a freestanding no_std kernel shell, not a place to embed one), whose
+/// entire job is to map a free-text sentence to the EXACT SAME command
+/// name the direct dispatch below already handles. It never calls a
+/// syscall itself and never branches on capabilities — by construction,
+/// an intent and its equivalent typed command produce byte-identical
+/// downstream behavior (same function call, same syscall, same audit
+/// record), which is exactly what this phase's own exit criterion asks
+/// to be demonstrated: "a shell command and the equivalent agent-issued
+/// intent produce identical audit records."
+fn resolve_intent(line: &[u8]) -> Option<&'static [u8]> {
+    // Real bug found and fixed here: a `let`-bound array of
+    // `(&[u8], &[u8])` tuples (one static table, looped over) hit the
+    // SAME class of toolchain bug this project has hit before with
+    // memset/memcpy (see kernel_common::mem_intrinsics's doc) -- LLVM
+    // generated a broken RIP-relative load for the table that resolved
+    // to address 0 (a real, observed page fault at cr2=0x0), discarded
+    // by this crate's own `/DISCARD/ : { *(.got*) }` linker rule. A
+    // flat sequence of individual comparisons, no table construction at
+    // all, sidesteps it entirely -- same "avoid the construct, not just
+    // the symptom" discipline every other toolchain-bug fix in this
+    // project already uses.
+    if contains_phrase(line, b"show me the processes") { return Some(b"ps"); }
+    if contains_phrase(line, b"list the processes") { return Some(b"ps"); }
+    if contains_phrase(line, b"what is running") { return Some(b"ps"); }
+    if contains_phrase(line, b"what tools are available") { return Some(b"tools"); }
+    if contains_phrase(line, b"list the tools") { return Some(b"tools"); }
+    if contains_phrase(line, b"show me the audit log") { return Some(b"audit"); }
+    if contains_phrase(line, b"show my audit trail") { return Some(b"audit"); }
+    None
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     write_str("\r\nAgentic OS shell -- Phase 7 (docs/ROADMAP.md Sec5 Phase 7)\r\n");
-    write_str("type 'help' for commands\r\n\r\n");
+    write_str("type 'help' for commands, or a plain-English request like 'show me the processes'\r\n\r\n");
 
     let mut line = [0u8; LINE_MAX];
     loop {
         write_str("agentos> ");
         let len = read_line(&mut line);
         let (cmd, rest) = split_first_word(&line[..len]);
-        match cmd {
+        let resolved: &[u8] = match cmd {
+            b"help" | b"ps" | b"tools" | b"audit" | b"rawin" | b"" => cmd,
+            _ => match resolve_intent(&line[..len]) {
+                Some(mapped) => {
+                    write_str("(interpreted as: ");
+                    write_str(unsafe { core::str::from_utf8_unchecked(mapped) });
+                    write_str(")\r\n");
+                    mapped
+                }
+                None => cmd,
+            },
+        };
+        match resolved {
             b"help" => cmd_help(),
             b"ps" => cmd_ps(),
             b"tools" => cmd_tools(),

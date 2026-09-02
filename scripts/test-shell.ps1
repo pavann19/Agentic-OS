@@ -28,7 +28,7 @@ param(
     [string]$DiskImage = "_evidence\disk-shell-test.img",
     [int]$ComPort = 45500,
     [int]$BootWaitSeconds = 9,
-    [int]$CommandWaitMs = 1200
+    [int]$CommandWaitMs = 2000
 )
 
 $ErrorActionPreference = "Stop"
@@ -64,10 +64,31 @@ $proc = Start-Process -FilePath $QemuExe -ArgumentList $qemuArgs -PassThru -NoNe
 $transcript = New-Object System.Text.StringBuilder
 
 try {
-    Start-Sleep -Seconds $BootWaitSeconds
-
-    $client = New-Object System.Net.Sockets.TcpClient
-    $client.Connect("127.0.0.1", $ComPort)
+    # Real fix for a genuine timing race this script used to have:
+    # QEMU's "server,nowait" chardev socket does NOT buffer serial
+    # output for a client that hasn't connected yet -- connecting only
+    # after a fixed wall-clock delay risks missing everything printed
+    # before that delay elapsed (the shell's own banner included),
+    # non-deterministically, depending on real host/TCG timing
+    # variance. Fixed by connecting as early as possible instead
+    # (retrying until QEMU's listener is actually up, typically well
+    # under a second), so nothing after that point can be missed
+    # regardless of how the boot sequence's own timing varies.
+    $client = $null
+    $connectDeadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $connectDeadline) {
+        try {
+            $client = New-Object System.Net.Sockets.TcpClient
+            $client.Connect("127.0.0.1", $ComPort)
+            break
+        } catch {
+            $client = $null
+            Start-Sleep -Milliseconds 200
+        }
+    }
+    if ($null -eq $client) {
+        throw "could not connect to QEMU's chardev socket on port $ComPort"
+    }
     $stream = $client.GetStream()
     $stream.ReadTimeout = 2000
 
@@ -91,15 +112,29 @@ try {
         $stream.Flush()
     }
 
-    # Drain boot output (includes the shell's own startup banner).
-    Start-Sleep -Milliseconds 500
-    [void]$transcript.Append((Read-Available))
+    # Now connected before boot output begins -- drain until the
+    # shell's own prompt has genuinely appeared (real content-based
+    # wait, not a guessed delay), bounded so a real hang still fails
+    # cleanly rather than looping forever.
+    $bootDeadline = (Get-Date).AddSeconds($BootWaitSeconds)
+    while ((Get-Date) -lt $bootDeadline) {
+        [void]$transcript.Append((Read-Available))
+        if ($transcript.ToString() -match "agentos> ") { break }
+        Start-Sleep -Milliseconds 200
+    }
 
     foreach ($cmd in @("help", "ps", "tools", "audit")) {
         Send-Line $cmd
         Start-Sleep -Milliseconds $CommandWaitMs
         [void]$transcript.Append((Read-Available))
     }
+
+    # Real natural-language intent path (deliverable 4): the SAME
+    # underlying command, reached via a free-text sentence instead of
+    # the exact command name.
+    Send-Line "show me the processes"
+    Start-Sleep -Milliseconds $CommandWaitMs
+    [void]$transcript.Append((Read-Available))
 
     # The real capability-boundary demo: port 0x64 (PS/2 controller) is
     # NOT in this shell's COM1-only PortIoRange grant. Real bug found
@@ -142,7 +177,8 @@ $checks = @(
     @{ Name = "help output";         Pattern = "real typed thread list" },
     @{ Name = "ps output";           Pattern = "PID  STATE    USER" },
     @{ Name = "tools output";        Pattern = "SYSCALL  REQUIRED_RIGHTS" },
-    @{ Name = "audit output ran";    Pattern = "SEQ  KIND  A  B|no audit records" }
+    @{ Name = "audit output ran (human-readable)"; Pattern = "Grant           object=|no audit records" },
+    @{ Name = "natural-language intent resolved"; Pattern = [regex]::Escape("(interpreted as: ps)") }
 )
 
 $allPassed = $true
