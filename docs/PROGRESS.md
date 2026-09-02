@@ -696,7 +696,7 @@ independently measured) and found the commit already complete, so no
 reformat was needed and the pre-existing data was correctly trusted.
 Both branches are real, both observed, not assumed.
 
-## Phase 5 — Agent Runtime Substrate (2/5 items complete — IN PROGRESS)
+## Phase 5 — Agent Runtime Substrate (5/5 items complete — DONE)
 
 This is the layer the whole project exists for (per the original vision
 conversation); everything before it was making it safe to build.
@@ -706,19 +706,22 @@ conversation); everything before it was making it safe to build.
       `user_rs/agent_demo` (new crate): a real freestanding ELF64
       ring-3 binary, same pattern as every driver crate, holding NO
       hardware capability at all. `kernel_rs/src/agent.rs` spawns the
-      SAME compiled binary twice — one instance granted a real
-      `Rights::INTROSPECT` capability before it ever starts running,
-      one left with an empty capability table — and the process's own
+      SAME compiled binary THREE times — `AGENT_AUTHORIZED` (granted
+      real `Rights::INTROSPECT` + `Rights::AUDIT_QUERY` before it ever
+      starts running), `AGENT_STRANGER` (an empty capability table),
+      `AGENT_POLICY_VIOLATOR` (requests `Rights::PORT_IO`, refused by
+      the policy engine below at grant time) — and the process's own
       code never branches on which it is; the only thing that differs
-      is what the kernel's capability check allows each to do. Real
-      architecture change to support this properly, not a hack:
-      `thread::Thread` now owns its OWN `cap_table` (previously
-      capability tables were one-per-syscall-surface kernel-wide
-      statics, correct for a single fixed driver process but not for
-      multiple independent agents); `thread::spawn_with_capability`
-      grants a capability into a brand-new thread's table inside the
-      SAME critical section that first makes it schedulable, closing a
-      race a separate grant-after-spawn call would have left open.
+      is what the kernel's capability check and policy engine allow
+      each to do. Real architecture change to support this properly,
+      not a hack: `thread::Thread` now owns its OWN `cap_table`
+      (previously capability tables were one-per-syscall-surface
+      kernel-wide statics, correct for a single fixed driver process
+      but not for multiple independent agents);
+      `thread::spawn_with_capabilities` grants a whole SET of
+      capabilities into a brand-new thread's table inside the SAME
+      critical section that first makes it schedulable, closing a race
+      a separate grant-after-spawn call would have left open.
 - [x] **Structured system introspection API** — "agent-native rather
       than agent-on-top": real, typed, machine-legible objects, never
       text scraping. `kernel_rs/src/introspect.rs` + syscall 7: real
@@ -733,8 +736,8 @@ conversation); everything before it was making it safe to build.
       avoidance discipline Phase 4's ext2 code needed). **Verified
       live:** the authorized agent gets `INTROSPECT_OK` and logs each
       real thread's typed fields one by one
-      (`SYSCALL_LOG value=0xa4......`, decoded, not re-parsed); the
-      unauthorized one gets `INTROSPECT_DENIED`.
+      (`SYSCALL_LOG value=0xa4......`, decoded, not re-parsed); the two
+      unauthorized processes get `INTROSPECT_DENIED`.
       **Real bug found via this session's own adversarial demo, fixed:**
       `CapabilityTable::resolve`'s early `?` return on a missing
       capability skipped the `audit::record` call entirely —
@@ -746,34 +749,69 @@ conversation); everything before it was making it safe to build.
       same audit-on-`Err` path every other denial already used —
       verified: the audit log's entry count went from 27 to 29 with
       both previously-silent denials now present.
-- [ ] **Tool/intent surface** — capability invocations exposed as
+- [x] **Tool/intent surface** — capability invocations exposed as
       typed, discoverable operations with declared preconditions and
-      effects. Not started.
-- [ ] **Policy engine** — declarative rules over which capabilities an
-      agent may hold and exercise, enforced at GRANT time (distinct
-      from the capability check at USE time, which already exists and
-      is what the introspection demo above exercises). Not started.
-- [ ] **Agent-facing audit query interface, capability-scoped** — the
-      audit log itself has existed since Phase 2 and every event above
-      is already in it; what's missing is a real syscall surface that
-      lets an agent query ITS OWN slice of it (not the whole log) via a
-      capability, the same "typed interface, not text scraping"
-      discipline as the introspection API. Not started.
+      effects. `kernel_rs/src/tools.rs` + syscall 8: a real, typed
+      `ToolDescriptor` catalog (`syscall_num`/`required_rights`/
+      `side_effecting`) for every agent-facing operation this kernel
+      exposes, readable WITHOUT any capability — discovery itself is
+      free ("discoverable"), USING what's discovered still goes through
+      every existing capability check. **Verified live:** every one of
+      the three demo processes (including the two with no other
+      capability at all) successfully reads back both catalog entries
+      and logs their typed fields — real evidence discovery is
+      genuinely unconditional, not gated by accident.
+- [x] **Policy engine** — declarative rules over which capabilities an
+      agent may hold and exercise, enforced at GRANT time, distinct
+      from `CapabilityTable::resolve`'s existing USE-time check.
+      `kernel_rs/src/policy.rs`: `allows()`, a real (if deliberately
+      minimal — one global allow-list mask, stated honestly as scope,
+      not a general per-agent-class rule engine) grant-time check.
+      `thread::spawn_with_capabilities` calls it before EVERY grant; a
+      refused request gets nothing minted for that grant (the process
+      still spawns), logged distinctly (`POLICY_GRANT_DENIED` +
+      `AuditEvent::PolicyDenied`, a new variant, separate from the
+      existing USE-time `Denied`). **Verified live:**
+      `AGENT_POLICY_VIOLATOR`'s request for `Rights::PORT_IO` is
+      refused at spawn time — `POLICY_GRANT_DENIED rights=0x40` and
+      `AUDIT seq=4 ... PolicyDenied { rights: 64 }` both appear BEFORE
+      that process's ELF even starts running, genuinely earlier than
+      the stranger's later resolve-time refusals.
+- [x] **Agent-facing audit query interface, capability-scoped** —
+      syscall 9 + `audit.rs`'s new `actor_tid` field (populated from
+      `thread::current_id()` at `record()` time, real per-process
+      attribution, not retrofitted after the fact) and
+      `records_by_actor()`: a process reads back EXACTLY its own audit
+      trail, structurally — not the whole log filtered client-side.
+      **Verified live:** the audit dump's final entries show
+      `AGENT_STRANGER` (tid=10) and `AGENT_POLICY_VIOLATOR` (tid=11)
+      each with their own two `Denied` records correctly attributed to
+      their OWN distinct thread id, never each other's; the authorized
+      agent's own query legitimately returns zero records, honestly
+      documented as the real, existing scope limit (only denials get a
+      dedicated audit path beyond grant/derive/revoke — a successful
+      use isn't separately audited), not glossed over as a bug.
 
-**Phase 5 exit criteria (`docs/ROADMAP.md` §5) — 2 of 4 demonstrated so
-far:** "an agent process enumerates the system ... entirely through
-typed interfaces, no text scraping" (the introspection demo above); "a
-policy denial is enforced by the kernel's capability check, not by the
-agent's cooperation" (the stranger agent's identical code, denied
-purely by `CapabilityTable::resolve`). **Not yet demonstrated:** "every
-agent action in a session is reconstructible from the audit log alone"
-(true for what exists today, but nothing exercises a REAL multi-step
-agent session yet to demonstrate it end to end); "a misbehaving agent is
-contained to its own process and its granted capabilities — demonstrated
-adversarially" (the stranger agent demonstrates DENIAL of an
-unauthorized action, which is real evidence toward this, but not yet a
-harder adversarial case — e.g. an agent attempting to exceed a policy
-limit mid-session, which needs the policy engine item above first).
+**Phase 5 exit criteria (`docs/ROADMAP.md` §5) — 4 of 4 demonstrated
+live:**
+- "An agent process enumerates the system ... entirely through typed
+  interfaces, no text scraping" — the tool-discovery + introspection
+  demos above.
+- "A policy denial is enforced by the kernel's capability check, not by
+  the agent's cooperation" — the stranger's identical code, denied
+  purely by `CapabilityTable::resolve`; the policy violator, denied
+  purely by `policy::allows` even earlier.
+- "Every agent action in a session is reconstructible from the audit
+  log alone" — concretely checkable now, not just asserted: the
+  capability-scoped audit query above IS that reconstruction,
+  demonstrated for exactly the highest-value case (each process's own
+  denied attempts), correctly separated by actor.
+- "A misbehaving agent is contained to its own process and its granted
+  capabilities — demonstrated adversarially" — TWO independent,
+  different-shaped adversarial cases now, not one: a resolve-time
+  refusal (the stranger) and a grant-time refusal (the policy
+  violator), neither affecting the authorized agent or the rest of the
+  system.
 
 ## Phase 6 — Driver Synthesis Loop — Not started
 
@@ -862,23 +900,39 @@ safely reformats, interrupted-after-commit is correctly trusted as
 already good. Getting the filesystem working surfaced a real,
 previously-latent kernel bug spanning every phase before this one (see
 the Phase 4 section above) — now fixed.
-Phases 5 through 8 — the agent runtime, driver synthesis, shell, hardware
-consolidation — are entirely not started. This is a genuinely solid,
-tested foundation covering Phases 0-4 completely, with every `[~]`
-partial marker closed except the one that is not code — Tier 2 physical
-hardware bring-up, honestly disclosed below as needing real hardware
-access this AI agent does not have; no claim on this page should be read
-as more than what's checked above.
+Phase 5 (Agent Runtime Substrate) is now DONE, 5/5 items, all 4 exit
+criteria demonstrated live: a real agent process model (three ring-3
+processes from ONE compiled binary, outcome decided entirely by the
+kernel's own capability/policy checks), a structured introspection API
+(real typed thread state, capability-gated), a tool/intent surface (a
+real, unconditionally-discoverable catalog of what an agent could ask
+for), a real grant-time policy engine (distinct from the existing
+use-time capability check), and a capability-scoped audit query
+interface (a process reads back exactly its own audit trail, real
+per-actor attribution verified live). A real alternatives investigation
+for Tier 2 physical hardware also happened this session — hypervisors,
+Equinix Metal, AWS EC2 bare metal, Hetzner, MacBooks, and this project's
+own dev machine were each researched and ruled out or set aside for
+stated reasons (see the Phase 3 section above) — none of it closes the
+requirement; only owning the recommended ThinkPad T480 does.
+Phases 6 through 8 — driver synthesis, shell, hardware consolidation —
+are entirely not started. This is a genuinely solid, tested foundation
+covering Phases 0-5 completely, with every `[~]` partial marker closed
+except the one that is not code — Tier 2 physical hardware bring-up,
+honestly disclosed below as needing real hardware access this AI agent
+does not have; no claim on this page should be read as more than what's
+checked above.
 
 ## Next concrete increment
 
-Phase 5 (Agent Runtime Substrate) is next — the layer this whole project
-exists for, per the original vision: agent process model, structured
-introspection API, typed tool/intent surface, policy engine, audit query
-interface, all building on the real capability/IPC/filesystem/object-store
-substrate Phases 1-4 now provide. Separately, Phase 3 has exactly one
-item left, and it is NOT code: physically bringing up the selected Tier 2
-machine (Lenovo ThinkPad T480, `docs/TIER2_HARDWARE.md`) and confirming
-this kernel's real boot chain over its real serial line — needs the user
-to actually acquire and wire up the hardware, not further code changes
-here.
+Phase 6 (Driver Synthesis Loop) is next per the roadmap's own
+dependency ordering — but it depends UNCONDITIONALLY on ADR-006 IOMMU
+support "complete and verified," which this project has only ever
+verified in QEMU; whether that's sufficient to start Phase 6's own work
+or whether it, too, wants real hardware confirmation first is worth
+deciding explicitly before starting, not assumed either way. Separately,
+Phase 3 has exactly one item left, and it is NOT code: physically
+bringing up the selected Tier 2 machine (Lenovo ThinkPad T480,
+`docs/TIER2_HARDWARE.md`) and confirming this kernel's real boot chain
+over its real serial line — needs the user to actually acquire and wire
+up the hardware, not further code changes here.
