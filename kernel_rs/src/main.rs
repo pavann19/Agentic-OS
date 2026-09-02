@@ -23,6 +23,7 @@ pub mod capability;
 pub mod critical;
 pub mod device_manager;
 pub mod driver;
+pub mod e1000;
 pub mod elf;
 pub mod fault_isolation_demo;
 pub mod init;
@@ -43,6 +44,7 @@ pub mod idt;
 pub mod iommu;
 pub mod klog;
 pub mod object_store;
+pub mod nvme;
 pub mod pci;
 pub mod pic;
 pub mod pmm;
@@ -215,6 +217,8 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     virtio_blk::spawn_if_present(&pci_devices);
     virtio_net::spawn_if_present(&pci_devices);
     ahci::spawn_if_present(&pci_devices);
+    nvme::spawn_if_present(&pci_devices);
+    e1000::spawn_if_present(&pci_devices);
 
     // Phase 3: device manager -- discovery, driver binding, lifecycle,
     // restart-on-crash. Consumes the real device list above; the

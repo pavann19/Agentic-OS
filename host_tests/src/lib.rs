@@ -422,3 +422,116 @@ mod audit_ring_tests {
         format!("record #{}", seq).into_bytes()
     }
 }
+
+#[cfg(test)]
+mod driver_registry_tests {
+    // Real, isolated verification of kernel_common::driver_registry --
+    // an experimental module NOT wired into kernel_rs's actual boot
+    // path (see that module's own doc). These tests are what "tested
+    // in isolation before any integration decision" means concretely:
+    // this crate's own real logic, exercised the same way every other
+    // kernel_common module already is here, with zero QEMU involved.
+
+    use kernel_common::driver_registry::{match_all, DriverEntry, MatchRule, PciId};
+
+    fn dev(vendor: u16, device: u16, class: u8, subclass: u8, prog_if: u8) -> PciId {
+        PciId { vendor, device, class, subclass, prog_if }
+    }
+
+    #[test]
+    fn vendor_device_rule_matches_exact_pair_only() {
+        let rule = MatchRule::VendorDevice(0x1AF4, 0x1042); // virtio-blk's real IDs
+        assert!(rule.matches(&dev(0x1AF4, 0x1042, 0x01, 0x00, 0x00)));
+        assert!(!rule.matches(&dev(0x1AF4, 0x1041, 0x01, 0x00, 0x00))); // virtio-net's real device ID -- must NOT match
+        assert!(!rule.matches(&dev(0x8086, 0x1042, 0x01, 0x00, 0x00))); // wrong vendor
+    }
+
+    #[test]
+    fn class_rule_matches_regardless_of_vendor_device() {
+        // Real NVMe class code (01/08/02) -- kernel_rs::nvme's own
+        // actual match rule, since real NVMe controllers from
+        // different vendors report different vendor/device IDs.
+        let rule = MatchRule::Class(0x01, 0x08, 0x02);
+        assert!(rule.matches(&dev(0x8086, 0x1234, 0x01, 0x08, 0x02))); // Intel-branded NVMe
+        assert!(rule.matches(&dev(0x144D, 0xABCD, 0x01, 0x08, 0x02))); // Samsung-branded NVMe -- different vendor, same class, still matches
+        assert!(!rule.matches(&dev(0x8086, 0x1234, 0x01, 0x06, 0x01))); // AHCI's class -- must NOT match NVMe's rule
+    }
+
+    #[test]
+    fn match_all_finds_every_real_driver_by_its_own_actual_rule() {
+        // Mirrors kernel_rs's five real drivers' own actual match
+        // rules exactly (see virtio_blk.rs/virtio_net.rs/ahci.rs/
+        // nvme.rs/e1000.rs's own find_X functions) -- this is the
+        // real proposed replacement table, not a synthetic example.
+        let table = [
+            DriverEntry { name: "virtio_blk", rule: MatchRule::VendorDevice(0x1AF4, 0x1042), handler: 1u32 },
+            DriverEntry { name: "virtio_net", rule: MatchRule::VendorDevice(0x1AF4, 0x1041), handler: 2u32 },
+            DriverEntry { name: "ahci", rule: MatchRule::VendorDevice(0x8086, 0x2922), handler: 3u32 },
+            DriverEntry { name: "nvme", rule: MatchRule::Class(0x01, 0x08, 0x02), handler: 4u32 },
+            DriverEntry { name: "e1000", rule: MatchRule::VendorDevice(0x8086, 0x100E), handler: 5u32 },
+        ];
+
+        // A real, representative device list -- the exact shape a real
+        // boot's own pci::enumerate() produces (host bridge + ISA
+        // bridge devices that match NOTHING, interspersed with real
+        // driver-matching devices), not a hand-picked easy case.
+        let devices = [
+            dev(0x8086, 0x29C0, 0x06, 0x00, 0x00), // host bridge -- matches nothing
+            dev(0x1AF4, 0x1042, 0x01, 0x00, 0x00), // virtio-blk
+            dev(0x8086, 0x2918, 0x06, 0x01, 0x00), // ISA bridge -- matches nothing
+            dev(0x1AF4, 0x1041, 0x01, 0x00, 0x00), // virtio-net
+            dev(0x8086, 0x2922, 0x01, 0x06, 0x01), // AHCI
+            dev(0x8086, 0x1234, 0x01, 0x08, 0x02), // NVMe (class-matched, real vendor-agnostic case)
+            dev(0x8086, 0x100E, 0x02, 0x00, 0x00), // e1000
+        ];
+
+        let mut out = [(dev(0, 0, 0, 0, 0), 0u32); 8];
+        let count = match_all(&devices, &table, &mut out);
+
+        assert_eq!(count, 5, "exactly the 5 real driver-matching devices, none of the 2 non-matching ones");
+        let handlers: Vec<u32> = out[..count].iter().map(|(_, h)| *h).collect();
+        assert_eq!(handlers, vec![1, 2, 3, 4, 5], "matched in device-list order, each to its own correct handler");
+    }
+
+    #[test]
+    fn two_devices_of_the_same_kind_are_both_matched_not_just_the_first() {
+        // Real, documented limitation of TODAY's kernel_rs code (every
+        // find_X uses .find(), which stops at the first match) that
+        // this module's own doc names as the concrete improvement over
+        // it -- this test is the actual proof, not just an assertion
+        // in a comment.
+        let table = [DriverEntry { name: "nvme", rule: MatchRule::Class(0x01, 0x08, 0x02), handler: 4u32 }];
+        let devices = [
+            dev(0x8086, 0x1111, 0x01, 0x08, 0x02), // first NVMe controller
+            dev(0x144D, 0x2222, 0x01, 0x08, 0x02), // a SECOND NVMe controller, different vendor
+        ];
+        let mut out = [(dev(0, 0, 0, 0, 0), 0u32); 8];
+        let count = match_all(&devices, &table, &mut out);
+
+        assert_eq!(count, 2, "BOTH real NVMe controllers must be matched -- today's .find()-based code would silently only spawn a driver for the first one");
+        assert_eq!(out[0].0.device, 0x1111);
+        assert_eq!(out[1].0.device, 0x2222);
+    }
+
+    #[test]
+    fn output_capacity_bounds_are_respected_not_silently_overrun_or_panicked() {
+        let table = [DriverEntry { name: "virtio_blk", rule: MatchRule::VendorDevice(0x1AF4, 0x1042), handler: 1u32 }];
+        let devices = [
+            dev(0x1AF4, 0x1042, 0x01, 0x00, 0x00),
+            dev(0x1AF4, 0x1042, 0x01, 0x00, 0x00),
+            dev(0x1AF4, 0x1042, 0x01, 0x00, 0x00),
+        ];
+        let mut out = [(dev(0, 0, 0, 0, 0), 0u32); 2]; // capacity 2, 3 real matches available
+        let count = match_all(&devices, &table, &mut out);
+        assert_eq!(count, 2, "stops cleanly at capacity, no panic, no silent drop without a return value saying so");
+    }
+
+    #[test]
+    fn a_device_matching_no_rule_is_skipped_not_an_error() {
+        let table = [DriverEntry { name: "virtio_blk", rule: MatchRule::VendorDevice(0x1AF4, 0x1042), handler: 1u32 }];
+        let devices = [dev(0x8086, 0x29C0, 0x06, 0x00, 0x00)]; // a real host-bridge device, matches nothing
+        let mut out = [(dev(0, 0, 0, 0, 0), 0u32); 4];
+        let count = match_all(&devices, &table, &mut out);
+        assert_eq!(count, 0);
+    }
+}

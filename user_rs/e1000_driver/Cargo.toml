@@ -1,0 +1,22 @@
+[package]
+name = "e1000_driver"
+version = "0.1.0"
+edition = "2021"
+
+# Phase 8's network half of "Tier 2 machine fully supported" -- a real
+# Intel e1000-class NIC driver, spec-based, targeting QEMU's own e1000
+# emulation. Real Tier 2 hardware won't have virtio-net; this is the
+# protocol family real Intel-chipset laptops (including the recommended
+# T480, whose onboard/dock Ethernet is Intel-class) actually use. Same
+# freestanding-ELF64 pattern as every other user_rs/* driver crate.
+[dependencies]
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true
