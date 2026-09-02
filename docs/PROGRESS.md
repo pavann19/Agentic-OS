@@ -477,6 +477,65 @@ Depends on Phase 2 (done). Started 2026-08-30.
       no AI agent has. This checklist item stays open until that
       physical step happens.
 
+      **Alternatives investigated, real research, all ruled out or
+      set aside (2026-09-02):**
+      - *Any hypervisor (VMware included)* — does not satisfy this item
+        at all, by the roadmap's own explicit wording ("one specific
+        **physical** machine"; exit criterion evidence must be a
+        "serial log from Tier 2 **physical hardware**"). A second
+        hypervisor would exercise a second virtual UEFI/virtual IOMMU/
+        virtual UART implementation, not real silicon — the exact
+        category of bug (firmware timing quirks, real DMA remapping
+        behavior) Tier 2 exists to catch.
+      - *Equinix Metal* (real bare-metal cloud rental) — ruled out: the
+        service is being discontinued, sunset by 2026-06-30 per
+        Equinix's own announcement; likely already unavailable.
+      - *AWS EC2 bare-metal instances* (`.metal` types) — ruled out on
+        a hard, documented blocker, not availability: AWS's own docs
+        state bare metal instance types do NOT support UEFI boot mode
+        at all, legacy BIOS only. This kernel's entire boot chain is a
+        UEFI application (`boot_rs`) — disqualifying, not a workaround.
+      - *Hetzner dedicated servers* — a real IPMI/serial-over-LAN path
+        exists and genuinely captures real BIOS-level output, but
+        Hetzner's own docs limit it to a specific list of older
+        auction-class boards (PX60/70, PX90/120, PX91/121, SX131/291)
+        outside their current standard lineup; UEFI support on those
+        exact boards and current rental availability/pricing were not
+        verified — would need checking a live auction listing before
+        committing money. Left as a possible, unverified fallback, not
+        the recommendation.
+      - *MacBooks* (any generation) — ruled out. Apple Silicon models
+        are ARM64, architecturally incompatible with this x86_64-only
+        kernel. Intel MacBooks fail the roadmap's own hard gate
+        ("unusable ... regardless of ... other merits" for a machine
+        with no early-boot serial path): Macs have shipped with no
+        physical serial exposure and no documented UART debug path for
+        well over a decade, unlike the ThinkPad's coreboot-documented
+        EC UART header. Apple's EFI is also a customized, non-standard
+        UEFI implementation (the entire reason bootloaders like
+        Clover/OpenCore exist), a further source of firmware-quirk risk
+        unrelated to validating this project's own logic.
+      - *This project's own development machine* — the user proposed
+        testing directly on it; declined, for two independent reasons
+        stated plainly rather than deferred: (1) without the serial
+        line wired up first, a bare-metal boot is a complete black
+        box — neither the user nor this agent can observe anything a
+        hang or crash produces, which is the opposite of the requested
+        "log what's happening"; (2) this kernel has never run on real
+        hardware, its PCI BAR-sizing probe/IOMMU register writes/PS2
+        controller reconfiguration are genuinely untested outside QEMU,
+        and a hard power-off mid-write to real firmware/NVRAM is a real
+        risk to a machine this project (and the user) actively depends
+        on. A spare/disposable machine, or the same machine with its
+        internal drive physically disconnected first, would remove the
+        catastrophic-risk half of this objection; the serial-line
+        requirement does not go away regardless.
+
+      **Net assessment, unchanged:** the ThinkPad T480 +
+      USB-serial-adapter path in `docs/TIER2_HARDWARE.md` remains the
+      most viable option found. This item stays open, honestly, as a
+      physical-world step outside this agent's reach.
+
 **Three real bugs found and fixed this phase so far:** (1) `info:
 &BootInfo`, validated under `boot_rs`'s bootstrap identity mapping, was
 read again after `vmm::init()` switched CR3 to the kernel's production
