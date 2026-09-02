@@ -1,0 +1,20 @@
+[package]
+name = "virtio_net_driver"
+version = "0.1.0"
+edition = "2021"
+
+# Phase 6's first driver-synthesis target (docs/ROADMAP.md Phase 6,
+# deliverable 4): a real virtio-net 1.0 "modern" PCI driver, built from
+# the VIRTIO spec + PCI configuration space, same freestanding-ELF64
+# pattern as every other user_rs/* driver crate.
+[dependencies]
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

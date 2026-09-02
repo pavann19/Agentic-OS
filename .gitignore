@@ -20,6 +20,7 @@ user_rs/framebuffer_driver/target/
 user_rs/keyboard_driver/target/
 user_rs/virtio_blk_driver/target/
 user_rs/agent_demo/target/
+user_rs/virtio_net_driver/target/
 _evidence/disk.img
 _evidence/disk-keyboard-test.img
 _evidence/disk-powerloss-test.img
@@ -29,3 +30,5 @@ _evidence/disk-powerloss-trial*.img
 _evidence/powerloss-trial*.log
 _evidence/disk-timing-test.img
 _evidence/timing-test.log
+_evidence/synthesis/
+_evidence/synthesis-attempt1-bug-found/

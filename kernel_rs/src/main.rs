@@ -54,6 +54,7 @@ pub mod thread;
 pub mod tools;
 pub mod user_driver;
 pub mod virtio_blk;
+pub mod virtio_net;
 pub mod vmm;
 
 use bootinfo::BootInfo;
@@ -210,6 +211,7 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     // capability-gated pattern as every Phase 3 driver, extended to a
     // real DMA-safe buffer + IOMMU domain assignment.
     virtio_blk::spawn_if_present(&pci_devices);
+    virtio_net::spawn_if_present(&pci_devices);
 
     // Phase 3: device manager -- discovery, driver binding, lifecycle,
     // restart-on-crash. Consumes the real device list above; the
