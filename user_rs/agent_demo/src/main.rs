@@ -3,27 +3,33 @@
 //! capability set, with no special kernel privileges." This is that
 //! process — a real, freestanding ELF64 ring-3 binary, no different in
 //! kind from `serial_driver`/`framebuffer_driver`/`keyboard_driver`,
-//! except that it holds no hardware capability at all. Its only possible
-//! capability is `Rights::INTROSPECT` over a Phase 5 `IntrospectionHandle`
-//! (`kernel_rs/src/capability.rs`), and it never assumes it has one.
+//! except that it holds no hardware capability at all. Its only
+//! possible capabilities are `Rights::INTROSPECT` and
+//! `Rights::AUDIT_QUERY` over the two Phase 5 handle objects
+//! (`kernel_rs/src/capability.rs`), and it never assumes it has either.
 //!
 //! `kernel_rs/src/agent.rs` spawns this EXACT SAME compiled binary
-//! twice: once with that capability granted before the process ever
-//! starts running (`thread::spawn_with_capability`), once without. This
-//! file's code is completely capability-agnostic — it always attempts
-//! the same syscall and reports whatever actually happens. The two
-//! processes' different outcomes are entirely the kernel's own
-//! capability check (`docs/ROADMAP.md`'s Phase 5 exit criterion: "a
-//! policy denial is enforced by the kernel's capability check, not by
-//! the agent's cooperation"), never a branch in this code.
+//! three times, with three different capability outcomes decided
+//! entirely kernel-side (full grants, none, or a policy-refused grant)
+//! — this file's code is completely capability-agnostic. It always
+//! attempts the same three syscalls in order and reports whatever
+//! actually happens; the different outcomes across the three spawned
+//! processes are entirely the kernel's own capability check and policy
+//! engine (`docs/ROADMAP.md`'s Phase 5 exit criterion: "a policy denial
+//! is enforced by the kernel's capability check, not by the agent's
+//! cooperation"), never a branch in this code.
 //!
-//! What "structured introspection, not text scraping" means here,
-//! concretely: syscall 7 hands this process back real `ThreadInfo`
-//! structs — `id`/`state`/`is_user` as actual typed fields at a fixed
-//! byte layout — not a string it has to parse. This file decodes those
-//! fields directly (`decode_entry` below) and logs each one through its
-//! own typed integer fields, never by re-emitting or re-parsing a log
-//! line.
+//! Three real, typed exchanges happen here, none of them text:
+//!   1. Syscall 8 — tool/intent discovery: real `ToolDescriptor`
+//!      structs (`kernel_rs::tools`), unconditionally readable, telling
+//!      this process what operations exist and what each would require
+//!      BEFORE it has to have any of that hardcoded.
+//!   2. Syscall 7 — structured introspection: real `ThreadInfo` structs,
+//!      capability-gated.
+//!   3. Syscall 9 — capability-scoped audit query: real `AuditEntryInfo`
+//!      structs, this process's OWN audit trail only, capability-gated.
+//! Every decode below reads fixed, documented byte offsets directly —
+//! never a string this process has to parse.
 
 #![no_std]
 #![no_main]
@@ -63,18 +69,15 @@ unsafe fn syscall1(value: u64) {
     );
 }
 
-/// Syscall 7: real structured introspection (`kernel_rs/src/syscall.rs`,
-/// `kernel_rs/src/introspect.rs`). `buf` = this process's OWN buffer
-/// (validated by the kernel against ITS OWN page tables before any
-/// write happens — `vmm::validate_user_buffer_writable`), `max_entries`
-/// = its capacity. Returns the real entry count written, or `u64::MAX`
-/// if the calling process's own capability table doesn't hold
-/// `Rights::INTROSPECT` — enforced kernel-side, not by this code
-/// choosing not to ask.
-unsafe fn syscall7_introspect(buf: u64, max_entries: u64) -> u64 {
+/// Shared shape for every "num=X, buf, max_entries -> count" syscall
+/// below (7, 8, 9) — same real args-in-rdi/rsi, result-in-rax pattern,
+/// just parameterized on the syscall number so it isn't repeated three
+/// times identically.
+unsafe fn syscall_buf(num: u64, buf: u64, max_entries: u64) -> u64 {
     let ret: u64;
     core::arch::asm!(
-        "mov rax, 7", "syscall",
+        "mov rax, {num}", "syscall",
+        num = in(reg) num,
         in("rdi") buf, in("rsi") max_entries,
         lateout("rax") ret, lateout("rdx") _, lateout("rcx") _,
         lateout("r8") _, lateout("r9") _, lateout("r10") _, lateout("r11") _,
@@ -85,57 +88,116 @@ unsafe fn syscall7_introspect(buf: u64, max_entries: u64) -> u64 {
 
 const MAX_ENTRIES: usize = 16;
 const THREAD_INFO_SIZE: usize = 16;
+const TOOL_DESCRIPTOR_SIZE: usize = 16;
+const AUDIT_ENTRY_SIZE: usize = 24;
+
+// One shared, generously-sized buffer for all three syscalls (used one
+// at a time, never concurrently) -- real `#[repr(C, align(8))]` so a
+// natural 8-byte alignment holds regardless of which fixed-layout
+// struct is currently being decoded out of it.
+const BUF_BYTES: usize = MAX_ENTRIES * AUDIT_ENTRY_SIZE; // the largest of the three entry sizes
 
 #[repr(C, align(8))]
-struct IntrospectBuf {
-    bytes: [u8; MAX_ENTRIES * THREAD_INFO_SIZE],
+struct SharedBuf {
+    bytes: [u8; BUF_BYTES],
 }
 
-static mut BUF: IntrospectBuf = IntrospectBuf {
-    bytes: [0u8; MAX_ENTRIES * THREAD_INFO_SIZE],
-};
+static mut BUF: SharedBuf = SharedBuf { bytes: [0u8; BUF_BYTES] };
+
+unsafe fn read_u64_le(base: *const u8, offset: usize) -> u64 {
+    let mut v: u64 = 0;
+    for i in 0..8 {
+        v |= (core::ptr::read_volatile(base.add(offset + i)) as u64) << (i * 8);
+    }
+    v
+}
+
+unsafe fn read_u32_le(base: *const u8, offset: usize) -> u32 {
+    let mut v: u32 = 0;
+    for i in 0..4 {
+        v |= (core::ptr::read_volatile(base.add(offset + i)) as u32) << (i * 8);
+    }
+    v
+}
+
+unsafe fn buf_base() -> *const u8 {
+    core::ptr::addr_of!(BUF.bytes) as *const u8
+}
 
 /// Real typed decode of one `ThreadInfo` entry — `kernel_rs::introspect`'s
-/// own real, documented C layout (id: u64 LE, state: u32 LE, is_user:
-/// u32 LE), not a guess. Returns (id, state, is_user).
-unsafe fn decode_entry(index: usize) -> (u64, u32, u32) {
-    let base = (core::ptr::addr_of!(BUF.bytes) as *const u8).add(index * THREAD_INFO_SIZE);
-    let mut id: u64 = 0;
-    for i in 0..8 {
-        id |= (core::ptr::read_volatile(base.add(i)) as u64) << (i * 8);
-    }
-    let mut state: u32 = 0;
-    for i in 0..4 {
-        state |= (core::ptr::read_volatile(base.add(8 + i)) as u32) << (i * 8);
-    }
-    let mut is_user: u32 = 0;
-    for i in 0..4 {
-        is_user |= (core::ptr::read_volatile(base.add(12 + i)) as u32) << (i * 8);
-    }
-    (id, state, is_user)
+/// own documented C layout (id: u64 LE, state: u32 LE, is_user: u32 LE).
+unsafe fn decode_thread_info(index: usize) -> (u64, u32, u32) {
+    let base = buf_base().add(index * THREAD_INFO_SIZE);
+    (read_u64_le(base, 0), read_u32_le(base, 8), read_u32_le(base, 12))
+}
+
+/// Real typed decode of one `ToolDescriptor` entry —
+/// `kernel_rs::tools`'s documented layout (syscall_num/required_rights/
+/// side_effecting, each u32 LE).
+unsafe fn decode_tool_descriptor(index: usize) -> (u32, u32, u32) {
+    let base = buf_base().add(index * TOOL_DESCRIPTOR_SIZE);
+    (read_u32_le(base, 0), read_u32_le(base, 4), read_u32_le(base, 8))
+}
+
+/// Real typed decode of one `AuditEntryInfo` entry —
+/// `kernel_rs::introspect`'s documented layout (seq: u64 LE, kind/a/b
+/// each u32 LE).
+unsafe fn decode_audit_entry(index: usize) -> (u64, u32, u32, u32) {
+    let base = buf_base().add(index * AUDIT_ENTRY_SIZE);
+    (read_u64_le(base, 0), read_u32_le(base, 8), read_u32_le(base, 12), read_u32_le(base, 16))
 }
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    com1_write_str("\n[AGENT_DEMO] real ELF64 ring-3 process, no hardware capability, attempting structured introspection\n");
+    com1_write_str("\n[AGENT_DEMO] real ELF64 ring-3 process, capability set decided entirely by the kernel\n");
     unsafe { syscall1(0xA6E0_0000) }; // "AGENT enter" marker
 
+    // 1. Tool/intent discovery (syscall 8) -- unconditional, no
+    // capability required to see WHAT exists, only to use it.
     let buf_addr = unsafe { core::ptr::addr_of!(BUF.bytes) as u64 };
-    let result = unsafe { syscall7_introspect(buf_addr, MAX_ENTRIES as u64) };
+    let tool_count = unsafe { syscall_buf(8, buf_addr, MAX_ENTRIES as u64) };
+    com1_write_str("[AGENT_DEMO] TOOLS_DISCOVERED -- real typed ToolDescriptor entries follow\n");
+    unsafe { syscall1(0xA8_0A0000 | tool_count) };
+    let ntools = core::cmp::min(tool_count as usize, MAX_ENTRIES);
+    for i in 0..ntools {
+        let (syscall_num, required_rights, side_effecting) = unsafe { decode_tool_descriptor(i) };
+        let packed = 0xA8_000000u64
+            | ((syscall_num as u64 & 0xFF) << 16)
+            | ((required_rights as u64 & 0xFF) << 8)
+            | (side_effecting as u64 & 0xFF);
+        unsafe { syscall1(packed) };
+    }
 
+    // 2. Structured introspection (syscall 7) -- capability-gated.
+    let result = unsafe { syscall_buf(7, buf_addr, MAX_ENTRIES as u64) };
     if result == u64::MAX {
         com1_write_str("[AGENT_DEMO] INTROSPECT_DENIED -- no Rights::INTROSPECT capability held\n");
         unsafe { syscall1(0xA6DE_0000) }; // "AGENT DEnied" marker
     } else {
         com1_write_str("[AGENT_DEMO] INTROSPECT_OK -- real typed ThreadInfo entries follow\n");
-        unsafe { syscall1(0xA6_0A0000 | result) }; // "AGENT OK, count=result"
+        unsafe { syscall1(0xA6_0A0000 | result) };
         let count = core::cmp::min(result as usize, MAX_ENTRIES);
-        let mut i = 0;
-        while i < count {
-            let (id, state, is_user) = unsafe { decode_entry(i) };
+        for i in 0..count {
+            let (id, state, is_user) = unsafe { decode_thread_info(i) };
             let packed = 0xA4_00_0000u64 | ((id & 0xFF) << 16) | (((state as u64) & 0xFF) << 8) | (is_user as u64 & 0xFF);
             unsafe { syscall1(packed) };
-            i += 1;
+        }
+    }
+
+    // 3. Capability-scoped audit query (syscall 9) -- capability-gated,
+    // returns exactly THIS process's own audit trail.
+    let audit_result = unsafe { syscall_buf(9, buf_addr, MAX_ENTRIES as u64) };
+    if audit_result == u64::MAX {
+        com1_write_str("[AGENT_DEMO] AUDIT_QUERY_DENIED -- no Rights::AUDIT_QUERY capability held\n");
+        unsafe { syscall1(0xA9DE_0000) }; // "AGENT audit-query DEnied" marker
+    } else {
+        com1_write_str("[AGENT_DEMO] AUDIT_QUERY_OK -- real typed, capability-scoped AuditEntryInfo entries follow\n");
+        unsafe { syscall1(0xA9_0A0000 | audit_result) };
+        let count = core::cmp::min(audit_result as usize, MAX_ENTRIES);
+        for i in 0..count {
+            let (_seq, kind, a, b) = unsafe { decode_audit_entry(i) };
+            let packed = 0xA9_000000u64 | ((kind as u64 & 0xFF) << 16) | ((a as u64 & 0xF) << 8) | (b as u64 & 0xFF);
+            unsafe { syscall1(packed) };
         }
     }
 

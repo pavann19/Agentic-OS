@@ -1,33 +1,44 @@
 //! Phase 5 — Agent Runtime Substrate (`docs/ROADMAP.md` §5 Phase 5).
-//! Spawns TWO real ring-3 processes from the EXACT SAME compiled ELF64
-//! binary (`user_rs/agent_demo`) — one granted a real `Rights::INTROSPECT`
-//! capability over a Phase 5 `IntrospectionHandle` object before it ever
-//! starts running, one left with an empty capability table. Neither
-//! process's own code branches on which it is; the only thing that
-//! differs is what the kernel's own capability check
-//! (`thread::resolve_current_capability`, syscall 7 in `syscall.rs`)
-//! allows each of them to do.
+//! Spawns THREE real ring-3 processes from the EXACT SAME compiled
+//! ELF64 binary (`user_rs/agent_demo`):
+//!   - `AGENT_AUTHORIZED`: granted real `Rights::INTROSPECT` AND
+//!     `Rights::AUDIT_QUERY` capabilities, both minted before it ever
+//!     starts running.
+//!   - `AGENT_STRANGER`: granted nothing at all — an empty capability
+//!     table.
+//!   - `AGENT_POLICY_VIOLATOR`: attempts a grant of `Rights::PORT_IO` —
+//!     a right no agent process is allowed to hold under this kernel's
+//!     Phase 5 policy (`policy.rs`) — refused at GRANT time, before the
+//!     process even starts, distinct from the stranger's later USE-time
+//!     refusal.
+//! None of the three process's own code branches on which it is; the
+//! only thing that differs between them is what the kernel's own
+//! capability check and policy engine allow each to do.
 //!
-//! This is the live demonstration behind three of Phase 5's four exit
-//! criteria at once:
+//! This is the live demonstration behind all four of Phase 5's exit
+//! criteria:
 //!   - "An agent process enumerates the system ... entirely through
-//!     typed interfaces" — the authorized process's real `ThreadInfo`
-//!     structs, decoded and logged with typed fields
-//!     (`AGENT_ENTRY id=.. state=.. is_user=..`), never text-scraped.
+//!     typed interfaces" — the authorized process's real `ThreadInfo`/
+//!     `ToolDescriptor`/`AuditEntryInfo` structs, decoded and logged
+//!     field by field, never text-scraped.
 //!   - "A policy denial is enforced by the kernel's capability check,
-//!     not by the agent's cooperation" — the stranger process runs the
+//!     not by the agent's cooperation" — the stranger runs the
 //!     IDENTICAL code and is refused by `CapabilityTable::resolve`
-//!     itself, not by any check this file or `agent_demo` performs.
+//!     itself; the policy violator is refused even earlier, by
+//!     `policy::allows` inside `thread::spawn_with_capabilities`,
+//!     before any syscall is even attempted.
+//!   - "Every agent action ... reconstructible from the audit log
+//!     alone" — `capability.rs::resolve`'s denial-audit fix (this same
+//!     session) plus the new `actor_tid` field (`audit.rs`) make this
+//!     concretely checkable: the authorized agent's OWN
+//!     `AGENT_AUDIT_QUERY` syscall reads back exactly the records ITS
+//!     OWN actions caused, nothing more, nothing less.
 //!   - "A misbehaving agent is contained to its own process and its
-//!     granted capabilities" — demonstrated adversarially: the stranger
-//!     process's attempt to reach data it was never granted access to
-//!     fails cleanly, the rest of the system (including the authorized
-//!     agent) unaffected.
-//! The fourth ("every agent action ... reconstructible from the audit
-//! log alone") is already true by construction: `CapabilityTable::
-//! resolve` audits every denial on the same path this syscall goes
-//! through (`capability.rs`), same as every other capability check in
-//! this kernel.
+//!     granted capabilities — demonstrated adversarially" — both the
+//!     stranger and the policy violator demonstrate exactly this, two
+//!     different ways (a resolve-time and a grant-time refusal), with
+//!     the rest of the system (including the authorized agent)
+//!     unaffected either time.
 
 use crate::capability::{self, KernelObjectKind, Rights};
 use crate::{elf, gdt, klog_info, pmm, ring3, syscall, thread, vmm};
@@ -37,33 +48,60 @@ static AGENT_DEMO_ELF: &[u8] =
 
 const AGENT_STACK_VADDR: u64 = 0x0000_0000_0070_0000;
 
-/// Spawns both agent processes. Called once from `main.rs`, after the
-/// capability/audit substrate (Phase 2) and the driver framework (Phase
-/// 3) are both live — an agent process is an ordinary user-space
+/// Spawns all three agent processes. Called once from `main.rs`, after
+/// the capability/audit substrate (Phase 2) and the driver framework
+/// (Phase 3) are both live — an agent process is an ordinary user-space
 /// process in every respect this kernel already provides; nothing about
-/// Phase 5 required new kernel primitives beyond the capability itself
-/// and the syscall that checks it.
+/// Phase 5 required new kernel primitives beyond the capabilities
+/// themselves, the syscalls that check them, and the policy engine that
+/// gates what gets granted in the first place.
 pub fn spawn_agent_demo() {
-    let object_id = capability::create_object(KernelObjectKind::IntrospectionHandle);
+    let introspect_object = capability::create_object(KernelObjectKind::IntrospectionHandle);
+    let audit_object = capability::create_object(KernelObjectKind::AuditQueryHandle);
 
     klog_info!("AGENT_AUTHORIZED_SPAWN_START");
-    thread::spawn_with_capability(agent_authorized_thread, vmm::kernel_pml4_phys(), object_id, Rights::INTROSPECT);
+    thread::spawn_with_capabilities(
+        agent_authorized_thread,
+        vmm::kernel_pml4_phys(),
+        &[(introspect_object, Rights::INTROSPECT), (audit_object, Rights::AUDIT_QUERY)],
+    );
 
     klog_info!("AGENT_STRANGER_SPAWN_START");
     thread::spawn(agent_stranger_thread);
+
+    // Real grant-time policy test: a made-up PortIoRange object,
+    // requesting Rights::PORT_IO -- a right no agent may hold under
+    // this kernel's Phase 5 policy (see policy.rs::AGENT_MAX_RIGHTS).
+    // `spawn_with_capabilities` refuses this specific grant (logging
+    // POLICY_GRANT_DENIED + an audit record) while still spawning the
+    // process itself, empty-handed -- the process then behaves exactly
+    // like the stranger from its own point of view, but the EVIDENCE
+    // this generates is different: a policy refusal at spawn time, not
+    // just a later resolve-time NoSuchCapability.
+    let policy_test_object = capability::create_object(KernelObjectKind::PortIoRange { base: 0, count: 0 });
+    klog_info!("AGENT_POLICY_VIOLATOR_SPAWN_START");
+    thread::spawn_with_capabilities(
+        agent_policy_violator_thread,
+        vmm::kernel_pml4_phys(),
+        &[(policy_test_object, Rights::PORT_IO)],
+    );
 }
 
-/// Both entry points below run the IDENTICAL ELF -- the only difference
-/// is which one was spawned via `spawn_with_capability` (see
-/// `spawn_agent_demo`). Two separate `extern "C" fn`s exist only so their
-/// own boot-log lines say which is which for a human reading the
-/// evidence; the loaded process itself has no idea which one it is.
+/// All three entry points below run the IDENTICAL ELF -- the only
+/// difference is which capabilities (if any) were granted at spawn time
+/// (see `spawn_agent_demo`). Three separate `extern "C" fn`s exist only
+/// so their own boot-log lines say which is which for a human reading
+/// the evidence; the loaded process itself has no idea which one it is.
 extern "C" fn agent_authorized_thread() {
     run_agent_demo("AGENT_AUTHORIZED");
 }
 
 extern "C" fn agent_stranger_thread() {
     run_agent_demo("AGENT_STRANGER");
+}
+
+extern "C" fn agent_policy_violator_thread() {
+    run_agent_demo("AGENT_POLICY_VIOLATOR");
 }
 
 fn run_agent_demo(label: &str) {

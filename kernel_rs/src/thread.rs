@@ -198,22 +198,33 @@ unsafe fn spawn_in_locked(entry: extern "C" fn(), address_space: u64) -> ThreadI
     }
 }
 
-/// Same as `spawn`, but grants ONE capability (`object_id`/`rights`) into
-/// the new thread's OWN `cap_table` before it is ever pushed onto
-/// `THREADS` — i.e. before the scheduler can possibly run it. This is
-/// what makes Phase 5's capability grant race-free: `spawn_in_locked`
-/// above builds the thread and calls `threads_mut().push_back` as its
-/// LAST step, all inside one `critical::without_interrupts` section: a
-/// thread that isn't in that queue yet cannot be picked by `schedule()`
-/// no matter when a timer tick lands, so there is no window where the
-/// new thread could run before holding the capability it's meant to
-/// start with. (Contrast: granting AFTER `spawn`/`spawn_in` returns would
-/// reopen exactly that race — this exists so callers never have to.)
-pub fn spawn_with_capability(
+/// Same as `spawn`, but grants a SET of capabilities (`grants`, each an
+/// `(object_id, rights)` pair) into the new thread's OWN `cap_table`
+/// before it is ever pushed onto `THREADS` — i.e. before the scheduler
+/// can possibly run it. This is what makes Phase 5's capability grant
+/// race-free: `spawn_in_locked` above builds the thread and calls
+/// `threads_mut().push_back` as its LAST step, all inside one
+/// `critical::without_interrupts` section: a thread that isn't in that
+/// queue yet cannot be picked by `schedule()` no matter when a timer
+/// tick lands, so there is no window where the new thread could run
+/// before holding the capabilities it's meant to start with. (Contrast:
+/// granting AFTER `spawn`/`spawn_in` returns would reopen exactly that
+/// race — this exists so callers never have to.)
+///
+/// Each grant is checked against `policy::allows()` — Phase 5's
+/// grant-time policy engine — BEFORE it happens: a request for rights
+/// the policy doesn't allow is refused for THAT grant specifically (an
+/// `AuditEvent::PolicyDenied` record, real evidence a real grant-time
+/// check ran, not silently skipped) while the thread still spawns and
+/// any OTHER, policy-allowed grants in the same call still go through.
+/// Grants are applied in `grants` order, so callers relying on a
+/// specific `CapId` (syscalls conventionally assume slot 0, slot 1, ...
+/// in grant order — see `syscall.rs`'s `AGENT_INTROSPECT_CAP`/
+/// `AGENT_AUDIT_QUERY_CAP`) get a stable, predictable table layout.
+pub fn spawn_with_capabilities(
     entry: extern "C" fn(),
     address_space: u64,
-    object_id: crate::capability::ObjectId,
-    rights: crate::capability::Rights,
+    grants: &[(crate::capability::ObjectId, crate::capability::Rights)],
 ) -> ThreadId {
     crate::critical::without_interrupts(|| unsafe {
         let tid = spawn_in_locked(entry, address_space);
@@ -223,7 +234,14 @@ pub fn spawn_with_capability(
         // being called concurrently with itself).
         if let Some(threads) = threads_mut().as_mut() {
             if let Some(t) = threads.iter_mut().find(|t| t.id == tid) {
-                t.cap_table.grant(object_id, rights);
+                for &(object_id, rights) in grants {
+                    if crate::policy::allows(rights) {
+                        t.cap_table.grant(object_id, rights);
+                    } else {
+                        crate::klog_info!("POLICY_GRANT_DENIED rights=0x{:x}", rights.0);
+                        crate::audit::record(crate::audit::AuditEvent::PolicyDenied { rights: rights.0 });
+                    }
+                }
             }
         }
         tid

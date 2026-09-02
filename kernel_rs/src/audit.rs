@@ -27,11 +27,32 @@ pub enum AuditEvent {
     IpcReceive { object_id: u32 },
     InterruptDelivered { vector: u8 },
     InterruptAcknowledged { vector: u8 },
+    /// Phase 5's policy engine (`policy.rs`) refused to grant `rights`
+    /// at all -- distinct from `Denied`, which is a resolve-time (USE)
+    /// refusal of an already-existing capability. This is the earlier,
+    /// grant-time refusal: the capability was never minted in the first
+    /// place.
+    PolicyDenied { rights: u32 },
 }
 
 #[derive(Clone, Copy)]
 pub struct AuditRecord {
     pub seq: u64,
+    /// Phase 5: which thread's OWN context this record was created
+    /// under (`thread::current_id()` at the moment of `record()`), NOT
+    /// necessarily "the process this event is ABOUT" — a `Grant` issued
+    /// by a spawning/orchestrating thread on a new process's behalf
+    /// (see `thread::spawn_with_capabilities`) is attributed to the
+    /// SPAWNER, since that's who was actually executing when the grant
+    /// happened. A `Denied`/`PolicyDenied` from inside a syscall,
+    /// though, IS attributed to the actual calling process — syscall
+    /// dispatch runs on the calling thread's own context, so
+    /// `records_by_actor` genuinely answers "what did MY OWN actions
+    /// cause to be audited" for exactly the case that matters most: an
+    /// agent's own denied attempts. Stated honestly rather than
+    /// papered over — full "who benefits from this capability"
+    /// attribution for every event kind is real future work.
+    pub actor_tid: u64,
     pub event: AuditEvent,
 }
 
@@ -62,6 +83,12 @@ unsafe fn log_mut() -> &'static mut VecDeque<AuditRecord> {
 /// same way every other unprotected global mutation in this kernel
 /// could before this pass.
 pub fn record(event: AuditEvent) {
+    // Read OUTSIDE the critical section below -- `thread::current_id()`
+    // takes its own `critical::without_interrupts` lock internally;
+    // nesting is safe (see critical.rs) but reading it first here keeps
+    // this function's own lock section to exactly the LOG mutation, not
+    // a second independent lookup it doesn't need to cover.
+    let actor_tid = crate::thread::current_id();
     crate::critical::without_interrupts(|| unsafe {
         let seq = NEXT_SEQ;
         NEXT_SEQ += 1;
@@ -69,7 +96,7 @@ pub fn record(event: AuditEvent) {
         if log.len() >= MAX_RECORDS {
             log.pop_front();
         }
-        log.push_back(AuditRecord { seq, event });
+        log.push_back(AuditRecord { seq, actor_tid, event });
     });
 }
 
@@ -85,12 +112,32 @@ pub fn last_n(n: usize) -> alloc::vec::Vec<AuditRecord> {
     })
 }
 
+/// Phase 5's capability-scoped audit query primitive
+/// (`docs/ROADMAP.md` §5 Phase 5, deliverable 5): every record whose
+/// `actor_tid` matches `tid`, most-recent-first, capped at `max`. This
+/// is what makes the syscall surface (`syscall.rs` syscall 9) genuinely
+/// "capability-scoped" rather than "the whole log with an extra
+/// permission check" — a caller gets exactly its OWN slice, structurally,
+/// not the full log filtered client-side (which would still have
+/// required trusting the log itself was safe to expose wholesale).
+pub fn records_by_actor(tid: u64, max: usize) -> alloc::vec::Vec<AuditRecord> {
+    crate::critical::without_interrupts(|| unsafe {
+        log_mut()
+            .iter()
+            .rev()
+            .filter(|r| r.actor_tid == tid)
+            .take(max)
+            .copied()
+            .collect()
+    })
+}
+
 /// Dumps the whole log to serial — a diagnostic/demo tool, not how a real
 /// consumer (a Phase 5 agent-facing audit query interface) would read it.
 pub fn dump_all() {
     crate::critical::without_interrupts(|| unsafe {
         for r in log_mut().iter() {
-            klog_info!("AUDIT seq={} event={:?}", r.seq, r.event);
+            klog_info!("AUDIT seq={} actor_tid={} event={:?}", r.seq, r.actor_tid, r.event);
         }
     });
 }

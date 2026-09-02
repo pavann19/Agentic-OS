@@ -156,15 +156,19 @@ fn kbd_cap() -> capability::CapId {
     KBD_CAP.load(core::sync::atomic::Ordering::SeqCst)
 }
 
-// Phase 5's structured introspection API deliberately has NO dedicated
+// Phase 5's agent-facing syscalls (7, 9) deliberately have NO dedicated
 // static table here, unlike syscalls 2-6 above: those all serve exactly
 // one fixed process each, so a single kernel-wide static table/capability
-// pair is correct for them. Syscall 7 below serves MULTIPLE, independent
+// pair is correct for them. Syscalls 7/9 below serve MULTIPLE, independent
 // agent processes (`agent.rs`), each with its OWN capability set — see
-// `thread::Thread::cap_table` and `thread::spawn_with_capability`/
+// `thread::Thread::cap_table` and `thread::spawn_with_capabilities`/
 // `resolve_current_capability`, the real per-process mechanism this
-// needed instead.
-const AGENT_INTROSPECT_CAP: capability::CapId = 0; // by convention: an agent's own cap_table holds this at slot 0, if granted at all
+// needed instead. By convention (see `agent.rs::spawn_agent_demo`'s
+// grant order), an authorized agent's own cap_table holds the
+// introspection capability at slot 0 and the audit-query capability at
+// slot 1, if granted at all.
+const AGENT_INTROSPECT_CAP: capability::CapId = 0;
+const AGENT_AUDIT_QUERY_CAP: capability::CapId = 1;
 
 const IA32_EFER: u32 = 0xC000_0080;
 const IA32_STAR: u32 = 0xC000_0081;
@@ -325,6 +329,67 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
                     for (i, info) in entries.iter().enumerate() {
                         let bytes = crate::introspect::thread_info_bytes(info);
                         let dst = a0 + (i as u64) * crate::introspect::THREAD_INFO_SIZE;
+                        unsafe { vmm::write_user_bytes(pml4, dst, &bytes) };
+                    }
+                    entries.len() as u64
+                }
+                Err(_) => u64::MAX,
+            }
+        }
+        8 => {
+            // Phase 5's tool/intent surface (`docs/ROADMAP.md` §5 Phase
+            // 5, deliverable 3): real, typed, DISCOVERABLE catalog —
+            // deliberately NOT capability-gated, matching "discoverable"
+            // (an agent can see what operations exist and what they'd
+            // require without yet holding anything; USING what it finds
+            // still goes through every capability check that operation
+            // already has). a0 = buffer, a1 = capacity in
+            // ToolDescriptor-sized entries.
+            let catalog = crate::tools::catalog();
+            let max_entries = (a1 as usize).min(catalog.len());
+            let total_bytes = max_entries as u64 * crate::tools::TOOL_DESCRIPTOR_SIZE;
+            let pml4 = vmm::current_cr3();
+            if total_bytes == 0 || !unsafe { vmm::validate_user_buffer_writable(pml4, a0, total_bytes) } {
+                klog_info!("SYSCALL_TOOLS_BAD_BUFFER");
+                return u64::MAX;
+            }
+            for (i, d) in catalog.iter().take(max_entries).enumerate() {
+                let bytes = crate::tools::tool_descriptor_bytes(d);
+                let dst = a0 + (i as u64) * crate::tools::TOOL_DESCRIPTOR_SIZE;
+                unsafe { vmm::write_user_bytes(pml4, dst, &bytes) };
+            }
+            max_entries as u64
+        }
+        9 => {
+            // Phase 5's capability-scoped audit query API
+            // (`docs/ROADMAP.md` §5 Phase 5, deliverable 5): real
+            // typed `AuditEntryInfo` records, filtered to exactly the
+            // CALLING process's own actor_tid
+            // (`audit::records_by_actor`) — never the whole log. a0 =
+            // buffer, a1 = capacity. Capability-gated the same way as
+            // syscall 7: the caller's OWN cap_table must hold
+            // Rights::AUDIT_QUERY.
+            match thread::resolve_current_capability(AGENT_AUDIT_QUERY_CAP, capability::Rights::AUDIT_QUERY) {
+                Ok(_) => {
+                    let max_entries = a1 as usize;
+                    let tid = thread::current_id();
+                    let entries = crate::introspect::snapshot_audit_for(tid, max_entries);
+                    let total_bytes = entries.len() as u64 * crate::introspect::AUDIT_ENTRY_SIZE;
+                    let pml4 = vmm::current_cr3();
+                    if total_bytes == 0
+                        || !unsafe { vmm::validate_user_buffer_writable(pml4, a0, total_bytes) }
+                    {
+                        // A genuinely empty result (this process caused
+                        // nothing auditable yet) is real, not an error —
+                        // but there's no buffer write to validate against
+                        // when there's nothing to write, so return 0
+                        // directly rather than treating it as a bad-buffer
+                        // failure.
+                        return if entries.is_empty() { 0 } else { u64::MAX };
+                    }
+                    for (i, e) in entries.iter().enumerate() {
+                        let bytes = crate::introspect::audit_entry_bytes(e);
+                        let dst = a0 + (i as u64) * crate::introspect::AUDIT_ENTRY_SIZE;
                         unsafe { vmm::write_user_bytes(pml4, dst, &bytes) };
                     }
                     entries.len() as u64

@@ -61,6 +61,10 @@ impl Rights {
     // never incidentally gains introspection just because some other
     // capability happened to share a bit.
     pub const INTROSPECT: Rights = Rights(1 << 7);
+    // Phase 5: may invoke the capability-scoped audit query syscall
+    // (`audit.rs::records_by_actor`, syscall 9) -- its own dedicated
+    // right, same reasoning as INTROSPECT above.
+    pub const AUDIT_QUERY: Rights = Rights(1 << 8);
 
     pub fn contains(self, other: Rights) -> bool {
         (self.0 & other.0) == other.0
@@ -110,6 +114,12 @@ pub enum KernelObjectKind {
     /// no data of its own; `resolve()`'s `Rights::INTROSPECT` check is
     /// the entire access-control surface for it.
     IntrospectionHandle,
+    /// Phase 5's audit query handle: same shape as `IntrospectionHandle`
+    /// above -- names no resource, exists purely so `Rights::AUDIT_QUERY`
+    /// has an object to be granted against, kept separate from
+    /// `IntrospectionHandle` so a process holding one right never
+    /// incidentally implies the other.
+    AuditQueryHandle,
 }
 
 pub struct KernelObject {
