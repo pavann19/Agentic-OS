@@ -40,8 +40,8 @@
 //!     the rest of the system (including the authorized agent)
 //!     unaffected either time.
 
-use crate::capability::{self, KernelObjectKind, Rights};
-use crate::{elf, gdt, klog_info, pmm, ring3, syscall, thread, vmm};
+use crate::capability::{self, CapabilityTable, KernelObjectKind, Rights};
+use crate::{driver, elf, gdt, klog_info, pmm, ring3, syscall, thread, vmm};
 
 static AGENT_DEMO_ELF: &[u8] =
     include_bytes!("../../user_rs/agent_demo/target/x86_64-unknown-none/release/agent_demo");
@@ -123,6 +123,27 @@ fn run_agent_demo(label: &str) {
             stack_page,
             vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE | vmm::PAGE_WRITABLE,
         );
+
+        // Real bug found and fixed via Phase 7's shell (see gdt.rs's
+        // set_iopb doc comment): agent_demo's own debug output
+        // (com1_write_str, its ELF's very first ring-3 action) was
+        // never explicitly granted COM1 here -- it only ever worked
+        // because the old, buggy GLOBAL TSS IOPB leaked an earlier
+        // driver's COM1 grant to every later ring-3 process. Every one
+        // of the three demo processes this file spawns needs its own
+        // explicit grant now, same as every other driver that writes
+        // to COM1 -- deliberately real hardware access (COM1 debug
+        // output), not something Rights::INTROSPECT/AUDIT_QUERY alone
+        // ever covered.
+        let mut com1_table = CapabilityTable::new();
+        let com1_cap = driver::create_port_capability(&mut com1_table, 0x3F8, 8, Rights::PORT_IO);
+        match driver::grant_port_access(&com1_table, com1_cap) {
+            Ok(()) => klog_info!("{}_COM1_GRANTED base=0x3f8 count=8", label),
+            Err(e) => {
+                klog_info!("{}_COM1_GRANT_FAILED {:?}", label, e);
+                return;
+            }
+        }
 
         let kernel_stack_top = thread::current_kernel_stack_top();
         gdt::set_kernel_stack(kernel_stack_top);

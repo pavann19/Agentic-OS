@@ -299,6 +299,25 @@ extern "C" fn keyboard_driver_thread() {
             }
         }
 
+        // Real bug found and fixed via Phase 7's shell (see gdt.rs's
+        // set_iopb doc comment): this driver's own debug output
+        // (com1_write_str, its ELF's very first ring-3 action) was
+        // NEVER actually granted COM1 by this function -- it only ever
+        // worked because the old, buggy GLOBAL TSS IOPB leaked
+        // `serial_driver`'s own COM1 grant (spawned earlier in boot) to
+        // every subsequent ring-3 process. With that leak closed, this
+        // driver needs its own explicit grant, same as every other
+        // driver that writes to COM1.
+        let mut com1_table = CapabilityTable::new();
+        let com1_cap = driver::create_port_capability(&mut com1_table, 0x3F8, 8, Rights::PORT_IO);
+        match driver::grant_port_access(&com1_table, com1_cap) {
+            Ok(()) => klog_info!("USER_DRIVER_COM1_GRANTED base=0x3f8 count=8"),
+            Err(e) => {
+                klog_info!("USER_DRIVER_COM1_GRANT_FAILED {:?}", e);
+                return;
+            }
+        }
+
         // Real InterruptLine capability for the real, unmasked IRQ1
         // (pic.rs::KEYBOARD_VECTOR / idt.rs::h_keyboard) -- set up here,
         // once, before ring 3 is ever entered; syscalls 5/6 reuse this

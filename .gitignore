@@ -37,3 +37,6 @@ _evidence/disk-fault-manual.img
 _evidence/fault-manual.log
 boot_rs/kernel_variants/
 user_rs/virtio_net_driver/variants/
+user_rs/shell/target/
+_evidence/disk-shell-debug.img
+_evidence/disk-shell-test.img

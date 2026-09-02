@@ -49,6 +49,7 @@ pub mod policy;
 pub mod ring3;
 pub mod serial;
 pub mod service_manager;
+pub mod shell;
 pub mod syscall;
 pub mod thread;
 pub mod tools;
@@ -311,6 +312,9 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     klog_info!("AGENT_DEMO_SPAWN_START");
     agent::spawn_agent_demo();
     klog_info!("AGENT_DEMO_SPAWN_DONE");
+
+    // Phase 7's text shell -- see shell.rs's module doc.
+    shell::spawn_shell();
 
     // Phase 3: ACPI table discovery -- the real RSDP boot_rs found via the
     // UEFI configuration table, walked to find DMAR (the IOMMU's register

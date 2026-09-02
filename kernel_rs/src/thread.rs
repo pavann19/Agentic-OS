@@ -74,6 +74,12 @@ pub struct Thread {
     /// the scheduler, and `resolve_current_capability` for how a syscall
     /// checks it.
     pub cap_table: crate::capability::CapabilityTable,
+    /// Phase 7's real fix (found via the shell's own `rawin` demo — see
+    /// `gdt.rs`'s doc comment on `set_iopb` for the full story): this
+    /// thread's OWN I/O permission bitmap, not a shared global one.
+    /// Starts fully denied (`[0xFF; ...]`); `driver::grant_port_access`
+    /// clears bits in exactly the thread it's called from.
+    pub iopb: [u8; crate::gdt::IOPB_BYTES],
 }
 
 static mut NEXT_TID: ThreadId = 1;
@@ -188,6 +194,7 @@ unsafe fn spawn_in_locked(entry: extern "C" fn(), address_space: u64) -> ThreadI
             _stack: stack,
             address_space,
             cap_table: crate::capability::CapabilityTable::new(),
+            iopb: [0xFFu8; crate::gdt::IOPB_BYTES],
         });
 
         if threads_mut().is_none() {
@@ -259,6 +266,39 @@ pub fn spawn_with_capabilities(
 /// would otherwise risk observing a different thread's table entirely if
 /// a reference leaked across a reschedule; keeping it inside one locked
 /// call makes that impossible by construction.
+/// Real fix for the IOPB-leak bug (see `gdt.rs`'s `set_iopb` doc):
+/// clears `port`'s bit in the CURRENTLY RUNNING thread's OWN `iopb`
+/// copy, then immediately pushes it into the one live TSS. The
+/// immediate push matters specifically for this call site — the
+/// granting thread is about to enter ring 3 for the FIRST time right
+/// after this, via `ring3::enter_user_mode`, not through a
+/// `schedule()` switch (which would reload it anyway) — without it,
+/// that first entry would run under whatever bitmap the PREVIOUSLY
+/// scheduled thread happened to leave loaded.
+pub fn allow_port_for_current(port: u16) {
+    crate::critical::without_interrupts(|| unsafe {
+        if let Some(t) = current_mut().as_mut() {
+            crate::gdt::allow_port_bits(&mut t.iopb, port);
+            crate::gdt::set_iopb(&t.iopb);
+        }
+    });
+}
+
+/// Same as `allow_port_for_current`, for revocation — real, though not
+/// yet wired to any actual revocation call site (port-capability
+/// revocation was already an open, disclosed gap in `driver.rs` before
+/// this fix; this makes the mechanism itself correct and ready for
+/// that call site once it exists, not a promise of a feature this
+/// function alone doesn't provide).
+pub fn deny_port_for_current(port: u16) {
+    crate::critical::without_interrupts(|| unsafe {
+        if let Some(t) = current_mut().as_mut() {
+            crate::gdt::deny_port_bits(&mut t.iopb, port);
+            crate::gdt::set_iopb(&t.iopb);
+        }
+    });
+}
+
 pub fn resolve_current_capability(
     cap_id: crate::capability::CapId,
     required: crate::capability::Rights,
@@ -472,6 +512,12 @@ unsafe fn schedule_locked() {
         let new_kernel_stack_top = next._stack.as_ptr() as u64 + next._stack.len() as u64;
         crate::gdt::set_kernel_stack(new_kernel_stack_top);
         crate::syscall::set_kernel_stack(new_kernel_stack_top);
+        // Same real bug class, same fix, applied to the IOPB (see
+        // gdt.rs::set_iopb's own doc comment for the full story): the
+        // INCOMING thread's own I/O permission bitmap must be reloaded
+        // into the one live TSS on every switch, or a port ever granted
+        // to some OTHER thread stays visible to this one.
+        crate::gdt::set_iopb(&next.iopb);
         *current_mut() = Some(next);
 
         // CR3 is switched INSIDE switch_to now, not here — see that
@@ -559,6 +605,7 @@ pub fn init_as_current_thread() {
             _stack: stack,
             address_space: crate::vmm::kernel_pml4_phys(),
             cap_table: crate::capability::CapabilityTable::new(),
+            iopb: [0xFFu8; crate::gdt::IOPB_BYTES],
         }));
     }
 }

@@ -36,8 +36,8 @@ struct GdtDescriptor {
 // bitmap only needs to extend as far as the highest port any capability
 // will ever grant; the CPU treats any port past the TSS limit as
 // permanently denied, which is the correct default-deny posture anyway.
-const IOPB_PORTS: usize = 1024;
-const IOPB_BYTES: usize = IOPB_PORTS / 8 + 1; // +1 for the mandatory trailing all-1s byte (Intel SDM)
+pub const IOPB_PORTS: usize = 1024;
+pub const IOPB_BYTES: usize = IOPB_PORTS / 8 + 1; // +1 for the mandatory trailing all-1s byte (Intel SDM)
 
 #[repr(C, packed)]
 pub struct Tss {
@@ -203,31 +203,60 @@ pub fn init() {
     klog_info!("GDT+TSS initialized (double-fault IST stack ready)");
 }
 
-/// Clears port `port`'s bit in the IOPB, allowing ring-3 `in`/`out` on it.
+/// Real bug found and fixed (Phase 7's shell -- its `rawin` command,
+/// meant to demonstrate a DENIED out-of-grant port read, instead
+/// SUCCEEDED reading port 0x64, a port only `keyboard_driver` had ever
+/// been granted): `allow_port`/`deny_port` used to mutate the single,
+/// GLOBAL, CPU-visible `TSS.iopb` directly. Since there is only ONE live
+/// TSS on this single-core kernel, ANY port ever granted to ANY driver
+/// stayed permanently open to EVERY OTHER ring-3 process from then on --
+/// the exact same class of bug already found and fixed once for
+/// TSS.RSP0 (see thread.rs's own `schedule_locked` doc comment on that
+/// investigation), just never re-checked for the IOPB. Fixed the same
+/// way: each `Thread` now owns its OWN `iopb` bitmap
+/// (`thread::Thread::iopb`), `set_iopb` below copies the INCOMING
+/// thread's own bitmap into the one live TSS on every scheduler switch
+/// (mirroring `set_kernel_stack`'s existing per-switch reload), and
+/// `allow_port_bits`/`deny_port_bits` below operate on a caller-owned
+/// bitmap array, not `TSS.iopb` directly -- `driver.rs::grant_port_access`
+/// now mutates the CALLING thread's own copy (via
+/// `thread::allow_port_for_current`) and pushes it live immediately, not
+/// the shared global array every other thread would also see.
+
+/// Copies `bitmap` into the one live TSS's IOPB -- called on every
+/// scheduler switch (thread.rs) and once by `driver.rs::grant_port_access`
+/// for an immediate live update on the granting thread's own first entry
+/// into ring 3.
+pub fn set_iopb(bitmap: &[u8; IOPB_BYTES]) {
+    unsafe {
+        TSS.iopb = *bitmap;
+    }
+}
+
+/// Clears port `port`'s bit in `bitmap` (a caller-owned array — a
+/// `Thread`'s own IOPB copy, never `TSS.iopb` directly), allowing ring-3
+/// `in`/`out` on it once that bitmap is actually loaded via `set_iopb`.
 /// Callers MUST have already checked a capability grants this — this
 /// function itself has no notion of capabilities, it's the mechanism
 /// `driver.rs::grant_port_access` wraps with the actual permission check.
-pub fn allow_port(port: u16) {
+pub fn allow_port_bits(bitmap: &mut [u8; IOPB_BYTES], port: u16) {
     let p = port as usize;
     if p >= IOPB_PORTS {
         return; // outside the bitmap's range -- permanently denied regardless
     }
-    unsafe {
-        TSS.iopb[p / 8] &= !(1 << (p % 8));
-    }
+    bitmap[p / 8] &= !(1 << (p % 8));
 }
 
-/// Sets port `port`'s bit back to denied. Used by revocation — a driver
-/// whose port-I/O capability is revoked loses ACTUAL hardware access
-/// immediately, not just the capability bookkeeping.
-pub fn deny_port(port: u16) {
+/// Sets port `port`'s bit back to denied in `bitmap`. Used by
+/// revocation — a driver whose port-I/O capability is revoked loses
+/// ACTUAL hardware access the next time its own bitmap is loaded, not
+/// just the capability bookkeeping.
+pub fn deny_port_bits(bitmap: &mut [u8; IOPB_BYTES], port: u16) {
     let p = port as usize;
     if p >= IOPB_PORTS {
         return;
     }
-    unsafe {
-        TSS.iopb[p / 8] |= 1 << (p % 8);
-    }
+    bitmap[p / 8] |= 1 << (p % 8);
 }
 
 /// Sets TSS.RSP0 — the kernel stack the CPU switches to automatically on

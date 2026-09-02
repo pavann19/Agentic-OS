@@ -6,7 +6,7 @@
 //! an interrupt line, or an I/O port.
 
 use crate::capability::{CapError, CapId, CapabilityTable, KernelObjectKind, Rights};
-use crate::{gdt, interrupt_forward, vmm};
+use crate::{interrupt_forward, vmm};
 
 /// Bump allocator for the user-visible MMIO window — deliberately separate
 /// from `vmm::MMIO_VIRTUAL_BASE` (the KERNEL's own MMIO window, e.g. where
@@ -105,14 +105,18 @@ pub fn ack_interrupt(table: &CapabilityTable, cap_id: CapId) -> Result<(), Drive
 }
 
 /// Resolves a `PortIoRange` capability and opens EXACTLY those ports in
-/// the TSS IOPB — not full IOPL=3, which would open every port to any
-/// ring-3 code regardless of what it actually holds a capability for.
+/// the CALLING THREAD's OWN TSS IOPB copy — not full IOPL=3 (which would
+/// open every port to any ring-3 code regardless of what it actually
+/// holds a capability for), and — real bug found and fixed via Phase
+/// 7's shell (see `gdt.rs`'s `set_iopb` doc comment for the full
+/// story) — not the single global TSS either, which used to leak every
+/// granted port to every OTHER ring-3 thread permanently.
 pub fn grant_port_access(table: &CapabilityTable, cap_id: CapId) -> Result<(), DriverError> {
     let cap = table.resolve(cap_id, Rights::PORT_IO).map_err(DriverError::Cap)?;
     match crate::capability::object_kind(cap.object_id) {
         Some(KernelObjectKind::PortIoRange { base, count }) => {
             for port in base..base.saturating_add(count) {
-                gdt::allow_port(port);
+                crate::thread::allow_port_for_current(port);
             }
             Ok(())
         }
