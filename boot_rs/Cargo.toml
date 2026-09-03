@@ -1,0 +1,17 @@
+[package]
+name = "agentic_bootloader"
+version = "0.1.0"
+edition = "2021"
+
+# No external crates, same discipline as kernel_rs/: raw UEFI table bindings
+# hand-written against the spec, not a helper crate. `x86_64-unknown-uefi` is
+# an officially supported Rust target — it compiles straight to a PE32+ EFI
+# application, no ELF/objcopy step, no gnu-efi.
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 2

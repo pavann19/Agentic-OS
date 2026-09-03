@@ -1,0 +1,23 @@
+[package]
+name = "shell"
+version = "0.1.0"
+edition = "2021"
+
+# Phase 7's text shell (docs/ROADMAP.md Phase 7, deliverable 1): a real
+# freestanding ELF64 ring-3 process, same pattern as every other
+# user_rs/* crate. Reads real bidirectional COM1 (its own PortIoRange
+# capability), and reuses Phase 5's real introspection/tool-discovery/
+# audit-query syscalls as its command surface -- "capability-aware":
+# this process holds no more privilege than any other capability-gated
+# user process, it is not special for being "the shell."
+[dependencies]
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

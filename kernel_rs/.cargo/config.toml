@@ -1,0 +1,38 @@
+[build]
+target = "x86_64-unknown-none"
+
+# Real bug found and fixed hardening Phase 4 (found in
+# user_rs/virtio_blk_driver, a call through a null function pointer at a
+# large [0u8; N] array zero-init -- LLVM lowered it to a memset() call,
+# and this target's PREBUILT compiler_builtins (rustup ships one for
+# x86_64-unknown-none, unlike x86_64-unknown-uefi, which boot_rs's own
+# config.toml already works around this same way) doesn't include the
+# memcpy/memset/memmove/memcmp intrinsics by default -- the call resolved
+# to an unpopulated, always-zero symbol instead of a real function.
+# Rebuilding compiler_builtins with the `mem` feature (this session's own
+# kernel_rs/boot_rs/user_rs crates are the only callers of any of these
+# intrinsics so far, and only via the compiler's own codegen -- nothing
+# here calls memset/memcpy directly) gives every one of them a real
+# implementation to link against. kernel_rs itself hadn't hit this yet
+# (no code path here happened to trigger memset-lowering), added here
+# defensively rather than waiting for it to.
+[unstable]
+# "alloc" too, unlike the driver crates' own configs: kernel_rs is the
+# only one of these that uses `extern crate alloc` -- rebuilding `core`
+# from source without also rebuilding `alloc` against that SAME `core`
+# left the prebuilt `alloc` pulling in the prebuilt `core` alongside our
+# freshly-built one, a duplicate-lang-item error (E0152) at link time.
+build-std = ["core", "alloc", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]
+
+[target.x86_64-unknown-none]
+# relocation-model=static: the bootloader's ELF loader (boot/main.c) loads
+# PT_LOAD segments to their exact p_paddr and jumps to e_entry — it does not
+# process relocation entries. Without this, rustc emits a static-PIE binary
+# whose correctness would depend on self-relocation the loader never does.
+rustflags = [
+    "-C", "relocation-model=static",
+    "-C", "link-arg=-Tlinker.ld",
+    "-C", "link-arg=--gc-sections",
+    "-C", "link-arg=--no-dynamic-linker",
+]

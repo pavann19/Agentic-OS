@@ -1,0 +1,27 @@
+[package]
+name = "serial_driver"
+version = "0.1.0"
+edition = "2021"
+
+# First real user-space driver (Phase 3): a genuine freestanding ELF64
+# binary, built completely separately from kernel_rs, loaded at runtime
+# by kernel_rs/src/elf.rs -- not compiled into the kernel image. No
+# external crates, same reasoning as kernel_rs/boot_rs: only `core` and
+# `compiler_builtins`, built from source via -Zbuild-std.
+[dependencies]
+# Real strong memset/memcpy/memmove/memcmp symbols -- see
+# kernel_common/src/mem_intrinsics.rs's doc for the real bug (found in
+# user_rs/virtio_blk_driver, fixed defensively here too) this exists to
+# prevent: an indirect call through an unpopulated import-table-style
+# slot whenever LLVM lowers a large zero-init/copy into a memset/memcpy
+# call on this toolchain.
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

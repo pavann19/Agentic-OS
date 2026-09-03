@@ -1,0 +1,22 @@
+[package]
+name = "kernel_common"
+version = "0.1.0"
+edition = "2021"
+
+# Pure, hardware-independent logic shared between kernel_rs (no_std,
+# bare-metal, can't itself run under `cargo test` on this host without
+# significant restructuring) and host_tests/ (plain std, real `cargo test`).
+# Zero unsafe, zero inline asm, zero hardware access — bitmap bit-twiddling
+# and page-table index math, the kind of logic where an off-by-one is easy
+# to write and easy to verify on the host without ever touching QEMU.
+# This crate is the actual code kernel_rs runs, not a test-only mirror of
+# it — host_tests/ verifying THIS crate is what makes those tests meaningful
+# evidence about the real kernel, not evidence about a reimplementation.
+[dependencies]
+
+# See mem_intrinsics.rs's own doc comment for the real bug this exists
+# to fix. Off by default (host_tests, which links the real host libc,
+# must never enable it -- a hard duplicate-symbol link error otherwise);
+# kernel_rs and every user_rs/*_driver crate turn it on.
+[features]
+provide_mem_intrinsics = []
