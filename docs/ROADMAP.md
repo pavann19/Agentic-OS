@@ -1,6 +1,6 @@
 # Agentic OS — Build Roadmap
 
-**Status:** Phases 0–8 complete and evidenced (see `docs/PROGRESS.md`); Phases 9–15 proposed — requires sign-off on ADR-007/ADR-008 (§2) before Phase 11 or 12 specifically, no new sign-off needed to start Phase 9 or 10
+**Status:** Phases 0–8 complete and evidenced (see `docs/PROGRESS.md`). ADR-007 and ADR-008 (§2) signed off 2026-09-03 — Phases 11 and 12 are unblocked. Phase 9 (SMP) started 2026-09-03.
 **Date:** 2026-08-27; Phases 9–15 added 2026-09-03
 **Supersedes:** the previous `docs/ROADMAP.md` (preserved in git history at commit `6818872`)
 **Scope:** ground-up construction plan derived from the code actually in this repository, extended from "Tier 1/Tier 2 code-complete" (original Phase 8 endpoint) through to "a real, daily-driveable OS" (Phase 15)
@@ -238,7 +238,7 @@ Concretely, from Phase 2 onward:
 
 ### ADR-007: Hardware breadth is grown through Tier 3, never opened wide
 
-**Status:** Proposed — gates Phase 11
+**Status:** **Signed off 2026-09-03.** Option C adopted as written.
 **Context:** §1.3 rejects "broad hardware compatibility across arbitrary consumer laptops and desktops," correctly, for Phases 0–8: chasing breadth before the substrate is trustworthy is how from-scratch OS projects die (§4's own words). But a real OS that only ever boots one specific ThinkPad is not a real OS — it is a proof of concept with a hardware dependency. The tension is real and both sides of it are correct at different points in the roadmap.
 
 #### Options Considered
@@ -266,7 +266,7 @@ Pros: real breadth, without abandoning the discipline that got this project this
 
 ### ADR-008: A visual surface is capability-native, not a ported desktop environment
 
-**Status:** Proposed — gates Phase 12
+**Status:** **Signed off 2026-09-03.** Option C adopted as written.
 **Context:** §1.3 rejects "a desktop environment, window manager, or graphical application framework" for the same reason it rejects POSIX compatibility — those are designed for ambient-authority, human-driven systems, and porting the *shape* of one (even with a from-scratch implementation) would reintroduce exactly what ADR-003 exists to prevent: a window that can read another window's buffer because it happens to share a display, the GUI equivalent of ambient authority.
 
 #### Options Considered
