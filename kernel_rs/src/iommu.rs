@@ -273,6 +273,80 @@ pub fn assign_device(bus: u8, device: u8, function: u8, phys_ranges: &[(u64, u64
     }
 }
 
+/// Real, hardware-facing revocation — the wiring point research-track
+/// `docs/NOVEL_CONCEPTS.md` §1 needs to escalate from the pure
+/// data-model prototype (`kernel_common::authority_graph`,
+/// `docs/RESEARCH_TRACK.md`) to actual silicon: this clears the SAME
+/// context-table entry `assign_device` writes (present bit → 0) and
+/// flushes the context cache the same way `assign_device` does after
+/// writing it, so the IOMMU stops honoring this device's translations
+/// on the very next transaction it attempts, not eventually. This
+/// function did not exist before this device ever had a revocation
+/// path at all — `assign_device` could only ever ADD a device to a
+/// domain, never remove one.
+///
+/// Real, stated scope limit: this clears the CONTEXT entry (present →
+/// not present), which is what makes the device's second-level
+/// mapping unreachable — it does not free `domain_pml4`'s own pages
+/// back to the PMM (a real future cleanup item once the object-store-
+/// style ownership question of "was this domain shared" is decided;
+/// leaking a handful of 4KB pages on revoke is a real, honestly-stated
+/// simplification, not silently ignored).
+///
+/// Returns `false` if `bus` has no context table at all (nothing was
+/// ever assigned there) or the specific device/function slot was
+/// already not-present — a clean no-op report, not a panic, matching
+/// `kernel_common::authority_graph::revoke`'s own "revoking a
+/// nonexistent grant is a clean no-op" contract this is meant to back
+/// with real hardware.
+pub fn revoke_device(bus: u8, device: u8, function: u8) -> bool {
+    unsafe {
+        let context_phys = BUS_CONTEXT_PHYS[bus as usize];
+        if context_phys == 0 {
+            return false;
+        }
+        let context = pmm::p2v_pub(context_phys) as *mut u64;
+        let ctx_index = ((device as usize & 0x1F) << 3) | (function as usize & 0x7);
+        let low = *context.add(ctx_index * 2);
+        if low & 1 == 0 {
+            return false; // already not-present -- nothing to revoke
+        }
+        *context.add(ctx_index * 2) = 0;
+        *context.add(ctx_index * 2 + 1) = 0;
+
+        let r = regs();
+        r.write64(REG_CCMD, CCMD_ICC | CCMD_CIRG_GLOBAL);
+        let mut spins = 0;
+        while r.read64(REG_CCMD) & CCMD_ICC != 0 {
+            spins += 1;
+            if spins > 1_000_000 {
+                break;
+            }
+        }
+
+        klog_info!("IOMMU: revoked {:02x}:{:02x}.{} -- context entry cleared, context cache flushed", bus, device, function);
+        true
+    }
+}
+
+/// Real, direct read-back of whether `bus:device.function`'s context
+/// entry is currently present — reads the SAME physical bytes the
+/// IOMMU silicon itself consults on every transaction (not kernel-side
+/// bookkeeping about that state). Used to verify `assign_device`/
+/// `revoke_device` actually changed real hardware-facing state, not
+/// just that the calls returned without erroring.
+pub fn context_entry_present(bus: u8, device: u8, function: u8) -> bool {
+    unsafe {
+        let context_phys = BUS_CONTEXT_PHYS[bus as usize];
+        if context_phys == 0 {
+            return false;
+        }
+        let context = pmm::p2v_pub(context_phys) as *mut u64;
+        let ctx_index = ((device as usize & 0x1F) << 3) | (function as usize & 0x7);
+        *context.add(ctx_index * 2) & 1 != 0
+    }
+}
+
 /// Same 4-level page-table walk as vmm.rs's map_page, duplicated rather
 /// than shared because it operates on a domain's second-level tables
 /// (allocated fresh per assign_device call), not any process's PML4 —

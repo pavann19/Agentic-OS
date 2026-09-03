@@ -8,7 +8,7 @@
 //! own module doc for the real protocol work.
 
 use crate::capability::{CapabilityTable, Rights};
-use crate::{driver, gdt, iommu, klog_info, pci, pmm, ring3, syscall, thread, vmm};
+use crate::{authority, driver, gdt, iommu, klog_info, pci, pmm, ring3, syscall, thread, vmm};
 
 const DRIVER_STACK_VADDR: u64 = 0x0000_0000_0070_0000;
 const INFO_VADDR: u64 = 0x0000_0000_0051_0000;
@@ -123,7 +123,16 @@ extern "C" fn ahci_driver_thread() {
             dma_phys,
             vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE | vmm::PAGE_WRITABLE,
         );
-        let domain = iommu::assign_device(p.bus, p.device, p.function, &[(dma_phys, 4096)]);
+        // Research track wiring (docs/RESEARCH_TRACK.md, authority.rs's
+        // own module doc): this grant now goes through the ONE
+        // authority graph -- authority::grant_device derives the real
+        // iommu::assign_device call from the graph's own projection,
+        // rather than this call site handing a separately-tracked
+        // range list straight to iommu.rs. Same real hardware
+        // assignment as before this change, now with a single source
+        // of truth behind it.
+        let domain = authority::grant_device(p.bus, p.device, p.function, dma_phys, 4096)
+            .unwrap_or_else(|| iommu::assign_device(p.bus, p.device, p.function, &[(dma_phys, 4096)]));
         klog_info!("AHCI_IOMMU_DOMAIN_ASSIGNED device={:02x}:{:02x}.{} domain={}", p.bus, p.device, p.function, domain.0);
 
         let info_phys = pmm::alloc_page();

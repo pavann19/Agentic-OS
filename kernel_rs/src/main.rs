@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod acpi;
+pub mod authority; // research track -- real wiring, see authority.rs module doc
 pub mod ahci;
 pub mod agent;
 pub mod apic;
@@ -385,6 +386,52 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
                             "IOMMU_DOMAIN_ASSIGNED device=00:1f.2 mapped_phys=0x{:x} len=4096",
                             dma_buffer_phys
                         );
+
+                        // Research track (docs/RESEARCH_TRACK.md,
+                        // docs/NOVEL_CONCEPTS.md §1): the real hardware
+                        // revocation self-check. Deliberately uses a
+                        // SYNTHETIC, unused PCI slot (00:1d.7 -- not
+                        // 00:1f.2's real AHCI slot, so this never
+                        // touches any live device's own context entry)
+                        // so the demonstration is fully self-contained
+                        // and does not depend on any real driver's
+                        // spawn timing. Every step below reads back the
+                        // REAL hardware-facing IOMMU context-table bytes
+                        // (iommu::context_entry_present) -- not kernel
+                        // bookkeeping about that state -- so this is
+                        // real evidence, not a simulation of the claim.
+                        {
+                            const TEST_BUS: u8 = 0;
+                            const TEST_DEV: u8 = 0x1d;
+                            const TEST_FUNC: u8 = 7;
+                            let test_phys = unsafe { pmm::alloc_page() };
+
+                            let (reachable_before, hw_before) = authority::cross_check(TEST_BUS, TEST_DEV, TEST_FUNC, test_phys);
+                            klog_info!("AUTHORITY_HW_SELFCHECK_START graph_reachable={} hw_present={} (both must be false before any grant)", reachable_before, hw_before);
+
+                            let granted = authority::grant_device(TEST_BUS, TEST_DEV, TEST_FUNC, test_phys, 4096);
+                            let (reachable_after_grant, hw_after_grant) = authority::cross_check(TEST_BUS, TEST_DEV, TEST_FUNC, test_phys);
+                            klog_info!(
+                                "AUTHORITY_HW_SELFCHECK_GRANT domain={} graph_reachable={} hw_present={} (both must be true)",
+                                granted.map(|d| d.0).unwrap_or(0), reachable_after_grant, hw_after_grant
+                            );
+
+                            let revoked = authority::revoke_device(TEST_BUS, TEST_DEV, TEST_FUNC, test_phys);
+                            let (reachable_after_revoke, hw_after_revoke) = authority::cross_check(TEST_BUS, TEST_DEV, TEST_FUNC, test_phys);
+                            klog_info!(
+                                "AUTHORITY_HW_SELFCHECK_REVOKE revoked_ok={} graph_reachable={} hw_present={} (both must be false again)",
+                                revoked, reachable_after_revoke, hw_after_revoke
+                            );
+
+                            if !reachable_before && !hw_before
+                                && reachable_after_grant && hw_after_grant
+                                && !reachable_after_revoke && !hw_after_revoke
+                            {
+                                klog_info!("AUTHORITY_HW_SELFCHECK_PASS: real IOMMU context-table state tracked the authority graph exactly, grant and revoke, both verified against real hardware-facing bytes");
+                            } else {
+                                klog_info!("AUTHORITY_HW_SELFCHECK_FAIL: software and hardware state disagreed at some point -- see the three lines above for exactly where");
+                            }
+                        }
                     } else {
                         klog_info!("IOMMU_INIT_FAILED");
                     }
