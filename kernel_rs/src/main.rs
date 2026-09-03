@@ -15,6 +15,8 @@ extern crate alloc;
 
 pub mod acpi;
 pub mod authority; // research track -- real wiring, see authority.rs module doc
+#[cfg(feature = "research_authority_hw_demo")]
+pub mod authority_hw_fault_demo; // research track -- live-device fault-after-revocation demo, off by default (see Cargo.toml)
 pub mod ahci;
 pub mod agent;
 pub mod apic;
@@ -389,17 +391,25 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
 
                         // Research track (docs/RESEARCH_TRACK.md,
                         // docs/NOVEL_CONCEPTS.md §1): the real hardware
-                        // revocation self-check. Deliberately uses a
-                        // SYNTHETIC, unused PCI slot (00:1d.7 -- not
-                        // 00:1f.2's real AHCI slot, so this never
-                        // touches any live device's own context entry)
-                        // so the demonstration is fully self-contained
-                        // and does not depend on any real driver's
-                        // spawn timing. Every step below reads back the
-                        // REAL hardware-facing IOMMU context-table bytes
+                        // revocation self-check, PLUS the live-device
+                        // fault-after-revocation escalation below. Both
+                        // gated behind the `research_authority_hw_demo`
+                        // feature, OFF by default -- found, by a real
+                        // test-suite failure (test-keyboard.ps1's fixed
+                        // boot-wait timing broke once this block's real,
+                        // deliberate bounded wait for an
+                        // expected-to-fail command added genuine
+                        // wall-clock delay to every boot), that research-
+                        // track runtime cost must not touch the default
+                        // boot path at all -- same discipline
+                        // fault_injection.rs/ring3.rs's own demo already
+                        // established for exactly this reason. Every
+                        // step below reads back the REAL hardware-facing
+                        // IOMMU context-table bytes
                         // (iommu::context_entry_present) -- not kernel
                         // bookkeeping about that state -- so this is
                         // real evidence, not a simulation of the claim.
+                        #[cfg(feature = "research_authority_hw_demo")]
                         {
                             const TEST_BUS: u8 = 0;
                             const TEST_DEV: u8 = 0x1d;
@@ -432,6 +442,22 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
                                 klog_info!("AUTHORITY_HW_SELFCHECK_FAIL: software and hardware state disagreed at some point -- see the three lines above for exactly where");
                             }
                         }
+
+                        // Research track escalation (docs/RESEARCH_TRACK.md):
+                        // a real, LIVE PCI device (the same AHCI
+                        // controller 00:1f.2 this kernel's own driver
+                        // speaks to) issuing a real DMA-backed command
+                        // after its grant is revoked -- see
+                        // authority_hw_fault_demo.rs's own module doc
+                        // for why this runs kernel-side rather than
+                        // coordinating with the live ring-3 ahci_driver,
+                        // and why the real ahci_driver's own later,
+                        // independent self-check is unaffected by it.
+                        // Same feature gate as the block above -- see
+                        // its comment for why this must stay off the
+                        // default boot path.
+                        #[cfg(feature = "research_authority_hw_demo")]
+                        authority_hw_fault_demo::run(0, 0x1f, 2);
                     } else {
                         klog_info!("IOMMU_INIT_FAILED");
                     }

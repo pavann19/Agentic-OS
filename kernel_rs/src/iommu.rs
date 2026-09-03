@@ -277,12 +277,24 @@ pub fn assign_device(bus: u8, device: u8, function: u8, phys_ranges: &[(u64, u64
 /// `docs/NOVEL_CONCEPTS.md` §1 needs to escalate from the pure
 /// data-model prototype (`kernel_common::authority_graph`,
 /// `docs/RESEARCH_TRACK.md`) to actual silicon: this clears the SAME
-/// context-table entry `assign_device` writes (present bit → 0) and
-/// flushes the context cache the same way `assign_device` does after
-/// writing it, so the IOMMU stops honoring this device's translations
-/// on the very next transaction it attempts, not eventually. This
-/// function did not exist before this device ever had a revocation
-/// path at all — `assign_device` could only ever ADD a device to a
+/// context-table entry `assign_device` writes (present bit → 0),
+/// flushes the context cache, AND — the real bug this function's FIRST
+/// version did not have, found by this project's own live-device
+/// revocation test (`authority_hw_fault_demo.rs`) actually completing
+/// a SECOND DMA against a device whose context entry had already been
+/// cleared — issues a real IOTLB (address-translation cache)
+/// invalidation. Context-cache invalidation alone is only sufficient
+/// when a device has never had a translation cached (exactly
+/// `assign_device`'s own case: a fresh domain, nothing to invalidate
+/// yet). A device that already completed a real DMA transaction (this
+/// project's own control step, run before every revocation test) has
+/// its address translation cached in the IOTLB — a separate cache the
+/// VT-d spec requires a SEPARATE invalidation for. Skipping it, as
+/// this function originally did, left a genuinely stale, already-
+/// revoked-in-software translation still honored by real hardware —
+/// found by testing, not by re-reading the spec first. This function
+/// did not exist AT ALL before this device ever had a revocation path
+/// — `assign_device` could previously only ever ADD a device to a
 /// domain, never remove one.
 ///
 /// Real, stated scope limit: this clears the CONTEXT entry (present →
@@ -311,6 +323,14 @@ pub fn revoke_device(bus: u8, device: u8, function: u8) -> bool {
         if low & 1 == 0 {
             return false; // already not-present -- nothing to revoke
         }
+        let high = *context.add(ctx_index * 2 + 1);
+        // Domain ID lives at bits [23:8] of the context entry's high
+        // qword -- the exact field `assign_device` writes as
+        // `(domain_id as u64) << 8` -- read back BEFORE clearing the
+        // entry, since it's what the real IOTLB invalidation below
+        // needs to target the right domain's cached translations.
+        let domain_id = ((high >> 8) & 0xFFFF) as u16;
+
         *context.add(ctx_index * 2) = 0;
         *context.add(ctx_index * 2 + 1) = 0;
 
@@ -324,7 +344,35 @@ pub fn revoke_device(bus: u8, device: u8, function: u8) -> bool {
             }
         }
 
-        klog_info!("IOMMU: revoked {:02x}:{:02x}.{} -- context entry cleared, context cache flushed", bus, device, function);
+        // Real IOTLB (address-translation cache) invalidation --
+        // domain-selective granularity, per VT-d spec §10.4.8. The
+        // IOTLB Invalidate Register's location is NOT fixed -- it is
+        // computed from ECAP.IRO (bits [17:8], a 16-byte-unit offset
+        // from the register base), exactly the way this codebase's own
+        // fault-recording register lookup (`fault_recording_regs`)
+        // already computes ITS offset from CAP rather than assuming a
+        // spec-typical constant. IVT (bit 63) requests the
+        // invalidation; hardware clears it when done. IIRG=0b01 (bits
+        // 61:60) requests domain-selective granularity; DID (bits
+        // 47:32) selects which domain's cached translations to purge.
+        let ecap = r.read64(REG_ECAP);
+        let iotlb_reg = ((ecap >> 8) & 0x3FF) * 16 + 8;
+        const IOTLB_IVT: u64 = 1 << 63;
+        const IOTLB_IIRG_DOMAIN_SELECTIVE: u64 = 0b01 << 60;
+        let invalidate_value = IOTLB_IVT | IOTLB_IIRG_DOMAIN_SELECTIVE | ((domain_id as u64) << 32);
+        r.write64(iotlb_reg, invalidate_value);
+        let mut iotlb_spins = 0;
+        while r.read64(iotlb_reg) & IOTLB_IVT != 0 {
+            iotlb_spins += 1;
+            if iotlb_spins > 1_000_000 {
+                break;
+            }
+        }
+
+        klog_info!(
+            "IOMMU: revoked {:02x}:{:02x}.{} domain={} -- context entry cleared, context cache AND IOTLB flushed",
+            bus, device, function, domain_id
+        );
         true
     }
 }

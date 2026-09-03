@@ -28,6 +28,14 @@ fault_test_double_fault = []
 # reaches its steady-state loop instead of an intentional #GP. Verified via
 # scripts/test-ring3.ps1.
 demo_ring3 = []
+# Research track (docs/RESEARCH_TRACK.md): the authority-graph hardware
+# self-check and live-device revocation-fault demo. Off by default --
+# found, by real test-suite failure, to add real synchronous wall-clock
+# delay to every boot (a deliberate bounded wait for an
+# expected-to-fail command), which broke test-keyboard.ps1's fixed
+# boot-wait timing. Same discipline as fault_test_*/demo_ring3 above:
+# a normal boot never runs this. See scripts/test-authority-revoke.ps1.
+research_authority_hw_demo = []
 # Phase 6's real induced-failure trial (docs/ROADMAP.md Phase 6 exit
 # criteria). Off by default -- a normal build embeds the correct
 # virtio-net driver. See virtio_net.rs's module doc and
