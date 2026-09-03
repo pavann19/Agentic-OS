@@ -1,15 +1,18 @@
-# Research track (docs/RESEARCH_TRACK.md, docs/NOVEL_CONCEPTS.md §1):
-# real-hardware verification of the authority-graph-to-IOMMU wiring
-# (kernel_rs/src/authority.rs) -- both the synthetic-slot software/
-# hardware cross-check AND the live-device (real AHCI, 00:1f.2)
-# fault-after-revocation escalation (kernel_rs/src/
-# authority_hw_fault_demo.rs). Builds the kernel WITH the
+# Research track (docs/RESEARCH_TRACK.md, docs/NOVEL_CONCEPTS.md
+# sections 1, 2, and 3): real-hardware verification of the full
+# authority-graph-to-hardware wiring (kernel_rs/src/authority.rs,
+# kernel_rs/src/authority_hw_fault_demo.rs) -- section 1's device
+# (IOMMU context-table) AND CPU (page-table) sides, section 2's
+# hardware-bound impossibility certificate with a real byte-level
+# corruption test, and section 3's least-privilege envelope discovered
+# from REAL captured IOMMU fault addresses and frozen into real,
+# enforced grants. Builds the kernel WITH the
 # `research_authority_hw_demo` feature (off by default -- see
-# Cargo.toml's own comment on why: this demo's deliberate bounded wait
-# for an expected-to-fail command adds real wall-clock delay unsuitable
-# for every normal boot), boots it against a real AHCI disk under a
-# real `intel-iommu` device, and asserts both self-checks reported
-# PASS. Rebuilds the default (non-feature) kernel afterward, same
+# Cargo.toml's own comment on why: several of these demos' deliberate
+# bounded waits for expected-to-fail commands add real wall-clock delay
+# unsuitable for every normal boot), boots it against a real AHCI disk
+# under a real `intel-iommu` device, and asserts every real PASS marker
+# fired. Rebuilds the default (non-feature) kernel afterward, same
 # discipline as scripts/test-faults.ps1, so the tree is left in its
 # normal state, not mid-research-build.
 
@@ -114,10 +117,13 @@ $content = Get-Content $SerialLog -Raw
 
 $allPassed = $true
 $checks = @(
-    @{ Pattern = "AUTHORITY_HW_SELFCHECK_PASS"; Name = "synthetic-slot software/hardware cross-check" },
-    @{ Pattern = "AUTHORITY_HW_LIVE_FAULT_CONTROL first_command_completed=true"; Name = "live AHCI control command completed (grant works)" },
-    @{ Pattern = "AUTHORITY_HW_LIVE_FAULT_RESULT second_command_completed=false"; Name = "post-revocation command did NOT complete" },
-    @{ Pattern = "AUTHORITY_HW_LIVE_FAULT_PASS"; Name = "real IOMMU fault captured after revocation" }
+    @{ Pattern = "AUTHORITY_HW_SELFCHECK_PASS"; Name = "section 1 (device): synthetic-slot software/hardware cross-check" },
+    @{ Pattern = "AUTHORITY_HW_LIVE_FAULT_CONTROL first_command_completed=true"; Name = "section 1 (device): live AHCI control command completed (grant works)" },
+    @{ Pattern = "AUTHORITY_HW_LIVE_FAULT_RESULT second_command_completed=false"; Name = "section 1 (device): post-revocation command did NOT complete" },
+    @{ Pattern = "AUTHORITY_HW_LIVE_FAULT_PASS"; Name = "section 1 (device): real IOMMU fault captured after revocation" },
+    @{ Pattern = "AUTHORITY_HW_CPU_PASS"; Name = "section 1 (CPU): real page-table state tracked the graph exactly" },
+    @{ Pattern = "AUTHORITY_HW_CERT_PASS"; Name = "section 2: hardware-bound certificate detected real byte-level tampering" },
+    @{ Pattern = "AUTHORITY_HW_ENVELOPE_PASS"; Name = "section 3: envelope discovered from real captured IOMMU faults, frozen, and enforced" }
 )
 foreach ($c in $checks) {
     if ($content -match [regex]::Escape($c.Pattern)) {
@@ -134,4 +140,4 @@ if (-not $allPassed) {
 }
 
 Write-Output ""
-Write-Output "Authority-graph hardware wiring verified: real IOMMU context-table state tracks the pure authority_graph exactly (grant AND revoke), and a real, live AHCI device's DMA attempt was blocked by real IOMMU hardware immediately after revocation -- a real fault, not a simulated or asserted one."
+Write-Output "Authority-graph hardware wiring verified, sections 1-3: real IOMMU context-table state AND real CPU page-table state both track the pure authority_graph exactly (grant AND revoke); a real, live AHCI device's DMA attempt was blocked by real IOMMU hardware immediately after revocation; a certificate bound to real hardware bytes detected real byte-level tampering; and a least-privilege envelope discovered from REAL captured IOMMU fault addresses was frozen into real grants that correctly allow what was observed and deny what wasn't."

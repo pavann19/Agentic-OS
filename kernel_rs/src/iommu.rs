@@ -395,6 +395,57 @@ pub fn context_entry_present(bus: u8, device: u8, function: u8) -> bool {
     }
 }
 
+/// Real, direct read-back of `bus:device.function`'s FULL context
+/// entry (both 64-bit words) — the exact bytes `docs/NOVEL_CONCEPTS.md`
+/// §2's "physical impossibility certificate" needs to bind to for a
+/// real hardware-grounded certificate (not just the pure
+/// `kernel_common::authority_graph` state), and the exact bytes the
+/// §2.4 corruption test tampers with to prove a certificate detects
+/// real hardware-state tampering, not just graph-state tampering.
+/// Returns `(0, 0)` if `bus` has no context table at all -- same clean
+/// "nothing here" contract as `context_entry_present`, not a panic.
+pub fn context_entry_raw(bus: u8, device: u8, function: u8) -> (u64, u64) {
+    unsafe {
+        let context_phys = BUS_CONTEXT_PHYS[bus as usize];
+        if context_phys == 0 {
+            return (0, 0);
+        }
+        let context = pmm::p2v_pub(context_phys) as *mut u64;
+        let ctx_index = ((device as usize & 0x1F) << 3) | (function as usize & 0x7);
+        (*context.add(ctx_index * 2), *context.add(ctx_index * 2 + 1))
+    }
+}
+
+/// **Research-track test helper only -- deliberately dangerous, never
+/// called from anything but `authority_hw_fault_demo.rs`'s own
+/// corruption test.** Real, direct, raw physical-memory corruption of
+/// `bus:device.function`'s context entry, bypassing every real kernel
+/// API (`assign_device`/`revoke_device`) entirely -- simulating an
+/// attacker or a hardware fault tampering with the IOMMU's own
+/// structures directly, which is exactly the class of access this
+/// project's own real historical IOMMU bug already proved software
+/// can get wrong by accident. Flips a bit that does not affect the
+/// PRESENT bit (so a naive `context_entry_present` check alone would
+/// NOT catch this — the real point: `authority::verify_device_
+/// certificate`'s bound raw-byte comparison is what has to catch it).
+/// A no-op (does nothing, does not panic) if `bus` has no context
+/// table at all.
+pub unsafe fn debug_corrupt_context_entry(bus: u8, device: u8, function: u8) {
+    unsafe {
+        let context_phys = BUS_CONTEXT_PHYS[bus as usize];
+        if context_phys == 0 {
+            return;
+        }
+        let context = pmm::p2v_pub(context_phys) as *mut u64;
+        let ctx_index = ((device as usize & 0x1F) << 3) | (function as usize & 0x7);
+        // Flip a real, non-PRESENT bit in the low qword -- corrupts
+        // the entry's content without changing whether it reads as
+        // "present", so this is a genuine test of byte-level
+        // certificate binding, not just a present/not-present check.
+        *context.add(ctx_index * 2) ^= 1 << 4;
+    }
+}
+
 /// Same 4-level page-table walk as vmm.rs's map_page, duplicated rather
 /// than shared because it operates on a domain's second-level tables
 /// (allocated fresh per assign_device call), not any process's PML4 —
@@ -521,6 +572,66 @@ pub fn poll_and_log_faults() -> u32 {
         // still have F=1 -- after acknowledging every one found above it
         // self-clears; still write the status register's OTHER
         // write-1-to-clear bits (PFO etc.) for real hygiene.
+        let status = r.read32(REG_FSTS);
+        r.write32(REG_FSTS, status);
+        found
+    }
+}
+
+/// Real research-track wiring (`docs/RESEARCH_TRACK.md`, `docs/
+/// NOVEL_CONCEPTS.md` §3): the same real fault-recording-register walk
+/// `poll_and_log_faults` performs, but also writing each fault's
+/// REAL faulting physical address into `out` -- the raw ingredient
+/// `kernel_common::discovered_envelope::discover_envelope` needs to
+/// build a real least-privilege envelope from ACTUAL observed hardware
+/// faults, not a synthetic/simulated attempt list. Real, not
+/// duplicated logic for its own sake: kept as a real, separate
+/// function (mirroring `poll_and_log_faults`'s own walk) rather than
+/// changing that function's existing, already-verified signature and
+/// behavior -- every caller of `poll_and_log_faults` today only needs
+/// a count, and changing its return type would be a real, unnecessary
+/// risk to already-working code for a need only this new caller has.
+///
+/// The address itself: bits `[63:12]` of the fault-recording register's
+/// LOW 64-bit word (the FI, Fault Info, field per VT-d spec §10.4.14) —
+/// a page-aligned physical address for address-translation-failure
+/// fault reasons (the class this project's own live-device revocation
+/// test, `authority_hw_fault_demo.rs`, already produces and logs as
+/// `raw_low`). Bounded: stops writing once `out` is full, same
+/// no-silent-overrun discipline as every other output-slice function
+/// in this codebase.
+pub fn poll_and_collect_fault_addrs(out: &mut [u64]) -> usize {
+    unsafe {
+        let r = regs();
+        if r.read32(REG_FSTS) & FSTS_PPF == 0 {
+            return 0;
+        }
+        let cap = r.read64(REG_CAP);
+        let frcd = fault_recording_regs(cap);
+        let mut found = 0usize;
+        for i in 0..frcd.count {
+            if found >= out.len() {
+                break;
+            }
+            let reg_off = frcd.base_offset + (i as u64) * 16;
+            let low = r.read64(reg_off);
+            let high = r.read64(reg_off + 8);
+            let f_valid = (high >> 63) & 1 == 1;
+            if !f_valid {
+                continue;
+            }
+            let sid = (high & 0xFFFF) as u16;
+            let fr = ((high >> 32) & 0xFF) as u8;
+            let fault_addr = low & 0xFFFF_FFFF_FFFF_F000; // FI field, page-aligned
+            out[found] = fault_addr;
+            found += 1;
+            klog_info!(
+                "IOMMU_FAULT_DETECTED source_id=0x{:04x} reason=0x{:02x} fault_addr=0x{:x} raw_low=0x{:016x} raw_high=0x{:016x}",
+                sid, fr, fault_addr, low, high
+            );
+            crate::audit::record(crate::audit::AuditEvent::IommuFault { source_id: sid, reason: fr });
+            r.write64(reg_off + 8, high);
+        }
         let status = r.read32(REG_FSTS);
         r.write32(REG_FSTS, status);
         found

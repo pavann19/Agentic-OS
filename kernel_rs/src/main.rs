@@ -458,6 +458,21 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
                         // default boot path.
                         #[cfg(feature = "research_authority_hw_demo")]
                         authority_hw_fault_demo::run(0, 0x1f, 2);
+
+                        // Sections 1 (CPU-side completion), 2 (hardware-
+                        // bound certificate + real corruption test), and
+                        // 3 (envelope discovered from REAL captured
+                        // IOMMU fault addresses) -- same feature gate,
+                        // same reason: real, deliberate bounded waits
+                        // for several expected-to-fault commands add
+                        // real wall-clock delay unsuitable for a normal
+                        // boot. See docs/RESEARCH_TRACK.md.
+                        #[cfg(feature = "research_authority_hw_demo")]
+                        authority_hw_fault_demo::run_cpu_side_demo();
+                        #[cfg(feature = "research_authority_hw_demo")]
+                        authority_hw_fault_demo::run_certificate_corruption_test(0, 0x1f, 2);
+                        #[cfg(feature = "research_authority_hw_demo")]
+                        authority_hw_fault_demo::run_envelope_discovery(0, 0x1f, 2);
                     } else {
                         klog_info!("IOMMU_INIT_FAILED");
                     }

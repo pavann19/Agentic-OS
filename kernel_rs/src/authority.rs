@@ -36,8 +36,9 @@
 //! post-revocation DMA attempt — a further increment, noted in
 //! `docs/RESEARCH_TRACK.md`, not silently implied as done here).
 
-use crate::{iommu, klog_info};
+use crate::{iommu, klog_info, vmm};
 use kernel_common::authority_graph::{self, Entry, Grant, Principal};
+use kernel_common::impossibility_certificate::{self, Certificate, Verdict};
 
 const MAX_GRANTS: usize = 32;
 
@@ -121,4 +122,217 @@ pub fn cross_check(bus: u8, device: u8, function: u8, phys_page: u64) -> (bool, 
     let graph_says = unsafe { authority_graph::is_reachable(&*&raw const GRAPH, principal, phys_page) };
     let hw_says = iommu::context_entry_present(bus, device, function);
     (graph_says, hw_says)
+}
+
+/// Grants exactly one 4KB page in `envelope` per element -- reuses
+/// `grant_device` for each, so the SAME "derive the real hardware call
+/// from the graph's own projection" property `grant_device` already
+/// provides applies to every page frozen this way. Returns the number
+/// successfully granted. The real §3 wiring point
+/// (`docs/NOVEL_CONCEPTS.md` §3, `docs/RESEARCH_TRACK.md`): freezing a
+/// DISCOVERED envelope (`kernel_common::discovered_envelope::
+/// discover_envelope`, fed from REAL captured IOMMU fault addresses --
+/// see `authority_hw_fault_demo.rs`) into real, enforced hardware
+/// grants, not just the pure graph.
+pub fn freeze_envelope_device(bus: u8, device: u8, function: u8, envelope: &[u64]) -> usize {
+    let mut granted = 0;
+    for &phys_page in envelope {
+        if grant_device(bus, device, function, phys_page, 4096).is_some() {
+            granted += 1;
+        }
+    }
+    granted
+}
+
+// ---------------------------------------------------------------------
+// §1's remaining half: the CPU-side page-table projection, wired to
+// real vmm::map_page_in/unmap_page -- the escalation this module's own
+// doc named as deliberately not done in the device-DMA increment.
+// Real, stated scope limit of THIS increment: one live grant per
+// (pid, phys_base) pair is assumed for revoke's own vaddr bookkeeping
+// (the caller passes the same vaddr_base back at revoke time) --
+// multiple simultaneous grants for the same process work fine for
+// GRANTING (project_page_table returns every one of them, all get
+// mapped), but revoke_process here only unmaps the specific
+// (pid, phys_base) grant being revoked, using vaddr_base the CALLER
+// supplies for that grant, not a value recorded by this module. A
+// real per-grant vaddr table is a natural follow-up, not built here.
+// ---------------------------------------------------------------------
+
+/// Real wiring point for §1's CPU side: grants `phys_base..phys_base+
+/// len` to CPU process `pid`, adds it to the ONE authority graph, and
+/// derives real `vmm::map_page_in` calls into `target_pml4` FROM the
+/// graph's own `project_page_table` projection -- mapped starting at
+/// `vaddr_base`, one page per projected entry, in projection order.
+/// Real permission flags come from the projected `Entry`, not
+/// re-derived from the caller's own `writable`/`executable` arguments
+/// a second time (the same "single source" discipline `grant_device`
+/// already established for the device side). Returns `true` if the
+/// grant was added and at least one page was mapped.
+pub fn grant_process(
+    pid: u32,
+    target_pml4: u64,
+    vaddr_base: u64,
+    phys_base: u64,
+    len: u64,
+    writable: bool,
+    executable: bool,
+) -> bool {
+    let principal = Principal::CpuProcess(pid);
+    let added = unsafe {
+        authority_graph::grant(
+            &mut *&raw mut GRAPH,
+            Grant { principal, phys_base, len, writable, executable },
+        )
+    };
+    if !added {
+        klog_info!("AUTHORITY: graph full -- refusing to grant CPU process {} (bounded, not silently dropped)", pid);
+        return false;
+    }
+
+    let mut entries = [Entry { phys_page: 0, writable: false, executable: false }; MAX_GRANTS];
+    let count = unsafe { authority_graph::project_page_table(&*&raw const GRAPH, principal, &mut entries) };
+    if count == 0 {
+        klog_info!("AUTHORITY: CPU projection produced zero entries right after a successful grant -- refusing to map hardware");
+        return false;
+    }
+
+    unsafe {
+        for i in 0..count {
+            let vaddr = vaddr_base + (i as u64) * 4096;
+            let mut flags = 0u64;
+            if entries[i].writable {
+                flags |= vmm::PAGE_WRITABLE;
+            }
+            if !entries[i].executable {
+                flags |= vmm::PAGE_NO_EXECUTE;
+            }
+            vmm::map_page_in(target_pml4, vaddr, entries[i].phys_page, flags);
+        }
+    }
+    klog_info!(
+        "AUTHORITY_GRANT_HW_CPU pid={} vaddr_base=0x{:x} phys=0x{:x} len={} projected_pages={} -- real vmm::map_page_in calls derived from the graph's own projection",
+        pid, vaddr_base, phys_base, len, count
+    );
+    true
+}
+
+/// The ONLY revocation path for a CPU-process grant: removes it from
+/// `GRAPH` AND unmaps the real page-table entries `vmm::map_page_in`
+/// created for it, in the same call. `vaddr_base` must be the SAME
+/// value passed to the matching `grant_process` call (see this
+/// section's own doc on why -- this module does not itself remember
+/// per-grant vaddrs yet). Returns `true` if the graph entry was found
+/// and removed.
+pub fn revoke_process(pid: u32, target_pml4: u64, vaddr_base: u64, phys_base: u64) -> bool {
+    let principal = Principal::CpuProcess(pid);
+    // Project BEFORE revoking -- once the grant is gone from GRAPH,
+    // project_page_table can no longer tell us how many pages (and
+    // therefore how many vaddrs) this specific grant covered.
+    let mut entries = [Entry { phys_page: 0, writable: false, executable: false }; MAX_GRANTS];
+    let count = unsafe { authority_graph::project_page_table(&*&raw const GRAPH, principal, &mut entries) };
+
+    let removed = unsafe { authority_graph::revoke(&mut *&raw mut GRAPH, principal, phys_base) };
+    if removed > 0 {
+        unsafe {
+            for i in 0..count {
+                let vaddr = vaddr_base + (i as u64) * 4096;
+                vmm::unmap_page(target_pml4, vaddr);
+            }
+        }
+    }
+    klog_info!(
+        "AUTHORITY_REVOKE_HW_CPU pid={} vaddr_base=0x{:x} graph_entries_removed={} pages_unmapped={}",
+        pid, vaddr_base, removed, count
+    );
+    removed > 0
+}
+
+/// Real, direct evidence check for the CPU side: does the graph still
+/// consider `phys_page` reachable by process `pid`, AND does a REAL
+/// page-table walk of `target_pml4` at `vaddr` (`vmm::debug_translate`
+/// -- the exact mechanism, reading the exact bytes, the CPU's own MMU
+/// would walk) agree?
+///
+/// Real bug found by this function's own first test run, fixed here
+/// rather than hidden: `vmm::debug_translate` returns the RAW leaf PTE
+/// value (address bits AND flag bits together, exactly what's stored
+/// in the table), not a bare frame address -- comparing it directly
+/// against `phys_page` was wrong whenever any flag bit was set (which
+/// is always, in practice: PRESENT alone guarantees a mismatch).
+/// `kernel_common::pagetable::frame_from_entry` (already used
+/// elsewhere in this kernel for exactly this masking) is the real fix.
+pub fn cross_check_cpu(pid: u32, target_pml4: u64, vaddr: u64, phys_page: u64) -> (bool, bool) {
+    let principal = Principal::CpuProcess(pid);
+    let graph_says = unsafe { authority_graph::is_reachable(&*&raw const GRAPH, principal, phys_page) };
+    let raw_entry = unsafe { vmm::debug_translate(target_pml4, vaddr) };
+    let hw_frame = kernel_common::pagetable::frame_from_entry(raw_entry);
+    (graph_says, hw_frame == phys_page)
+}
+
+// ---------------------------------------------------------------------
+// §2's real hardware wiring: a certificate bound to the ACTUAL raw
+// IOMMU context-table bytes for a device, not only the pure graph --
+// the escalation `docs/NOVEL_CONCEPTS.md` §2.4 describes ("corrupt one
+// real IOMMU table entry underneath it, show the certificate fails to
+// re-verify").
+// ---------------------------------------------------------------------
+
+/// A certificate plus the REAL raw hardware bytes it was issued
+/// against (`iommu::context_entry_raw`) -- the exact 128 bits the
+/// IOMMU silicon itself consults for this device's context entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HwCertificate {
+    pub cert: Certificate,
+    pub hw_low: u64,
+    pub hw_high: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HwVerdict {
+    /// Both the graph and the real hardware bytes still match what
+    /// was certified.
+    Valid,
+    /// The pure authority graph itself has changed since issuance --
+    /// see `kernel_common::impossibility_certificate`'s own doc on
+    /// what this means.
+    GraphStale,
+    /// The graph matches, but the REAL hardware context-table bytes
+    /// for this device do not match what was certified -- a real,
+    /// hardware-level tamper/drift signal, distinguishable from a
+    /// mere software-side change.
+    HardwareMismatch,
+}
+
+/// Issues a certificate that `bus:device.function` cannot reach
+/// `phys_page`, bound to BOTH the pure graph state (`kernel_common::
+/// impossibility_certificate::issue`) AND the real, live IOMMU
+/// context-table bytes for that device at issuance time. `None` if
+/// the page is actually reachable right now (same real-impossibility-
+/// only contract the pure version has).
+pub fn issue_device_certificate(bus: u8, device: u8, function: u8, phys_page: u64) -> Option<HwCertificate> {
+    let principal = Principal::PciDevice { bus, device, function };
+    let cert = unsafe { impossibility_certificate::issue(&*&raw const GRAPH, principal, phys_page) }?;
+    let (hw_low, hw_high) = iommu::context_entry_raw(bus, device, function);
+    Some(HwCertificate { cert, hw_low, hw_high })
+}
+
+/// Re-verifies `hwcert` against BOTH the current graph state and the
+/// CURRENT real IOMMU context-table bytes for the device -- real
+/// re-derivation of both, not a cached result. Distinguishes a
+/// software-only change (`GraphStale`) from a real hardware-level
+/// mismatch (`HardwareMismatch`) -- the real, falsifiable evidence
+/// `docs/NOVEL_CONCEPTS.md` §2.4 asks for: a certificate that
+/// specifically detects tampering with the real hardware structure it
+/// was bound to, not only its own software model of that structure.
+pub fn verify_device_certificate(bus: u8, device: u8, function: u8, hwcert: &HwCertificate) -> HwVerdict {
+    let graph_verdict = unsafe { impossibility_certificate::verify(&*&raw const GRAPH, &hwcert.cert) };
+    if graph_verdict == Verdict::Stale {
+        return HwVerdict::GraphStale;
+    }
+    let (hw_low, hw_high) = iommu::context_entry_raw(bus, device, function);
+    if hw_low != hwcert.hw_low || hw_high != hwcert.hw_high {
+        return HwVerdict::HardwareMismatch;
+    }
+    HwVerdict::Valid
 }
