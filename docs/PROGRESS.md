@@ -1162,6 +1162,31 @@ request — see below for exactly which parts are genuinely blocked.
       write path remains a real, open gap, honestly stated rather than
       silently dropped or falsely claimed done.
 
+      **Follow-up diagnostic, real root cause found (still not fixed).**
+      Re-attempted with QEMU's own `-trace enable=ahci_*` event log
+      (`ahci_trigger_irq`, `ahci_populate_sglist`, etc.) rather than more
+      guessing. The trace shows exactly what happens: immediately after
+      the WRITE DMA EXT command is issued, QEMU's AHCI model raises
+      `ahci_trigger_irq ... +TFES (0x40000000)` — a real Task File Error.
+      Per the AHCI spec, on TFES the port's command engine halts and
+      `PxCI` does NOT self-clear until software does real error recovery
+      (read `PxTFD`, clear `PxSERR`/`PxIS`, restart the port) — which
+      this driver doesn't implement, exactly explaining the observed
+      hang as a *consequence* of the real error, not a separate bug. A
+      second control probe — the identical command with the opcode
+      changed to `READ DMA EXT` (0x25) at the same LBA, same command
+      layout — completed cleanly with no TFES, isolating the fault to
+      write *direction* specifically, not to LBA addressing or the
+      48-bit command layout. The actual cause (why QEMU's `ide-hd`
+      backing this AHCI port rejects a write specifically) is still
+      unidentified — candidates not yet checked: the backing image file
+      or `-drive` line opened in a way that leaves the device believing
+      it's write-protected, or a QEMU ATA quirk in this configuration.
+      This diagnostic code was, again, not left in the tree — reverted
+      the same way, hash-verified back to the known-good build. Real,
+      new, narrower evidence for whoever picks this up next; still an
+      open gap.
+
 **Phase 8 exit criteria (`docs/ROADMAP.md` §5) — 2 of 3 fully
 demonstrated, 1 genuinely blocked:**
 - "The full suite passes from a clean checkout with no manual steps" —
