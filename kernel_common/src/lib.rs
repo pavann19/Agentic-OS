@@ -13,6 +13,7 @@ pub mod bitmap;
 // not a merged change.
 pub mod driver_registry;
 pub mod ext2;
+pub mod madt;
 // Feature-gated: defines real, strong #[no_mangle] memset/memcpy/
 // memmove/memcmp symbols (see mem_intrinsics.rs's own doc for why) --
 // ONLY the freestanding binaries (kernel_rs, user_rs/*_driver) enable

@@ -1359,3 +1359,21 @@ is the researched recommendation, not a strict requirement) and
 confirming this kernel's real boot chain over its real serial line —
 needs the user to actually acquire and wire up hardware, not further
 code changes here. It stays open, honestly, alongside Phase 6 starting.
+
+---
+
+## Phase 9 — Multi-Core Execution (SMP) (1/6 deliverables complete — IN PROGRESS)
+
+ADR-007 and ADR-008 (`docs/ROADMAP.md` §2) signed off 2026-09-03, unblocking Phases 11 and 12 later. Phase 9 itself needed no new sign-off and started immediately.
+
+**Deliverable 1 — AP bring-up via real INIT-SIPI-SIPI per real ACPI MADT tables — MADT parsing half DONE, AP bring-up itself NOT YET DONE.**
+
+Real MADT (Multiple APIC Description Table) entry parsing, the prerequisite for the actual INIT-SIPI-SIPI sequence: `kernel_common::madt::parse_cpus` — pure, host-tested (9 real tests: single-CPU, real `-smp 4` shape, a disabled/not-present processor entry correctly reported-but-flagged, x2APIC (32-bit ID) entries, an unrecognized entry type skipped via its own declared length rather than assumed 8 bytes, output-capacity bounds respected, a truncated/malformed entry stopped cleanly rather than read out of bounds, an empty body). `kernel_rs::acpi::find_cpus` wires it to the real MADT table via the same `find_table`/checksum-validated ACPI walker already used for DMAR since Phase 3, with its own bounds check against the table's declared length before any slice is constructed over untrusted firmware-provided memory.
+
+**Verified live, two ways:**
+- Real single-CPU QEMU default boot (no `-smp` flag, the shape every existing test script uses): `ACPI_MADT_CPU apic_id=0 processor_uid=0 enabled=true` / `ACPI_MADT_DONE total=1 enabled=1` — full 12-suite regression re-run clean (test-e1000's known pre-existing timing flakiness reproduced and reconfirmed independent of this change, same as the prior session's finding; passes standalone).
+- Real `-smp 4` QEMU boot (with `-device intel-iommu,intremap=on`, mandatory per ADR-006): all four real APIC IDs (0-3) reported enabled, `ACPI_MADT_DONE total=4 enabled=4`, IOMMU init and every other boot checkpoint unaffected.
+
+**Deliberately not done yet, and why:** the actual INIT-SIPI-SIPI sequence (bringing an AP from real mode through protected mode into long mode and into a real Rust entry point) is real, correctness-critical, low-level work with a genuine risk of hanging the whole machine if wrong — a 16-bit real-mode trampoline needs to be assembled, placed at a fixed low physical page, and exercised via the LAPIC's ICR, none of which this MADT-parsing step touches. It is the deliberate next increment, kept separate so each piece is independently verified before the next depends on it — same discipline this project used getting the IOMMU, AHCI, NVMe, and e1000 work right.
+
+**Also found while reading the code for this phase, not yet fixed:** `kernel_rs::gdt`'s `GDT`, `TSS` (including `TSS.rsp0`/`TSS.ist`/`TSS.iopb`) are all single, global `static mut`s — correct for a single core, but exactly the kind of shared-mutable-kernel-state Phase 9's deliverable 5 ("every existing shared kernel structure... audited and made SMP-safe") already anticipated needing to fix. Only one CPU can point its task register at a given TSS at a time, so real SMP needs a genuinely separate GDT/TSS per core, not a shared one. Noted here as a concrete, real item for that later deliverable — not silently deferred without a trace.

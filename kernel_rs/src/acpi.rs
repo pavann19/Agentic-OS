@@ -116,3 +116,37 @@ pub fn init(rsdp_phys: u64) -> Option<u64> {
     let xsdt = validate_rsdp(rsdp_phys)?;
     Some(xsdt)
 }
+
+/// Phase 9's first deliverable: real MADT CPU enumeration. Finds and
+/// checksum-validates the MADT (signature "APIC" -- ACPI's own naming,
+/// not a typo) the same way `find_table` already does for DMAR, then
+/// hands the entry-list bytes (everything after the 36-byte SDT header
+/// AND the MADT's own 8-byte Local APIC Address + Flags sub-header --
+/// `kernel_common::madt::parse_cpus` expects to start right at that
+/// sub-header, matching its own doc) to the pure, host-tested parser.
+///
+/// Real, necessary caution the pure parser can't provide on its own:
+/// this function is the only place that actually dereferences physical
+/// memory, so it is where a malformed `table_len` (untrusted firmware
+/// input, same as every other ACPI table this kernel reads) gets
+/// bounds-checked against the table's own declared length before a
+/// slice is ever constructed over it.
+pub fn find_cpus(xsdt_phys: u64, out: &mut [kernel_common::madt::CpuEntry]) -> usize {
+    let Some(madt_phys) = find_table(xsdt_phys, b"APIC") else {
+        return 0;
+    };
+    unsafe {
+        let header = pmm::p2v_pub(madt_phys) as *const SdtHeader;
+        let total_len = (*header).length as usize;
+        let sdt_header_len = core::mem::size_of::<SdtHeader>();
+        if total_len < sdt_header_len {
+            klog_info!("ACPI: MADT length {} shorter than its own header -- refusing to parse", total_len);
+            return 0;
+        }
+        let body_len = total_len - sdt_header_len;
+        let body_phys = madt_phys + sdt_header_len as u64;
+        let body_vaddr = pmm::p2v_pub(body_phys);
+        let body = core::slice::from_raw_parts(body_vaddr, body_len);
+        kernel_common::madt::parse_cpus(body, out)
+    }
+}

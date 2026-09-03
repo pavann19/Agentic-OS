@@ -330,6 +330,31 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     match xsdt {
         Some(xsdt_phys) => {
             klog_info!("ACPI_INIT_DONE xsdt=0x{:x}", xsdt_phys);
+
+            // Phase 9's first deliverable (docs/ROADMAP.md §5): real
+            // MADT CPU enumeration. Logged only, no AP bring-up yet --
+            // INIT-SIPI-SIPI is real, correctness-critical, hard-to-
+            // debug-if-wrong work that deliberately lands as its own
+            // increment once this enumeration step is itself verified
+            // against real multi-CPU QEMU boot evidence.
+            let mut cpus = [kernel_common::madt::CpuEntry { apic_id: 0, processor_uid: 0, enabled: false }; 32];
+            let cpu_count = acpi::find_cpus(xsdt_phys, &mut cpus);
+            if cpu_count == 0 {
+                klog_info!("ACPI_MADT_NOT_FOUND (no CPU topology exposed by firmware)");
+            } else {
+                let mut enabled_count = 0u32;
+                for c in &cpus[..cpu_count] {
+                    klog_info!(
+                        "ACPI_MADT_CPU apic_id={} processor_uid={} enabled={}",
+                        c.apic_id, c.processor_uid, c.enabled
+                    );
+                    if c.enabled {
+                        enabled_count += 1;
+                    }
+                }
+                klog_info!("ACPI_MADT_DONE total={} enabled={}", cpu_count, enabled_count);
+            }
+
             match acpi::find_table(xsdt_phys, b"DMAR") {
                 Some(dmar_phys) => {
                     klog_info!("ACPI_DMAR_FOUND phys=0x{:x}", dmar_phys);

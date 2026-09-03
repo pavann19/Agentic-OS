@@ -535,3 +535,178 @@ mod driver_registry_tests {
         assert_eq!(count, 0);
     }
 }
+
+#[cfg(test)]
+mod madt_tests {
+    // Real, isolated verification of kernel_common::madt -- Phase 9's
+    // first deliverable (docs/ROADMAP.md §5 Phase 9, item 1). Real
+    // synthetic MADT bytes built to the actual ACPI 5.2.12 layout, not
+    // a simplified stand-in -- the same "byte-correct, spec-driven"
+    // discipline this project's real drivers have used since Phase 6.
+
+    use kernel_common::madt::{parse_cpus, CpuEntry};
+
+    /// Builds a real MADT body (everything after the 36-byte SDT
+    /// header this module never sees -- kernel_rs::acpi strips that
+    /// before handing bytes here): 4-byte Local APIC Address + 4-byte
+    /// Flags, then the caller's own already-encoded entries appended
+    /// verbatim.
+    fn body(entries: &[u8]) -> alloc_free_vec {
+        // host_tests runs with std available, but keep this file's own
+        // style consistent with the rest of this module -- a small
+        // fixed-capacity buffer, not a real Vec import, for a helper
+        // this simple.
+        let mut v = alloc_free_vec::new();
+        v.extend_from_slice(&[0u8; 4]); // Local APIC Address (unused by parse_cpus)
+        v.extend_from_slice(&[0u8; 4]); // Flags (unused by parse_cpus)
+        v.extend_from_slice(entries);
+        v
+    }
+
+    /// Type 0 (Processor Local APIC) entry, the real 8-byte layout.
+    fn local_apic_entry(processor_uid: u8, apic_id: u8, enabled: bool) -> [u8; 8] {
+        let flags: u32 = if enabled { 1 } else { 0 };
+        let fb = flags.to_le_bytes();
+        [0, 8, processor_uid, apic_id, fb[0], fb[1], fb[2], fb[3]]
+    }
+
+    /// Type 9 (Processor Local x2APIC) entry, the real 16-byte layout:
+    /// type(1) len(1) reserved(2) x2apic_id(4) flags(4) processor_uid(4).
+    fn local_x2apic_entry(processor_uid: u32, apic_id: u32, enabled: bool) -> [u8; 16] {
+        let mut e = [0u8; 16];
+        e[0] = 9;
+        e[1] = 16;
+        let flags: u32 = if enabled { 1 } else { 0 };
+        e[4..8].copy_from_slice(&apic_id.to_le_bytes());
+        e[8..12].copy_from_slice(&flags.to_le_bytes());
+        e[12..16].copy_from_slice(&processor_uid.to_le_bytes());
+        e
+    }
+
+    // Minimal capacity-bounded Vec-like helper, `std`-free in spirit
+    // (this crate has std available for tests, but keeping this local
+    // avoids pulling in std::vec::Vec just for test fixture assembly).
+    #[allow(non_camel_case_types)]
+    struct alloc_free_vec {
+        buf: [u8; 256],
+        len: usize,
+    }
+    impl alloc_free_vec {
+        fn new() -> Self {
+            Self { buf: [0; 256], len: 0 }
+        }
+        fn extend_from_slice(&mut self, s: &[u8]) {
+            self.buf[self.len..self.len + s.len()].copy_from_slice(s);
+            self.len += s.len();
+        }
+    }
+    impl core::ops::Deref for alloc_free_vec {
+        type Target = [u8];
+        fn deref(&self) -> &[u8] {
+            &self.buf[..self.len]
+        }
+    }
+
+    #[test]
+    fn single_enabled_bsp_is_found() {
+        // Real single-CPU QEMU default (no -smp flag) -- one Type 0
+        // entry, APIC ID 0, enabled.
+        let b = body(&local_apic_entry(0, 0, true));
+        let mut out = [CpuEntry { apic_id: 0, processor_uid: 0, enabled: false }; 8];
+        let count = parse_cpus(&b, &mut out);
+        assert_eq!(count, 1);
+        assert_eq!(out[0], CpuEntry { apic_id: 0, processor_uid: 0, enabled: true });
+    }
+
+    #[test]
+    fn multiple_enabled_cpus_are_all_found_in_order() {
+        // Real -smp 4 shape: four Type 0 entries, APIC IDs 0..3.
+        let mut entries = alloc_free_vec::new();
+        for i in 0..4u8 {
+            entries.extend_from_slice(&local_apic_entry(i, i, true));
+        }
+        let b = body(&entries);
+        let mut out = [CpuEntry { apic_id: 0, processor_uid: 0, enabled: false }; 8];
+        let count = parse_cpus(&b, &mut out);
+        assert_eq!(count, 4);
+        for i in 0..4u32 {
+            assert_eq!(out[i as usize], CpuEntry { apic_id: i, processor_uid: i, enabled: true });
+        }
+    }
+
+    #[test]
+    fn a_disabled_processor_entry_is_still_reported_but_marked_disabled() {
+        // Real firmware behavior: a socket with no CPU installed can
+        // still get a MADT entry, flags bit 0 clear. Phase 9's own
+        // AP-bring-up step MUST NOT SIPI this APIC ID -- there may be
+        // no silicon there. Reported, not silently dropped, so a
+        // caller can log "seen but not usable" rather than nothing.
+        let b = body(&local_apic_entry(1, 4, false));
+        let mut out = [CpuEntry { apic_id: 0, processor_uid: 0, enabled: true }; 8];
+        let count = parse_cpus(&b, &mut out);
+        assert_eq!(count, 1);
+        assert_eq!(out[0].enabled, false);
+        assert_eq!(out[0].apic_id, 4);
+    }
+
+    #[test]
+    fn x2apic_entries_decode_the_same_shape_as_local_apic_entries() {
+        let b = body(&local_x2apic_entry(300, 300, true)); // APIC ID > 255 -- exactly why x2APIC entries exist
+        let mut out = [CpuEntry { apic_id: 0, processor_uid: 0, enabled: false }; 8];
+        let count = parse_cpus(&b, &mut out);
+        assert_eq!(count, 1);
+        assert_eq!(out[0], CpuEntry { apic_id: 300, processor_uid: 300, enabled: true });
+    }
+
+    #[test]
+    fn unrecognized_entry_types_are_skipped_via_their_own_length_not_misparsed() {
+        // A real MADT interleaves I/O APIC (type 1) and interrupt
+        // source override (type 2) entries among the processor
+        // entries -- this must skip them using their own declared
+        // length, not assume every entry is 8 bytes.
+        let mut entries = alloc_free_vec::new();
+        entries.extend_from_slice(&local_apic_entry(0, 0, true));
+        entries.extend_from_slice(&[1, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // fake 12-byte I/O APIC entry
+        entries.extend_from_slice(&local_apic_entry(1, 1, true));
+        let b = body(&entries);
+        let mut out = [CpuEntry { apic_id: 0, processor_uid: 0, enabled: false }; 8];
+        let count = parse_cpus(&b, &mut out);
+        assert_eq!(count, 2);
+        assert_eq!(out[0].apic_id, 0);
+        assert_eq!(out[1].apic_id, 1);
+    }
+
+    #[test]
+    fn output_capacity_bounds_are_respected() {
+        let mut entries = alloc_free_vec::new();
+        for i in 0..8u8 {
+            entries.extend_from_slice(&local_apic_entry(i, i, true));
+        }
+        let b = body(&entries);
+        let mut out = [CpuEntry { apic_id: 0, processor_uid: 0, enabled: false }; 3]; // room for 3, not 8
+        let count = parse_cpus(&b, &mut out);
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn truncated_entry_stops_the_walk_cleanly_instead_of_reading_out_of_bounds() {
+        // A real-world malformed/truncated MADT: a Type 0 entry claims
+        // length 8 but only 5 bytes actually remain. Must stop, not
+        // panic or read past the slice.
+        let mut entries = alloc_free_vec::new();
+        entries.extend_from_slice(&local_apic_entry(0, 0, true)); // one real, valid entry first
+        entries.extend_from_slice(&[0, 8, 1, 1]); // truncated second entry -- claims 8 bytes, only 4 given
+        let b = body(&entries);
+        let mut out = [CpuEntry { apic_id: 0, processor_uid: 0, enabled: false }; 8];
+        let count = parse_cpus(&b, &mut out);
+        assert_eq!(count, 1); // only the first, valid entry
+    }
+
+    #[test]
+    fn empty_body_is_zero_cpus_not_a_panic() {
+        let b: [u8; 0] = [];
+        let mut out = [CpuEntry { apic_id: 0, processor_uid: 0, enabled: false }; 8];
+        let count = parse_cpus(&b, &mut out);
+        assert_eq!(count, 0);
+    }
+}
