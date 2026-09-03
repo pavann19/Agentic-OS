@@ -347,6 +347,12 @@ Everything else is out of scope per §1.3.
 
 ---
 
+## 4.5. Research Track (Parallel To Phases, Never Blocking Them)
+
+Separate from the numbered phases below: `docs/NOVEL_CONCEPTS.md` proposes concepts aimed at genuine field-level novelty (not just new-to-this-codebase engineering), gated on the real prior-art review in `docs/PRIOR_ART.md`. Tracked in `docs/RESEARCH_TRACK.md`, built and verified in isolation (`host_tests`, zero boot-path wiring) per this project's standing discipline for unproven ideas -- same path `kernel_common::driver_registry` took. Never inserted into the phase numbering below, and never a dependency of it: the phases are evidence-gated infrastructure the OS needs regardless of whether any research-track concept succeeds. A concept promoted out of the research track becomes a normal, numbered deliverable at that time, decided then -- not reserved for in advance.
+
+---
+
 ## 5. Phases
 
 Each phase states its dependency, its deliverables, the exit criteria that must be *demonstrated*, and the evidence artifact that demonstrates them. A phase is not complete because the code exists; it is complete when the evidence exists.
