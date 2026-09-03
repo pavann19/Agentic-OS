@@ -1,9 +1,9 @@
 # Agentic OS — Build Roadmap
 
-**Status:** Proposed — requires sign-off on Section 2 before Phase 0 begins
-**Date:** 2026-08-27
+**Status:** Phases 0–8 complete and evidenced (see `docs/PROGRESS.md`); Phases 9–15 proposed — requires sign-off on ADR-007/ADR-008 (§2) before Phase 11 or 12 specifically, no new sign-off needed to start Phase 9 or 10
+**Date:** 2026-08-27; Phases 9–15 added 2026-09-03
 **Supersedes:** the previous `docs/ROADMAP.md` (preserved in git history at commit `6818872`)
-**Scope:** ground-up construction plan derived from the code actually in this repository
+**Scope:** ground-up construction plan derived from the code actually in this repository, extended from "Tier 1/Tier 2 code-complete" (original Phase 8 endpoint) through to "a real, daily-driveable OS" (Phase 15)
 
 ---
 
@@ -38,6 +38,14 @@ These are not deferred. They are out of scope for the foreseeable roadmap, and a
 - A desktop environment, window manager, or graphical application framework.
 - Multi-architecture support. `x86_64` only until the entire roadmap below is complete.
 - Any model inference, prompt handling, or agent reasoning inside the kernel. Ever.
+
+#### 1.3.1 Two of these non-goals are deliberately reversed starting at Phase 11 — with their own sign-off, not silently
+
+"Real, daily-driveable OS" (Phases 9–15, added below) genuinely conflicts with two of the five bullets above: hardware breadth and a graphical surface. Rather than quietly drop them or pretend Phase 8's scope always included them, the reversal is named explicitly, each with its own ADR (ADR-007, ADR-008 in §2), because that is what this document's own review discipline (§8) requires of any change this consequential.
+
+**What stays non-negotiable, unchanged, forever:** binary compatibility with Linux/Windows/POSIX applications is still rejected — a GUI and broader hardware support are built on the same capability ABI (ADR-003/004), never a POSIX compatibility shim. Multi-architecture support and in-kernel model inference remain out of scope through the entire roadmap, Phase 15 included.
+
+**What changes and why:** a real OS people can point at next to Linux, macOS, or Windows needs to run on more than one specific laptop, and needs a visual surface — refusing both forever would cap this project at "an impressive research kernel," not the stated destination. Phase 11 (§5) reverses the hardware-breadth non-goal, narrowly — a validated matrix of several real machines, not "arbitrary consumer hardware," and every addition still goes through the Phase 6 driver-synthesis loop's containment guarantees, never a carve-out. Phase 12 reverses the GUI non-goal, but as a genuinely agent-native visual surface (every window and widget a typed, capability-scoped, introspectable object per Phase 5's own discipline extended to pixels) rather than a conventional desktop environment ported in from outside that model.
 
 ---
 
@@ -225,6 +233,64 @@ Concretely, from Phase 2 onward:
 **Decision:** Intel VT-d / AMD-Vi support, with per-device DMA domains, is a hard prerequisite for Phase 6. A driver process gets a DMA domain covering exactly its own buffers. Any agent-synthesized driver that runs before this exists — even in a VM — is running without the isolation the design claims.
 
 **Consequences:** Phase 3 must include IOMMU bring-up. Hardware without an IOMMU is out of scope for agent-synthesized drivers, permanently. This is a real hardware requirement to state before choosing the Tier 2 physical machine (§4).
+
+---
+
+### ADR-007: Hardware breadth is grown through Tier 3, never opened wide
+
+**Status:** Proposed — gates Phase 11
+**Context:** §1.3 rejects "broad hardware compatibility across arbitrary consumer laptops and desktops," correctly, for Phases 0–8: chasing breadth before the substrate is trustworthy is how from-scratch OS projects die (§4's own words). But a real OS that only ever boots one specific ThinkPad is not a real OS — it is a proof of concept with a hardware dependency. The tension is real and both sides of it are correct at different points in the roadmap.
+
+#### Options Considered
+
+**Option A: Never revisit §1.3 — stay Tier 1 + one Tier 2 machine forever.**
+Pros: zero risk of the breadth trap this project explicitly rejected. Cons: permanently caps the project below its own stated destination ("a real bootable OS like Linux, Mac, Windows"); Tier 2's single-machine validation is not evidence the OS works on hardware in general, only on that hardware.
+
+**Option B: Open hardware support immediately and broadly once Phase 8 closes.**
+Pros: fastest path to breadth. Cons: exactly the failure mode §4 warns about — driver count explodes faster than the synthesis loop's (Phase 6) containment guarantees can be re-validated per device, and "supported" quietly comes to mean "compiles," not "verified."
+
+**Option C: Grow a bounded, explicitly tracked Tier 3 matrix (a handful of real, named machines spanning at least two chipset generations and both a laptop and a desktop class), every addition going through the same Phase 6 synthesis-and-containment discipline already proven at Tier 2, with the matrix published and narrow rather than implied to be universal.**
+Pros: real breadth, without abandoning the discipline that got this project this far; "supported" keeps meaning what `docs/SUPPORTED_HARDWARE.md` has meant since Phase 8 — narrow, honest, evidenced. Cons: slower than Option B; the matrix will always be smaller than Linux's, and that must stay stated, not hidden.
+
+#### Decision
+
+**Option C.** Tier 3 is a small, named, published list — not an open compatibility claim. Every device added to it is added the same way NVMe/AHCI/e1000 were added to Tier 2: spec-driven or synthesis-loop-driven, IOMMU-contained, evidenced.
+
+#### Consequences
+
+- **Easier:** a real, defensible "runs on N real machines" claim; the driver-synthesis loop (Phase 6) gets real, repeated exercise instead of staying a one-shot demonstration.
+- **Harder:** every new machine is real work, not a checkbox; the matrix must be maintained or it silently rots into a false claim, which §8's review discipline treats as seriously as any other unevidenced claim.
+- **Revisit:** if the synthesis loop's failure rate on genuinely novel hardware (not just genuinely novel devices on known chipsets) turns out too high to sustain Option C's pace, that is itself a finding worth a written retrospective, not silent breadth-capping.
+
+---
+
+### ADR-008: A visual surface is capability-native, not a ported desktop environment
+
+**Status:** Proposed — gates Phase 12
+**Context:** §1.3 rejects "a desktop environment, window manager, or graphical application framework" for the same reason it rejects POSIX compatibility — those are designed for ambient-authority, human-driven systems, and porting the *shape* of one (even with a from-scratch implementation) would reintroduce exactly what ADR-003 exists to prevent: a window that can read another window's buffer because it happens to share a display, the GUI equivalent of ambient authority.
+
+#### Options Considered
+
+**Option A: No GUI, ever — stay serial-shell-only.**
+Pros: avoids the risk entirely. Cons: "a real OS like Linux, Mac, Windows" without a display server is not a credible claim; it caps the project below the destination the user has now explicitly set.
+
+**Option B: Port or closely imitate a conventional compositor/window-manager architecture (a `Wayland`-shaped or `X11`-shaped design), implemented from scratch to satisfy §1.2's "from scratch" bar.**
+Pros: mature, well-understood architecture; lots of reference material. Cons: those architectures assume a trusted compositor mediating cooperating clients under a shared-desktop threat model — not the "an agent process is adversarial until proven otherwise" threat model this OS has held since Phase 5. It would be the first subsystem in the whole roadmap built to a different security model than everything around it.
+
+**Option C: A compositor that is itself an ordinary capability-holding user-space service (consistent with ADR-001), where every window, surface, and input event is a typed, capability-scoped, audit-logged object — extending Phase 5's introspection API to pixels and input, not bolting a UI on beside it.**
+Pros: a misbehaving window is contained exactly like a misbehaving driver or agent already is; an agent manipulates the UI through the same typed interface Phase 5 already requires for everything else — no pixel-scraping, ever, which is also just a straightforwardly better design for an agent-native OS. Cons: real, novel design work — there is no reference implementation of a capability-native compositor to crib from; slower than B.
+
+#### Decision
+
+**Option C.** The display server is a service like any other in this architecture, not a special case. "No pixel-scraping" is a hard requirement carried over from Phase 5's ADR-implied discipline, not a Phase 12 invention.
+
+#### Consequences
+
+- **Easier:** GUI security inherits everything Phases 2–5 already built, rather than needing its own parallel security model; an agent driving the UI is exercising the exact same typed-invocation path a human-typed shell command does (Phase 7's own equivalence requirement extends naturally to the GUI).
+- **Harder:** no shortcut through an existing compositor design; input routing, damage tracking, and GPU buffer sharing all need capability-scoped designs from zero.
+- **Revisit:** never, in practice, for the same reason ADR-002 is effectively permanent after Phase 1 — the security model a GUI is built on cannot be swapped out once applications exist that depend on it (Phase 13).
+
+**Consequences of both ADR-007 and ADR-008 together:** Phases 9–10 (SMP, networking) do not depend on either and can proceed under unchanged rules. Phases 11 and 12 are the first work in this entire roadmap that requires revisiting a signed-off constraint from §1 — treat their sign-off with the same weight §2's original five decisions carried, not as a routine phase-start.
 
 ---
 
@@ -513,6 +579,177 @@ Deliberately placed here, not earlier. Every prerequisite that makes agent-gener
 
 ---
 
+**Phase 8 is where the original roadmap ended.** What follows (Phases 9–15) is new scope, added on request, to carry the project from "Tier 1/Tier 2 verified, code-complete" to "a real, daily-driveable OS" — the bar Linux, macOS, and Windows actually clear. None of it was implied by Phase 8's own exit criteria; §6's dependency structure is extended, not reinterpreted.
+
+---
+
+### Phase 9 — Multi-Core Execution (SMP)
+
+**Depends on:** Phase 8. **Blocks:** Phases 10–15.
+
+Every phase through 8 was explicitly single-core (§6, old dependency diagram; `docs/SUPPORTED_HARDWARE.md`'s own stated exclusion). No real machine anyone would call "a real OS" runs on one core today. This is the first new-scope phase and it is foundational to all the others — a network stack, a compositor, and a package manager all assume they can run concurrently with everything else, which single-core cooperative-ish scheduling does not actually give you under load.
+
+**Deliverables**
+
+1. AP (application processor) bring-up via the real INIT-SIPI-SIPI sequence per the MP/ACPI MADT tables already parsed since Phase 3's ACPI work — every core the firmware reports, not an assumed count.
+2. Per-CPU kernel data (GDT/TSS/IST/local scheduler state) — no shared mutable kernel state without an explicit lock or per-CPU duplication.
+3. SMP-safe scheduler: per-core run queues, real load balancing (even a simple periodic rebalance is acceptable — starvation is not), IPI-based reschedule.
+4. TLB shootdown via IPI on every cross-core mapping change — a correctness requirement, not an optimization, given Phase 0's per-page permission model.
+5. Every existing shared kernel structure from Phases 0–8 audited and made SMP-safe: the capability table (Phase 2), the audit log (ADR-005), IOMMU domain assignment (ADR-006/Phase 3), the PMM/heap (Phase 0). This is real, unglamorous, load-bearing work — a race here undermines every safety guarantee every earlier phase built.
+6. `kernel_common`-style host-side tests for anything in the above that is pure logic (lock-free structures, per-CPU index math) — same discipline as every phase before it.
+
+**Exit criteria**
+
+- All firmware-reported cores are brought up and independently execute real work — demonstrated by a per-core heartbeat log with distinct APIC IDs, not just a core count printed once.
+- A deliberate cross-core race (two cores contending the same capability-table entry, injected the same way Phase 6's fault-injection harness injects driver faults) is caught, not silently corrupting state.
+- TLB shootdown is demonstrated: a mapping torn down on one core is provably unusable on another core within a bounded time, not "eventually."
+- The full Phase-8 regression suite still passes, now running under SMP, with no new flakiness introduced (a real risk — timing-sensitive tests written under single-core assumptions are exactly what breaks first).
+
+**Evidence:** per-core heartbeat log with APIC IDs; race-injection soak-test transcript (pass and a captured pre-fix failure, same "prove the bug, then prove the fix" discipline the IOMMU per-bus bug used); TLB shootdown timing log; full regression suite re-run under SMP.
+
+---
+
+### Phase 10 — Network Stack And Real Connectivity
+
+**Depends on:** Phase 9. **Blocks:** Phases 12–15 (Phase 11 does not depend on this one and may run in parallel).
+
+Phase 6 already proved a NIC driver (`virtio-net`, then real `e1000`) can move a frame. Nothing above the link layer exists yet — no IP, no TCP, no sockets, no name resolution. A real OS is a networked OS.
+
+**Deliverables**
+
+1. A real, capability-scoped socket abstraction — a process holds a socket capability the way it holds any other object (ADR-003), never an ambient "the network is just there" model.
+2. IPv4, ARP, ICMP, UDP, and TCP (a real, spec-compliant TCP — congestion control, retransmission, the actual state machine — not a toy subset that only demos well) as a user-space network-stack service, per ADR-001.
+3. DNS resolution as a capability-scoped client of the stack, not a kernel primitive.
+4. The stack itself treated as a driver-adjacent process: crash-and-restart per Phase 3's device-manager discipline, no special-cased trust.
+5. Loopback and multi-NIC routing, since Tier 3 (Phase 11) machines will not all have one NIC.
+
+**Exit criteria**
+
+- A real HTTP GET against an external, non-QEMU-emulated server succeeds and the response is byte-verified.
+- Two independent Agentic OS instances (two QEMU guests, then two Tier 2/3 machines) exchange TCP traffic directly.
+- Revoking a process's socket capability mid-connection terminates its access immediately — demonstrated adversarially, same bar Phase 2's capability revocation was held to.
+- The network-stack process is killed mid-transfer; it restarts; no other process's sockets are affected.
+
+**Evidence:** real external HTTP transcript with byte-verified response; two-machine TCP exchange log; socket-revocation-mid-connection transcript; network-stack crash-and-restart log.
+
+---
+
+### Phase 11 — Hardware Breadth (Tier 3) And Power Management
+
+**Depends on:** Phase 9. Gated by ADR-007 sign-off (§2) — do not start without it.
+
+**Deliverables**
+
+1. A published, bounded Tier 3 hardware matrix (§4 is extended, not replaced) — a handful of real, named machines spanning at least two chipset generations and both a laptop and a desktop class, chosen and grown the same way Tier 2 was: IOMMU-gated, evidenced, never assumed.
+2. USB host controller support (xHCI) plus HID class drivers (keyboard, mouse, mass storage) built through the Phase 6 synthesis loop against the real xHCI spec — the same "spec plus config space, contained by IOMMU" discipline used for every driver since Phase 6, now exercised repeatedly instead of once.
+3. ACPI power management: CPU C-states/P-states, and a real S3 suspend/resume path — state genuinely torn down and restored, not merely "the screen goes black."
+4. Hot-plug device support (USB primarily) — the device manager (Phase 3) already restarts crashed drivers; this extends it to devices that appear and disappear at runtime, not just at boot.
+5. `docs/SUPPORTED_HARDWARE.md` grows a real Tier 3 section with the same evidence bar Tier 1/Tier 2 sections have carried since Phase 8 — narrow and honest, explicitly not implying anything about hardware not on the list.
+
+**Exit criteria**
+
+- The OS boots to shell on every machine in the published Tier 3 matrix, with storage, input, and display working on each — individually evidenced, not asserted once and generalized.
+- A USB keyboard and mouse work through the real xHCI/HID path, with the same driver-crash-and-restart guarantee Phase 3 established for built-in devices.
+- A suspend/resume cycle preserves running process state and network connections — demonstrated, not assumed from the ACPI call succeeding.
+- A device hot-plugged mid-session is detected, bound to a driver, and usable without a reboot; unplugging it does not fault the system.
+
+**Evidence:** per-machine boot log for every Tier 3 entry; USB HID input transcript; suspend/resume state-preservation transcript; hot-plug attach/detach log.
+
+---
+
+### Phase 12 — Display Server And Agent-Native Visual Surface
+
+**Depends on:** Phase 9 (SMP — a compositor without it is a bad idea) and Phase 3 (GPU/framebuffer driver path). Gated by ADR-008 sign-off (§2) — do not start without it. **Blocks:** Phase 13.
+
+**Deliverables**
+
+1. A compositor as an ordinary capability-holding user-space service (ADR-008) — window and surface objects are typed, capability-scoped, and enumerable through the same introspection model Phase 5 built for everything else.
+2. GPU 2D-acceleration and framebuffer drivers grown through the Phase 6 synthesis loop, IOMMU-contained like every other driver — 3D acceleration is explicitly out of scope for this phase (a real, separate, much larger undertaking; do not silently fold it in).
+3. Input routing (keyboard/mouse/touch, from Phase 3's PS/2 and Phase 11's USB HID) to the focused, capability-holding window — a window cannot receive input for a surface it does not hold a capability to.
+4. A minimal native UI toolkit against the capability ABI (ADR-004) — text rendering, basic widgets — enough to build the reference apps Phase 13 needs, not a general framework.
+5. The typed UI object model extends Phase 5's agent introspection API: an agent enumerates windows, reads their content as structured data, and issues input events through the same typed interface — explicitly never pixel-scraping or OCR-over-screenshot as a supported path.
+
+**Exit criteria**
+
+- Multiple windowed processes run concurrently with provably isolated surfaces — one process cannot read another's window buffer, demonstrated adversarially, the GUI analogue of Phase 1's process-memory-isolation exit criterion.
+- An agent process manipulates a window (reads its content, sends input) entirely through the typed API, with an audit trail identical in kind to any other capability invocation (ADR-005) — no screen-scraping code path exists to fall back to.
+- A crashed compositor is restarted by the device manager without taking down running application processes' own state (their windows may need to be recreated — document exactly what survives and what doesn't, honestly).
+- Human keyboard/mouse input reaches the correct focused window with no cross-window leakage.
+
+**Evidence:** window-isolation adversarial-test transcript; agent-driven UI session log showing typed API calls only; compositor crash-and-recover transcript; input-routing correctness log.
+
+---
+
+### Phase 13 — Native Application Platform And Package Ecosystem
+
+**Depends on:** Phase 12 (and Phase 10 for any app requiring network access).
+
+A GUI and a network stack with nothing to run on them is not yet a usable OS. This phase is what makes it one, on this OS's own terms — explicitly not POSIX/Linux/Windows binary compatibility (§1.3, unchanged).
+
+**Deliverables**
+
+1. An application manifest format declaring required capabilities up front — install-time, explicit, least-privilege by construction (closer to a mobile-OS permission model than classic desktop ambient trust), consistent with ADR-003 from the very first syscall this OS ever had.
+2. A package store/installer service, itself an ordinary capability-holding process — no special ambient install-time privilege.
+3. A native SDK/toolchain targeting the real capability ABI (ADR-004's library, extended, not replaced) — documented well enough that an app can be built without reading kernel source.
+4. A small set of reference applications built entirely on the public ABI, proving the platform is usable beyond the shell: a file manager, a terminal emulator (fronting Phase 7's shell), a text editor, and a simple network client (using Phase 10's stack). These are dogfooding, not filler — every one of them should surface real ABI gaps the way `virtio_blk_driver` surfaced real toolchain bugs.
+5. Update/versioning for installed apps, reusing Phase 8's reproducible-build discipline for app packages, not inventing a separate one.
+
+**Exit criteria**
+
+- Installing an app grants exactly the capabilities its manifest declared, nothing ambient — an app that tries to use an undeclared capability is denied, demonstrated adversarially.
+- The SDK builds and runs a genuinely new application (not one of the four reference apps) without any kernel or platform-service change.
+- All four reference apps run concurrently, each capability-isolated from the others, exercising GUI, storage, and network simultaneously.
+- An app update is rejected if its build is not reproducible against its declared source, same evidence bar as Phase 8's release image.
+
+**Evidence:** capability-manifest enforcement/denial transcript; third-party-style SDK app build-and-run log; concurrent multi-app isolation transcript; app-update reproducibility check.
+
+---
+
+### Phase 14 — Multi-User, Update Integrity, And Hardware Root Of Trust
+
+**Depends on:** Phase 13.
+
+**Deliverables**
+
+1. A multi-user session model — still capability-based throughout, never uid/gid ambient authority (ADR-003 holds all the way up the stack, not just at the syscall layer).
+2. Secure Boot chain integration with the existing UEFI boot path (`boot_rs`), plus measured boot into a TPM 2.0 PCR log where hardware provides one — narrow, honest support (Tier 2/3 machines with a TPM only; state plainly which don't).
+3. A signed release/update mechanism with rollback, built on Phase 8's reproducible-build hashes as the integrity baseline — an update is a verified artifact, not a trusted network fetch.
+4. Full-disk/object-store encryption (extending Phase 4's object store), keyed off the same hardware root of trust where available.
+5. Opt-in, local-first crash/panic telemetry that feeds back into the Phase 6 synthesis loop's own failure-capture pipeline — this OS already has a real structured-failure-capture discipline; extending it to end-user crash reports is reusing that discipline, not building a new one.
+
+**Exit criteria**
+
+- Two local users' data and running processes are provably capability-isolated from each other — demonstrated adversarially, same bar every isolation claim in this roadmap has been held to.
+- An unsigned or tampered update image is rejected before it is ever applied.
+- A tampered boot chain (modified bootloader or kernel image) is detected and refused to boot, with measured-boot evidence where TPM hardware is present.
+- Full-disk encryption round-trips a reboot with data byte-identical, same evidence bar as Phase 4's original write/reboot/verify test, now with encryption in the path.
+
+**Evidence:** multi-user isolation adversarial transcript; rejected-unsigned-update log; tampered-boot-chain refusal log with TPM PCR evidence where applicable; encrypted write/reboot/verify transcript.
+
+---
+
+### Phase 15 — Long-Term Stability And Self-Hosting
+
+**Depends on:** Phase 14. **This is the exit criterion for the entire roadmap — the phase where "a real, daily-driveable OS" stops being a claim and becomes a demonstrated property.**
+
+**Deliverables**
+
+1. A self-hosting toolchain: Agentic OS builds its own next release image while running natively on Agentic OS itself — closing the bootstrap loop that every cross-compiled phase before this one depended on.
+2. Extended soak testing: multi-day continuous uptime under a real mixed workload (network + storage + GUI + agent activity concurrently), not a clean-boot-and-shut-down test like every `scripts/test-*.ps1` before it.
+3. A documented compatibility and regression policy — what "supported" means going forward, how a Tier 3 machine or a driver gets added or removed from the matrix, and what breaks that policy (mirrors the honesty discipline `docs/SUPPORTED_HARDWARE.md` has held since Phase 8, made explicit as a standing policy rather than a per-release document).
+4. A real out-of-box installer for Tier 2/3 hardware — partitioning, filesystem creation, bootloader install — built on this OS's own tooling, not a separate one-off script.
+5. A final, honest public compatibility matrix: exactly what this OS supports, next to an explicit statement of what it still does not (multi-architecture, POSIX binary compatibility, and in-kernel model inference remain permanently out of scope per §1.3, unchanged through this entire phase).
+
+**Exit criteria**
+
+- Agentic OS builds its own release image, running natively, and the output is verified reproducible against the cross-compiled release from Phase 8's original toolchain — the strongest form of "this OS is real" this roadmap can produce.
+- An N-day (minimum 7, target 30) continuous soak run under the real mixed workload completes with zero unexplained crashes — every crash either explained and fixed, or explained and documented as a known, tracked limitation. No unexplained crash is waved away as "probably fine."
+- A fresh install onto Tier 2/3 hardware via the real installer, from nothing, boots to a usable multi-app GUI session — the single demonstration that most directly answers "is this a real OS."
+
+**Evidence:** self-hosted build reproducibility comparison; multi-day soak-test log with full crash accounting; end-to-end fresh-install-to-usable-desktop transcript on real hardware.
+
+---
+
 ## 6. Dependency Structure
 
 ```
@@ -545,9 +782,32 @@ ADR sign-off
      └──────┬───────┘
             ▼
         Phase 8 ── Hardware Consolidation + Release
+            │
+            ▼
+        Phase 9 ── SMP (Multi-Core) ──────────── (foundational to everything below)
+            │
+     ┌──────┼──────────────┐
+     ▼      ▼              ▼
+  Phase 10  Phase 11     (Phase 11 does not need Phase 10)
+  Network   Hardware
+  Stack     Breadth (Tier 3)
+  (ADR-007) │ ADR-007 gate
+     │      │
+     └──┬───┘
+        ▼
+    Phase 12 ── Display Server (ADR-008 gate, needs Phase 9 + Phase 3's GPU path)
+        │
+        ▼
+    Phase 13 ── Native App Platform (needs Phase 10 for network-capable apps)
+        │
+        ▼
+    Phase 14 ── Multi-User + Update Integrity + Root of Trust
+        │
+        ▼
+    Phase 15 ── Long-Term Stability + Self-Hosting ── (the roadmap's exit criterion)
 ```
 
-There is no parallel track that skips ahead. Phase 6 in particular cannot be pulled forward: it depends on containment guarantees established in Phases 2 and 3, and running it without them means running agent-written code with no isolation whatsoever.
+There is no parallel track that skips ahead. Phase 6 in particular cannot be pulled forward: it depends on containment guarantees established in Phases 2 and 3, and running it without them means running agent-written code with no isolation whatsoever. The same rule applies below Phase 8: Phase 11 cannot start without ADR-007 sign-off, and Phase 12 cannot start without ADR-008 sign-off — both are named exceptions to §1's non-goals, not routine phase transitions, and skipping the sign-off step to save time reintroduces exactly the risk §4 and ADR-001 already warned about.
 
 ---
 
@@ -561,6 +821,8 @@ There is no parallel track that skips ahead. Phase 6 in particular cannot be pul
 | 4 | ADR-006 — IOMMU before agent-generated drivers | Adopt | Blocks Phase 6 entirely; determines Tier 2 hardware eligibility |
 | 5 | Tier 2 physical machine | Choose at Phase 3, gated on IOMMU + early serial | Low if deferred to Phase 3; high if hardware is bought before the criteria are set |
 | 6 | Filesystem: implement documented format vs. design new | Implement a documented format | Medium — a custom format costs debugging tools you would have to write |
+| 7 | ADR-007 — reverse the hardware-breadth non-goal, narrowly (Tier 3) | Adopt, bounded to a published matrix | Blocks Phase 11 entirely; deciding late just delays "runs on more than one machine," no compounding cost |
+| 8 | ADR-008 — reverse the GUI non-goal, as a capability-native compositor only | Adopt Option C, reject Option B (ported conventional compositor architecture) | Blocks Phase 12 entirely; choosing Option B late would mean a second, incompatible security model bolted onto the OS — effectively as permanent a mistake as getting ADR-002 wrong |
 
 ---
 
