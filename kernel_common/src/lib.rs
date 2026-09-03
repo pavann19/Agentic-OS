@@ -6,6 +6,7 @@
 #![no_std]
 
 pub mod audit_ring;
+pub mod authority_graph; // research track, docs/RESEARCH_TRACK.md -- pure logic, NOT wired into kernel_rs
 pub mod bitmap;
 // Experimental, isolated (see the module's own doc for the full
 // discipline this follows): real, verified via host_tests, NOT wired

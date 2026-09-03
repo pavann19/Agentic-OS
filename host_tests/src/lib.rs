@@ -710,3 +710,196 @@ mod madt_tests {
         assert_eq!(count, 0);
     }
 }
+
+#[cfg(test)]
+mod authority_graph_tests {
+    // Research track (docs/RESEARCH_TRACK.md, docs/NOVEL_CONCEPTS.md
+    // section 1): real, isolated verification that one authority
+    // structure can be the sole source for both a CPU page-table-shaped
+    // projection and a VT-d IOMMU-table-shaped projection. Zero QEMU,
+    // zero kernel_rs involvement -- exactly the isolation discipline
+    // this project requires before any integration decision.
+
+    use kernel_common::authority_graph::{
+        grant, is_reachable, project_iommu_table, project_page_table, Entry, Grant, Principal,
+    };
+
+    fn cpu(id: u32) -> Principal {
+        Principal::CpuProcess(id)
+    }
+
+    fn pci(bus: u8, device: u8, function: u8) -> Principal {
+        Principal::PciDevice { bus, device, function }
+    }
+
+    #[test]
+    fn a_fresh_grant_is_reachable_by_both_projections() {
+        let mut graph: [Option<Grant>; 8] = [None; 8];
+        assert!(grant(
+            &mut graph,
+            Grant { principal: cpu(1), phys_base: 0x10_0000, len: 4096, writable: true, executable: false }
+        ));
+
+        let mut cpu_out = [Entry { phys_page: 0, writable: false, executable: false }; 8];
+        let cpu_count = project_page_table(&graph, cpu(1), &mut cpu_out);
+        assert_eq!(cpu_count, 1);
+        assert_eq!(cpu_out[0].phys_page, 0x10_0000);
+        assert!(cpu_out[0].writable);
+
+        assert!(is_reachable(&graph, cpu(1), 0x10_0000));
+    }
+
+    #[test]
+    fn projections_are_filtered_by_principal_not_shared_across_principals() {
+        let mut graph: [Option<Grant>; 8] = [None; 8];
+        grant(&mut graph, Grant { principal: cpu(1), phys_base: 0x1000, len: 4096, writable: true, executable: false });
+        grant(&mut graph, Grant { principal: pci(0, 3, 0), phys_base: 0x2000, len: 4096, writable: true, executable: false });
+
+        let mut out = [Entry { phys_page: 0, writable: false, executable: false }; 8];
+        let count = project_page_table(&graph, cpu(1), &mut out);
+        assert_eq!(count, 1);
+        assert_eq!(out[0].phys_page, 0x1000);
+
+        let count2 = project_iommu_table(&graph, pci(0, 3, 0), &mut out);
+        assert_eq!(count2, 1);
+        assert_eq!(out[0].phys_page, 0x2000);
+
+        // A device's own IOMMU projection must never include a CPU
+        // process's grant, and vice versa.
+        assert_eq!(project_iommu_table(&graph, cpu(1), &mut out), 0);
+        assert_eq!(project_page_table(&graph, pci(0, 3, 0), &mut out), 0);
+    }
+
+    /// THE falsifiable test from docs/NOVEL_CONCEPTS.md section 1.4:
+    /// revoke a grant and show it is gone from BOTH projections,
+    /// verified independently for each, using only the single `revoke`
+    /// call -- no separate "update the IOMMU side too" step exists to
+    /// forget, because there is no such step to call.
+    #[test]
+    fn revocation_removes_the_grant_from_both_projections_atomically() {
+        use kernel_common::authority_graph::revoke;
+
+        let mut graph: [Option<Grant>; 8] = [None; 8];
+        let dev = pci(0, 31, 2); // real AHCI B/D/F this project's own iommu.rs uses
+        grant(&mut graph, Grant { principal: dev, phys_base: 0x81_0000, len: 4096, writable: true, executable: false });
+
+        assert!(is_reachable(&graph, dev, 0x81_0000));
+        let mut out = [Entry { phys_page: 0, writable: false, executable: false }; 8];
+        assert_eq!(project_iommu_table(&graph, dev, &mut out), 1);
+
+        let removed = revoke(&mut graph, dev, 0x81_0000);
+        assert_eq!(removed, 1);
+
+        // Both projections, independently re-queried, must show it gone.
+        assert_eq!(project_iommu_table(&graph, dev, &mut out), 0);
+        assert_eq!(project_page_table(&graph, dev, &mut out), 0);
+        assert!(!is_reachable(&graph, dev, 0x81_0000));
+    }
+
+    /// Direct regression test for the real historical bug shape
+    /// documented in kernel_rs::iommu.rs's own module doc: a SECOND
+    /// device assigned after a FIRST must never silently orphan the
+    /// first's own grant. Here: revoking device B's grant must leave
+    /// device A's grant completely intact in both projections.
+    #[test]
+    fn graph_bug_regression_matches_the_real_historical_iommu_bug_shape() {
+        use kernel_common::authority_graph::revoke;
+
+        let mut graph: [Option<Grant>; 8] = [None; 8];
+        let dev_a = pci(0, 3, 0); // e.g. virtio-blk, first device assigned on bus 0
+        let dev_b = pci(0, 31, 2); // e.g. AHCI, second device assigned on the SAME bus
+
+        grant(&mut graph, Grant { principal: dev_a, phys_base: 0x20_0000, len: 4096, writable: true, executable: false });
+        grant(&mut graph, Grant { principal: dev_b, phys_base: 0x30_0000, len: 4096, writable: true, executable: false });
+
+        // Revoking B must not touch A at all.
+        revoke(&mut graph, dev_b, 0x30_0000);
+
+        let mut out = [Entry { phys_page: 0, writable: false, executable: false }; 8];
+        assert_eq!(project_iommu_table(&graph, dev_a, &mut out), 1, "device A's grant was orphaned by an unrelated device's revocation -- the exact real bug this design forecloses");
+        assert_eq!(out[0].phys_page, 0x20_0000);
+        assert!(is_reachable(&graph, dev_a, 0x20_0000));
+        assert!(!is_reachable(&graph, dev_b, 0x30_0000));
+    }
+
+    #[test]
+    fn a_multi_page_range_projects_one_entry_per_page() {
+        let mut graph: [Option<Grant>; 8] = [None; 8];
+        grant(&mut graph, Grant { principal: cpu(2), phys_base: 0x40_0000, len: 3 * 4096, writable: false, executable: true });
+
+        let mut out = [Entry { phys_page: 0, writable: false, executable: false }; 8];
+        let count = project_page_table(&graph, cpu(2), &mut out);
+        assert_eq!(count, 3);
+        assert_eq!(out[0].phys_page, 0x40_0000);
+        assert_eq!(out[1].phys_page, 0x40_1000);
+        assert_eq!(out[2].phys_page, 0x40_2000);
+        assert!(out[0].executable);
+        assert!(!out[0].writable);
+    }
+
+    #[test]
+    fn a_non_page_aligned_length_rounds_up_not_down() {
+        // 1 byte over one page must still produce 2 entries -- rounding
+        // DOWN would leave part of a granted range unmapped (a real
+        // under-grant bug), never acceptable even though it's the
+        // "safer-looking" direction.
+        let mut graph: [Option<Grant>; 8] = [None; 8];
+        grant(&mut graph, Grant { principal: cpu(3), phys_base: 0x50_0000, len: 4097, writable: true, executable: false });
+
+        let mut out = [Entry { phys_page: 0, writable: false, executable: false }; 8];
+        assert_eq!(project_page_table(&graph, cpu(3), &mut out), 2);
+    }
+
+    #[test]
+    fn grant_capacity_is_respected_not_silently_overrun() {
+        let mut graph: [Option<Grant>; 2] = [None; 2];
+        assert!(grant(&mut graph, Grant { principal: cpu(1), phys_base: 0x1000, len: 4096, writable: true, executable: false }));
+        assert!(grant(&mut graph, Grant { principal: cpu(1), phys_base: 0x2000, len: 4096, writable: true, executable: false }));
+        assert!(!grant(&mut graph, Grant { principal: cpu(1), phys_base: 0x3000, len: 4096, writable: true, executable: false }));
+    }
+
+    #[test]
+    fn projection_output_capacity_is_respected_not_silently_overrun() {
+        let mut graph: [Option<Grant>; 8] = [None; 8];
+        grant(&mut graph, Grant { principal: cpu(1), phys_base: 0x1000, len: 5 * 4096, writable: true, executable: false });
+
+        let mut out = [Entry { phys_page: 0, writable: false, executable: false }; 3]; // room for 3, not 5
+        let count = project_page_table(&graph, cpu(1), &mut out);
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn revoking_a_nonexistent_grant_is_a_clean_noop_not_an_error() {
+        let mut graph: [Option<Grant>; 4] = [None; 4];
+        use kernel_common::authority_graph::revoke;
+        assert_eq!(revoke(&mut graph, cpu(9), 0xdead_0000), 0);
+    }
+
+    #[test]
+    fn adversarial_repeated_grant_revoke_cycles_never_leave_a_stale_projection() {
+        // Adversarial per docs/NOVEL_CONCEPTS.md section 1.4: mutate
+        // through many cycles and assert, after every single mutation,
+        // that both projections and is_reachable agree with each
+        // other and with the graph's actual live contents. No cycle
+        // should ever leave a projection stale.
+        use kernel_common::authority_graph::revoke;
+
+        let mut graph: [Option<Grant>; 4] = [None; 4];
+        let dev = pci(1, 0, 0);
+        let mut out = [Entry { phys_page: 0, writable: false, executable: false }; 4];
+
+        for i in 0..50u64 {
+            let phys = 0x9000_0000 + i * 0x1000;
+            grant(&mut graph, Grant { principal: dev, phys_base: phys, len: 4096, writable: true, executable: false });
+            assert!(is_reachable(&graph, dev, phys));
+            assert_eq!(project_iommu_table(&graph, dev, &mut out), 1);
+            assert_eq!(out[0].phys_page, phys);
+
+            let removed = revoke(&mut graph, dev, phys);
+            assert_eq!(removed, 1);
+            assert!(!is_reachable(&graph, dev, phys));
+            assert_eq!(project_iommu_table(&graph, dev, &mut out), 0);
+            assert_eq!(project_page_table(&graph, dev, &mut out), 0);
+        }
+    }
+}
