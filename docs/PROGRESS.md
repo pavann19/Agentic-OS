@@ -1187,6 +1187,39 @@ request — see below for exactly which parts are genuinely blocked.
       new, narrower evidence for whoever picks this up next; still an
       open gap.
 
+      **Actual root cause found (this one resolved the mystery, not the
+      write protocol itself).** A further diagnostic logged EVERY active
+      AHCI port, not just the first: `scripts/test-ahci.ps1`'s own QEMU
+      invocation genuinely has TWO active ATA ports, not one — port 0
+      AND port 1 both report `PxSSTS.DET==3` with a real ATA signature.
+      Port 1 is the intended `ahcidisk` test target (`bus=ide.1`,
+      explicit). Port 0 is the boot FAT drive (`-drive
+      file=fat:rw:$FatDir,format=raw` — no `if=`/bus given, so it lands
+      on the AHCI controller's port 0 by QEMU's own default). This
+      driver's `find_ata_port` returns the FIRST active port it finds —
+      **port 0, the boot medium, not port 1, the real test disk** — and
+      has done so since this driver was first written; the passing
+      IDENTIFY self-check was reading the boot FAT drive's own emulated
+      geometry the whole time, not `ahcidisk`. QEMU's `vvfat` block
+      driver (backing that FAT directory) genuinely supports raw ATA
+      reads but rejects raw sector writes — which is exactly the TFES
+      observed. **Direct confirmation:** forcing the driver to target
+      port 1 explicitly, the identical WRITE DMA EXT command that hung
+      on port 0 completed cleanly and immediately. The AHCI write-path
+      *implementation* was correct all along; the bug was port
+      selection picking the boot drive over the test disk. Real,
+      necessary follow-up work, not done yet (ran out of the time
+      allotted for this pass): `find_ata_port` needs to disambiguate
+      real target drives from a boot/firmware volume that happens to
+      share the same controller — on real Tier 2 hardware there will be
+      no `vvfat` at all, so this is a Tier-1/QEMU-testing-harness
+      correctness issue as much as a driver one, worth fixing in both
+      the driver (skip a port that matches the boot device, or require
+      an explicit port hint) and the test scripts (give the boot FAT
+      drive an explicit non-AHCI `if=` so it can't collide with a real
+      test target again). Diagnostic code reverted again; tree verified
+      clean via `git diff` and a passing `test-ahci.ps1` re-run.
+
 **Phase 8 exit criteria (`docs/ROADMAP.md` §5) — 2 of 3 fully
 demonstrated, 1 genuinely blocked:**
 - "The full suite passes from a clean checkout with no manual steps" —
