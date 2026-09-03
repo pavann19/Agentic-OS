@@ -6,14 +6,16 @@
 #![no_std]
 
 pub mod audit_ring;
-pub mod authority_graph; // research track, docs/RESEARCH_TRACK.md -- pure logic, NOT wired into kernel_rs
+pub mod authority_graph; // research track, docs/RESEARCH_TRACK.md -- pure logic, wired into kernel_rs::authority for IOMMU grant/revoke
 pub mod bitmap;
+pub mod discovered_envelope; // research track section 3 -- pure logic, NOT wired into kernel_rs
 // Experimental, isolated (see the module's own doc for the full
 // discipline this follows): real, verified via host_tests, NOT wired
 // into kernel_rs's actual boot path yet -- an integration proposal,
 // not a merged change.
 pub mod driver_registry;
 pub mod ext2;
+pub mod impossibility_certificate; // research track section 2 -- pure logic, NOT wired into kernel_rs
 pub mod madt;
 // Feature-gated: defines real, strong #[no_mangle] memset/memcpy/
 // memmove/memcmp symbols (see mem_intrinsics.rs's own doc for why) --

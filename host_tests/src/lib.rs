@@ -903,3 +903,232 @@ mod authority_graph_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod impossibility_certificate_tests {
+    // Research track (docs/RESEARCH_TRACK.md, docs/NOVEL_CONCEPTS.md
+    // section 2): real, isolated verification of the pure certificate
+    // data model. Zero QEMU, zero hardware -- this only proves the
+    // certificate logic itself is sound; real hardware wiring is a
+    // separate, later increment (see the module's own doc).
+
+    use kernel_common::authority_graph::{grant, revoke, Grant, Principal};
+    use kernel_common::impossibility_certificate::{issue, verify, Verdict};
+
+    fn cpu(id: u32) -> Principal {
+        Principal::CpuProcess(id)
+    }
+    fn pci(bus: u8, device: u8, function: u8) -> Principal {
+        Principal::PciDevice { bus, device, function }
+    }
+
+    #[test]
+    fn a_certificate_can_be_issued_for_a_genuinely_unreachable_page() {
+        let graph: [Option<Grant>; 4] = [None; 4];
+        let cert = issue(&graph, cpu(1), 0x1000).expect("empty graph -- everything is unreachable");
+        assert_eq!(verify(&graph, &cert), Verdict::Valid);
+    }
+
+    #[test]
+    fn no_certificate_can_be_issued_for_a_reachable_page() {
+        let mut graph: [Option<Grant>; 4] = [None; 4];
+        grant(&mut graph, Grant { principal: cpu(1), phys_base: 0x1000, len: 4096, writable: true, executable: false });
+        // The exact page IS reachable -- issuing a certificate that it
+        // is NOT would be a false claim; the API must refuse it.
+        assert!(issue(&graph, cpu(1), 0x1000).is_none());
+        // A DIFFERENT page, not covered by the grant, is still fair game.
+        assert!(issue(&graph, cpu(1), 0x5000).is_some());
+    }
+
+    #[test]
+    fn a_certificate_verifies_valid_while_the_graph_is_unchanged() {
+        let graph: [Option<Grant>; 4] = [None; 4];
+        let cert = issue(&graph, pci(0, 3, 0), 0x2000).unwrap();
+        // Re-verify several times -- must be stable, not one-shot.
+        assert_eq!(verify(&graph, &cert), Verdict::Valid);
+        assert_eq!(verify(&graph, &cert), Verdict::Valid);
+    }
+
+    /// THE falsifiable test from docs/NOVEL_CONCEPTS.md section 2.4's
+    /// spirit (the pure-data-model version -- the real hardware-
+    /// corruption version is separate follow-up work): any change to
+    /// the graph the certificate was issued against, even one
+    /// unrelated to the certified page, must make it Stale, not
+    /// silently keep validating.
+    #[test]
+    fn any_graph_mutation_makes_a_previously_issued_certificate_stale() {
+        let mut graph: [Option<Grant>; 8] = [None; 8];
+        let target = pci(0, 31, 2);
+        let cert = issue(&graph, target, 0x81_0000).unwrap();
+        assert_eq!(verify(&graph, &cert), Verdict::Valid);
+
+        // An entirely UNRELATED grant, for a different principal and a
+        // different page -- the certified page is still genuinely
+        // unreachable by `target`, but the certificate is about a
+        // SPECIFIC graph state, and that state has changed.
+        grant(&mut graph, Grant { principal: cpu(99), phys_base: 0x99_0000, len: 4096, writable: true, executable: false });
+        assert_eq!(verify(&graph, &cert), Verdict::Stale);
+    }
+
+    /// Real finding from this test's own first run, corrected here
+    /// rather than hidden: the checksum is content-addressed BY DESIGN
+    /// (the module doc's own "two identical graphs" guarantee, proven
+    /// by the test above) -- revoking a grant and then regranting the
+    /// EXACT same content is not a content change, so a certificate
+    /// correctly re-verifies Valid afterward. The original version of
+    /// this test asserted the opposite (Stale) and was simply wrong
+    /// about what this module's own documented contract promises; this
+    /// is that corrected, honest version, kept rather than deleted so
+    /// the content-addressed property is explicitly exercised through
+    /// a revoke/regrant cycle, not just two independently-built graphs.
+    #[test]
+    fn revoking_and_regranting_identical_content_still_verifies_valid() {
+        let mut graph: [Option<Grant>; 4] = [None; 4];
+        let dev = pci(0, 3, 0);
+        grant(&mut graph, Grant { principal: dev, phys_base: 0x4000, len: 4096, writable: true, executable: false });
+        let cert = issue(&graph, dev, 0x9000).unwrap();
+        assert_eq!(verify(&graph, &cert), Verdict::Valid);
+
+        revoke(&mut graph, dev, 0x4000);
+        grant(&mut graph, Grant { principal: dev, phys_base: 0x4000, len: 4096, writable: true, executable: false });
+        assert_eq!(verify(&graph, &cert), Verdict::Valid);
+    }
+
+    /// The real contrast case: regranting with even ONE field
+    /// genuinely different (writable flipped here) IS a content
+    /// change, and must go Stale -- proving the checksum is actually
+    /// sensitive to grant contents, not just presence/absence.
+    #[test]
+    fn regranting_with_a_different_flag_makes_the_certificate_stale() {
+        let mut graph: [Option<Grant>; 4] = [None; 4];
+        let dev = pci(0, 3, 0);
+        grant(&mut graph, Grant { principal: dev, phys_base: 0x4000, len: 4096, writable: true, executable: false });
+        let cert = issue(&graph, dev, 0x9000).unwrap();
+        assert_eq!(verify(&graph, &cert), Verdict::Valid);
+
+        revoke(&mut graph, dev, 0x4000);
+        grant(&mut graph, Grant { principal: dev, phys_base: 0x4000, len: 4096, writable: false, executable: false });
+        assert_eq!(verify(&graph, &cert), Verdict::Stale);
+    }
+
+    #[test]
+    fn two_identical_graphs_produce_a_certificate_that_verifies_against_either() {
+        // Real, checked property: the checksum is a pure function of
+        // graph CONTENTS, not of identity/order-of-construction --
+        // issuing against one graph and verifying against a separately
+        // built but content-identical graph must succeed.
+        let mut graph_a: [Option<Grant>; 4] = [None; 4];
+        let mut graph_b: [Option<Grant>; 4] = [None; 4];
+        let dev = pci(0, 3, 0);
+        grant(&mut graph_a, Grant { principal: dev, phys_base: 0x4000, len: 4096, writable: true, executable: false });
+        grant(&mut graph_b, Grant { principal: dev, phys_base: 0x4000, len: 4096, writable: true, executable: false });
+
+        let cert = issue(&graph_a, dev, 0x9000).unwrap();
+        assert_eq!(verify(&graph_b, &cert), Verdict::Valid);
+    }
+}
+
+#[cfg(test)]
+mod discovered_envelope_tests {
+    // Research track (docs/RESEARCH_TRACK.md, docs/NOVEL_CONCEPTS.md
+    // section 3): real, isolated verification -- rated MODERATE
+    // novelty confidence in NOVEL_CONCEPTS.md section 4, built anyway
+    // as a real, cheap consequence of section 1 already existing.
+
+    use kernel_common::authority_graph::{is_reachable, Grant, Principal};
+    use kernel_common::discovered_envelope::{discover_envelope, freeze_envelope};
+
+    fn pci(bus: u8, device: u8, function: u8) -> Principal {
+        Principal::PciDevice { bus, device, function }
+    }
+
+    #[test]
+    fn envelope_discovery_deduplicates_repeated_accesses() {
+        let attempts = [0x1000u64, 0x2000, 0x1000, 0x3000, 0x2000, 0x1000];
+        let mut out = [0u64; 8];
+        let count = discover_envelope(&attempts, &mut out);
+        assert_eq!(count, 3);
+        assert_eq!(&out[..3], &[0x1000, 0x2000, 0x3000]);
+    }
+
+    /// Real, direct analogue of docs/NOVEL_CONCEPTS.md section 3.3's
+    /// own falsifiable test: a real driver's known DMA needs
+    /// (mirroring nvme_driver's three page-aligned regions -- admin
+    /// submission queue, admin completion queue, data buffer)
+    /// discovered from a simulated access trace, matches EXACTLY, then
+    /// frozen into real enforced grants.
+    #[test]
+    fn a_known_three_page_driver_pattern_is_discovered_exactly() {
+        let asq = 0x52_0000u64;
+        let acq = 0x53_0000u64;
+        let data = 0x54_0000u64;
+        // A real access trace would touch each region multiple times
+        // (queue doorbell writes, completion polls, data reads) --
+        // simulated here as repeated attempts, same shape.
+        let attempts = [asq, asq, acq, data, acq, data, asq, data];
+
+        let mut envelope = [0u64; 8];
+        let count = discover_envelope(&attempts, &mut envelope);
+        assert_eq!(count, 3);
+        assert_eq!(&envelope[..3], &[asq, acq, data]);
+    }
+
+    #[test]
+    fn a_discovered_envelope_freezes_into_real_grants_that_allow_exactly_those_pages() {
+        let dev = pci(0, 3, 0);
+        let attempts = [0x10_0000u64, 0x20_0000, 0x30_0000];
+        let mut envelope = [0u64; 8];
+        let count = discover_envelope(&attempts, &mut envelope);
+
+        let mut graph: [Option<Grant>; 8] = [None; 8];
+        let granted = freeze_envelope(&mut graph, dev, &envelope[..count]);
+        assert_eq!(granted, 3);
+
+        for &addr in &envelope[..count] {
+            assert!(is_reachable(&graph, dev, addr));
+        }
+    }
+
+    /// THE falsifiable test from docs/NOVEL_CONCEPTS.md section 3.3:
+    /// a deliberately modified driver attempting a FOURTH region (one
+    /// never seen in the original access trace) must fault against the
+    /// frozen envelope -- least privilege discovered by observation,
+    /// then genuinely enforced, not just recorded.
+    #[test]
+    fn a_page_never_observed_in_the_trace_is_denied_after_freezing() {
+        let dev = pci(0, 3, 0);
+        let attempts = [0x10_0000u64, 0x20_0000, 0x30_0000];
+        let mut envelope = [0u64; 8];
+        let count = discover_envelope(&attempts, &mut envelope);
+
+        let mut graph: [Option<Grant>; 8] = [None; 8];
+        freeze_envelope(&mut graph, dev, &envelope[..count]);
+
+        // A "deliberately modified" fourth region, never in the trace.
+        assert!(!is_reachable(&graph, dev, 0x40_0000));
+    }
+
+    #[test]
+    fn envelope_discovery_output_capacity_is_respected() {
+        let attempts = [0x1000u64, 0x2000, 0x3000, 0x4000, 0x5000];
+        let mut out = [0u64; 2]; // room for 2, not 5
+        let count = discover_envelope(&attempts, &mut out);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn freeze_envelope_respects_graph_capacity_not_silently_overrun() {
+        let dev = pci(0, 3, 0);
+        let mut graph: [Option<Grant>; 2] = [None; 2];
+        let envelope = [0x1000u64, 0x2000, 0x3000];
+        let granted = freeze_envelope(&mut graph, dev, &envelope);
+        assert_eq!(granted, 2); // only 2 slots available
+    }
+
+    #[test]
+    fn an_empty_trace_discovers_an_empty_envelope_not_a_panic() {
+        let attempts: [u64; 0] = [];
+        let mut out = [0u64; 4];
+        assert_eq!(discover_envelope(&attempts, &mut out), 0);
+    }
+}
