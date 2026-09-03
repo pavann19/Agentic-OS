@@ -435,7 +435,7 @@ mod driver_registry_tests {
     use kernel_common::driver_registry::{match_all, DriverEntry, MatchRule, PciId};
 
     fn dev(vendor: u16, device: u16, class: u8, subclass: u8, prog_if: u8) -> PciId {
-        PciId { vendor, device, class, subclass, prog_if }
+        PciId { bus: 0, device_slot: 0, function: 0, vendor, device, class, subclass, prog_if }
     }
 
     #[test]

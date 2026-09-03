@@ -39,6 +39,9 @@
 /// translation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PciId {
+    pub bus: u8,
+    pub device_slot: u8,
+    pub function: u8,
     pub vendor: u16,
     pub device: u16,
     pub class: u8,
