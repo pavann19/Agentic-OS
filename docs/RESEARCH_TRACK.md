@@ -7,6 +7,8 @@
 
 **If a concept is ever promoted:** the merge itself becomes a normal, numbered roadmap deliverable (most likely folded into an existing phase — e.g. §1's projection is a natural fit for Phase 9 deliverable 5's "every shared kernel structure audited," since it touches the same IOMMU/page-table code — or, if large enough, a new phase). That decision is made at promotion time, not assumed now.
 
+**Citation convention across this track:** `docs/PRIOR_ART.md` and `docs/NOVEL_CONCEPTS.md` cite sources in IEEE numbered `[N]` style, each with its own reference list at the end of the document (not shared numbering between the two — `docs/NOVEL_CONCEPTS.md`'s own [1]–[6] are additional sources from a second research pass, distinct from `docs/PRIOR_ART.md`'s [1]–[14]). `docs/RESEARCH_PAPER.md`'s eventual Appendix C merges both into one consistently-renumbered list once the paper itself has real in-text citations — not done yet, since the paper itself is still a scaffold.
+
 ---
 
 ## Status
