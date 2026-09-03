@@ -12,11 +12,21 @@ const APIC_BASE_ENABLE: u64 = 1 << 11;
 const APIC_BASE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 // Register offsets within the LAPIC's 4K MMIO page.
+const REG_ID: u64 = 0x20;
 const REG_SPURIOUS: u64 = 0xF0;
 const REG_EOI: u64 = 0xB0;
+const REG_ICR_LOW: u64 = 0x300;
+const REG_ICR_HIGH: u64 = 0x310;
 const REG_LVT_TIMER: u64 = 0x320;
 const REG_TIMER_INITIAL_COUNT: u64 = 0x380;
 const REG_TIMER_DIVIDE: u64 = 0x3E0;
+
+// ICR (Interrupt Command Register) delivery-mode encodings (Intel SDM
+// vol 3A 10.6.1) -- the two Phase 9 needs for real AP bring-up.
+const ICR_DELIVERY_INIT: u32 = 0b101 << 8;
+const ICR_DELIVERY_STARTUP: u32 = 0b110 << 8;
+const ICR_LEVEL_ASSERT: u32 = 1 << 14;
+const ICR_DELIVERY_STATUS_PENDING: u32 = 1 << 12;
 
 pub const TIMER_VECTOR: u8 = 0x20;
 const SPURIOUS_VECTOR: u8 = 0xFF;
@@ -42,6 +52,72 @@ unsafe fn write_reg(offset: u64, value: u32) {
 
 pub fn eoi() {
     unsafe { write_reg(REG_EOI, 0) };
+}
+
+/// This CORE's own local APIC ID -- real xAPIC hardware behavior, not a
+/// software-assigned index: every core's LAPIC lives at the SAME
+/// physical MMIO address (architectural, not a QEMU quirk), but each
+/// core's own hardware answers with ITS OWN ID at that address, so
+/// calling this from an AP (once its own paging/CR3 is live and it can
+/// reach `LAPIC_VADDR`, already mapped read-only-in-effect by the BSP's
+/// own `init()` and reachable through the SAME shared kernel page
+/// tables every core uses) returns that AP's real ID, not the BSP's.
+pub fn lapic_id() -> u32 {
+    unsafe { (read_reg(REG_ID) >> 24) & 0xFF }
+}
+
+fn icr_wait_idle() {
+    // Bounded, not infinite -- a stuck/never-idle ICR must never hang
+    // the BSP forever (same "prove it timed out, don't just spin"
+    // discipline as every other bounded poll in this codebase).
+    let mut spins: u64 = 0;
+    while unsafe { read_reg(REG_ICR_LOW) } & ICR_DELIVERY_STATUS_PENDING != 0 {
+        spins += 1;
+        if spins > 50_000_000 {
+            klog_info!("APIC: ICR did not go idle -- proceeding anyway (bounded wait exhausted)");
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+fn send_ipi(target_apic_id: u32, icr_low: u32) {
+    unsafe {
+        write_reg(REG_ICR_HIGH, target_apic_id << 24);
+        write_reg(REG_ICR_LOW, icr_low);
+    }
+    icr_wait_idle();
+}
+
+/// Real INIT IPI (Intel MP/ACPI spec's own bring-up sequence, step 1) --
+/// resets the target AP into a wait-for-SIPI state. `target_apic_id` is
+/// a REAL MADT-reported APIC ID (`kernel_common::madt::CpuEntry`),
+/// never a software index.
+pub fn send_init(target_apic_id: u32) {
+    send_ipi(target_apic_id, ICR_DELIVERY_INIT | ICR_LEVEL_ASSERT);
+}
+
+/// Real Startup IPI (SIPI) -- `vector` is the PAGE NUMBER (physical
+/// address >> 12) the target AP starts executing real-mode code at,
+/// CS:IP = vector<<8 : 0x0000 (Intel SDM 10.6.4). Sent TWICE per the
+/// spec's own standard sequence (some real silicon needs the second
+/// one; QEMU's own emulation tolerates it as a harmless no-op if the
+/// first already succeeded) -- the caller (`smp::bring_up_all`) is
+/// responsible for that, not this function.
+pub fn send_sipi(target_apic_id: u32, vector: u8) {
+    send_ipi(target_apic_id, ICR_DELIVERY_STARTUP | (vector as u32));
+}
+
+/// A bounded, uncalibrated busy-wait -- real time calibration (against
+/// the PIT or a TSC-deadline reference) is real future work, same
+/// honestly-stated gap `apic::init`'s own doc already carries for the
+/// timer's initial count. Good enough for spacing real INIT/SIPI/SIPI
+/// sends apart under QEMU TCG, which is the only target this function
+/// is exercised against so far.
+pub fn busy_wait(iterations: u64) {
+    for _ in 0..iterations {
+        core::hint::spin_loop();
+    }
 }
 
 pub fn tick_count() -> u64 {

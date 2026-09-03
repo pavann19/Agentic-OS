@@ -53,6 +53,7 @@ pub mod ring3;
 pub mod serial;
 pub mod service_manager;
 pub mod shell;
+pub mod smp;
 pub mod syscall;
 pub mod thread;
 pub mod tools;
@@ -353,6 +354,12 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
                     }
                 }
                 klog_info!("ACPI_MADT_DONE total={} enabled={}", cpu_count, enabled_count);
+
+                // Phase 9 deliverable 1's real bring-up step -- see
+                // smp.rs's own module doc for the full design (identity
+                // -map trick, sequential-not-concurrent scope, real
+                // bounded timeouts throughout).
+                smp::bring_up_all(&cpus[..cpu_count]);
             }
 
             match acpi::find_table(xsdt_phys, b"DMAR") {
