@@ -57,6 +57,7 @@ pub mod serial;
 pub mod service_manager;
 pub mod shell;
 pub mod smp;
+pub mod smp_race_soak; // Phase 9 deliverable 3's real cross-core race evidence, see its own module doc
 pub mod syscall;
 pub mod thread;
 pub mod tools;
@@ -199,6 +200,17 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     pic::unmask_irq(1);
     klog_info!("TIMER_INIT_START");
     apic::init();
+    // Phase 9: configure the BSP's own SYSCALL/SYSRET MSRs unconditionally,
+    // here, rather than leaving it to whichever driver-setup thread
+    // happens to call syscall::init() first -- see smp.rs::ap_entry's own
+    // doc comment on the real work-stealing-migration bug this closes
+    // (a thread can migrate to a core between calling syscall::init()
+    // and its own next `syscall`); every AP does the equivalent in its
+    // own ap_entry, so this makes the invariant ("every core has
+    // SYSCALL/SYSRET configured before any ring-3 thread can possibly
+    // run there") true for the BSP too, explicitly, not just by luck of
+    // call-site ordering.
+    crate::syscall::init();
     unsafe {
         core::arch::asm!("sti", options(nomem, nostack));
     }
@@ -360,9 +372,58 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
 
                 // Phase 9 deliverable 1's real bring-up step -- see
                 // smp.rs's own module doc for the full design (identity
-                // -map trick, sequential-not-concurrent scope, real
-                // bounded timeouts throughout).
-                smp::bring_up_all(&cpus[..cpu_count]);
+                // -map trick, real bounded timeouts throughout). Every
+                // core that comes up now stays a real, independently
+                // scheduled participant (deliverable 3) rather than
+                // halting.
+                let brought_up = smp::bring_up_all(&cpus[..cpu_count]);
+
+                if brought_up >= 2 {
+                    // Phase 9 deliverable 3's real, live evidence: a
+                    // thread explicitly placed on ANOTHER core's own
+                    // run queue, picked up via a real reschedule IPI
+                    // rather than that core's next periodic tick.
+                    klog_info!("SMP_PINNED_DEMO_SPAWN target_cpu_index=1");
+                    thread::spawn_pinned_to_cpu(smp::pinned_demo_thread, vmm::kernel_pml4_phys(), 1);
+
+                    // Phase 9 deliverable 4's real, live evidence
+                    // (`docs/ROADMAP.md` §5 — "a mapping torn down on
+                    // one core is provably unusable on another core
+                    // within a bounded time"): map a real scratch page
+                    // into the shared kernel PML4 (reachable from every
+                    // online core, since they all share it), then tear
+                    // it down via `vmm::unmap_page_shootdown` instead
+                    // of the plain, local-only `vmm::unmap_page`. Real
+                    // evidence: `smp::shootdown_tlb`'s own
+                    // `TLB_SHOOTDOWN_PASS` log line only fires once
+                    // EVERY other online core's own interrupt handler
+                    // has actually executed a real `invlpg` and
+                    // acknowledged -- not just "the IPI was sent".
+                    unsafe {
+                        let scratch_phys = pmm::alloc_page();
+                        const SHOOTDOWN_DEMO_VADDR: u64 = 0x0000_0000_0090_0000;
+                        vmm::map_page_in(vmm::kernel_pml4_phys(), SHOOTDOWN_DEMO_VADDR, scratch_phys, vmm::PAGE_WRITABLE);
+                        klog_info!("SMP_TLB_SHOOTDOWN_DEMO_START vaddr=0x{:x}", SHOOTDOWN_DEMO_VADDR);
+                        vmm::unmap_page_shootdown(vmm::kernel_pml4_phys(), SHOOTDOWN_DEMO_VADDR);
+                    }
+                }
+                if brought_up >= 3 {
+                    // Deliverable 3's exit criterion: a deliberate
+                    // cross-core race against a real shared kernel
+                    // structure, caught rather than silently
+                    // corrupting state -- see smp_race_soak.rs's own
+                    // module doc. Run as its OWN spawned coordinator
+                    // thread (NOT called inline here) so its real,
+                    // necessarily-bounded spin-waits never block the
+                    // rest of boot -- and racers are pinned to cpu 1/2
+                    // specifically, leaving the BSP (cpu 0) free to
+                    // keep running the normal boot sequence
+                    // concurrently, exactly the real concurrency this
+                    // deliverable is meant to demonstrate.
+                    thread::spawn(smp_race_soak::run_as_thread);
+                } else {
+                    klog_info!("SMP_RACE_SOAK_SKIPPED (fewer than 3 real cores online -- needs 2 real racer cores distinct from the BSP)");
+                }
             }
 
             match acpi::find_table(xsdt_phys, b"DMAR") {

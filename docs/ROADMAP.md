@@ -1,6 +1,6 @@
 # Agentic OS — Build Roadmap
 
-**Status:** Phases 0–8 complete and evidenced (see `docs/PROGRESS.md`). ADR-007 and ADR-008 (§2) signed off 2026-09-03 — Phases 11 and 12 are unblocked. Phase 9 (SMP) started 2026-09-03.
+**Status:** Phases 0–9 complete and evidenced (see `docs/PROGRESS.md`). ADR-007 and ADR-008 (§2) signed off 2026-09-03 — Phases 11 and 12 are unblocked. Phase 9 (SMP) completed 2026-09-04 — Phase 10 (networking) and Phase 11 (Tier 3 hardware breadth) are now unblocked; Phase 12 (display server) still additionally depends on Phase 3's GPU path.
 **Date:** 2026-08-27; Phases 9–15 added 2026-09-03
 **Supersedes:** the previous `docs/ROADMAP.md` (preserved in git history at commit `6818872`)
 **Scope:** ground-up construction plan derived from the code actually in this repository, extended from "Tier 1/Tier 2 code-complete" (original Phase 8 endpoint) through to "a real, daily-driveable OS" (Phase 15)

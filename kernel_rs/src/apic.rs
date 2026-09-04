@@ -118,6 +118,21 @@ pub fn send_sipi(target_apic_id: u32, vector: u8) {
     send_ipi(target_apic_id, ICR_DELIVERY_STARTUP | (vector as u32));
 }
 
+// Fixed-delivery-mode encoding (0b000, the ICR default) -- a real,
+// ordinary interrupt at `vector`, exactly like any device IRQ, just
+// targeted at a specific core instead of routed by the I/O APIC. Phase
+// 9 deliverables 3 (reschedule IPI) and 4 (TLB shootdown IPI) both need
+// exactly this: "deliver a real interrupt to that OTHER core, right now."
+const ICR_DELIVERY_FIXED: u32 = 0b000 << 8;
+
+/// Sends a real, ordinary fixed-vector IPI to `target_apic_id` --
+/// `vector` must have a real handler installed in the (shared) IDT
+/// before this is ever called, same requirement as any other interrupt
+/// vector. Used by `smp::send_reschedule_ipi`/`smp::send_tlb_shootdown`.
+pub fn send_ipi_vector(target_apic_id: u32, vector: u8) {
+    send_ipi(target_apic_id, ICR_DELIVERY_FIXED | (vector as u32));
+}
+
 /// A bounded, uncalibrated busy-wait -- real time calibration (against
 /// the PIT or a TSC-deadline reference) is real future work, same
 /// honestly-stated gap `apic::init`'s own doc already carries for the
@@ -144,9 +159,27 @@ pub fn on_tick() {
     eoi();
 }
 
-/// Brings up the Local APIC and starts a periodic timer at `TIMER_VECTOR`.
-/// Must run after `idt::init()` (the vector needs a handler installed
-/// before unmasking it) and after `vmm::init()` (needs `map_mmio_page`).
+/// Brings up the Local APIC and starts a periodic timer at `TIMER_VECTOR`
+/// — BSP-only. Must run after `idt::init()` (the vector needs a handler
+/// installed before unmasking it) and after `vmm::init()` (needs
+/// `map_mmio_page`).
+///
+/// Phase 9: split into a one-time part (this function) and
+/// `arm_timer_this_core` (below), because they are genuinely different
+/// kinds of state. `LAPIC_VADDR`'s underlying MMIO PHYSICAL address is
+/// architecturally the SAME on every real core (`lapic_id()`'s own doc
+/// comment: "every core's LAPIC lives at the SAME physical MMIO
+/// address... but each core's own hardware answers"), and the virtual
+/// mapping for it lives in the one shared kernel PML4 every core
+/// already uses — so the MMIO mapping itself only needs to happen ONCE,
+/// by the BSP. But `REG_SPURIOUS`/`REG_LVT_TIMER`/`REG_TIMER_DIVIDE`/
+/// `REG_TIMER_INITIAL_COUNT`, even though accessed through that SAME
+/// shared virtual address, are genuinely PER-CORE hardware registers
+/// (xAPIC's real architectural behavior: the identical address routes
+/// to each core's own on-die LAPIC) — an AP that never writes them of
+/// its own never gets a running local timer, and Phase 9 deliverable 3
+/// needs every core to have one (it's what drives that core's own
+/// `schedule()` calls).
 pub fn init() {
     unsafe {
         let base = rdmsr(IA32_APIC_BASE_MSR);
@@ -162,7 +195,18 @@ pub fn init() {
         }
 
         LAPIC_VADDR = crate::vmm::map_mmio_page(phys);
+    }
+    arm_timer_this_core();
+    klog_info!("Local APIC timer started, vector=0x{:x}, periodic", TIMER_VECTOR);
+}
 
+/// Arms THIS CORE's own LAPIC timer -- called once by `init()` above
+/// for the BSP, and directly by every AP (`smp.rs::ap_entry`, after
+/// `LAPIC_VADDR` is already valid via the BSP's one-time mapping) for
+/// itself. See `init`'s own doc comment for why this genuinely must run
+/// per-core, not once.
+pub fn arm_timer_this_core() {
+    unsafe {
         write_reg(REG_SPURIOUS, (SPURIOUS_VECTOR as u32) | APIC_SOFTWARE_ENABLE);
         write_reg(REG_TIMER_DIVIDE, 0x3); // divide by 16
         write_reg(REG_LVT_TIMER, (TIMER_VECTOR as u32) | TIMER_PERIODIC);
@@ -171,5 +215,4 @@ pub fn init() {
         // source yet — that's real future work, not claimed done here).
         write_reg(REG_TIMER_INITIAL_COUNT, 10_000_000);
     }
-    klog_info!("Local APIC timer started, vector=0x{:x}, periodic", TIMER_VECTOR);
 }

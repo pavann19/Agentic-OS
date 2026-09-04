@@ -234,6 +234,27 @@ pub unsafe fn unmap_page(pml4_phys: u64, vaddr: u64) {
     core::arch::asm!("invlpg [{}]", in(reg) vaddr, options(nostack, preserves_flags));
 }
 
+/// Phase 9 deliverable 4 (`docs/ROADMAP.md` §5 — "TLB shootdown via IPI
+/// on every cross-core mapping change — a correctness requirement, not
+/// an optimization, given Phase 0's per-page permission model"): same
+/// as `unmap_page`, but ALSO broadcasts a real cross-core shootdown
+/// (`smp::shootdown_tlb`) after the local unmap+`invlpg` completes, so
+/// a caller returning from this function has real, waited-for evidence
+/// the mapping is gone from every online core's TLB, not just this
+/// one's. Any unmap whose vaddr might be reachable through more than
+/// this one core's own translation (a shared kernel mapping, or a
+/// process address space that could genuinely be active on another
+/// core) MUST go through this, not the plain `unmap_page` above — a
+/// stale TLB entry surviving on another core is exactly the kind of
+/// "revoked but still usable" gap Phase 2's whole capability-revocation
+/// guarantee depends on not existing.
+pub unsafe fn unmap_page_shootdown(pml4_phys: u64, vaddr: u64) {
+    unsafe {
+        unmap_page(pml4_phys, vaddr);
+    }
+    crate::smp::shootdown_tlb(vaddr);
+}
+
 pub struct KernelSegment {
     pub vaddr: u64,
     pub paddr: u64,

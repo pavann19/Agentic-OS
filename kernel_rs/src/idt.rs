@@ -240,6 +240,37 @@ extern "x86-interrupt" fn h_keyboard(_frame: InterruptStackFrame) {
     crate::thread::schedule();
 }
 
+/// Phase 9 deliverable 3 (`docs/ROADMAP.md` §5 — "IPI-based reschedule"):
+/// `smp::RESCHEDULE_VECTOR`, sent core-to-core via `apic::send_ipi_vector`
+/// (`smp::send_reschedule_ipi`). A real, ordinary interrupt like any
+/// other here — the ONLY thing distinguishing it from `h_timer` above is
+/// what triggered it (another core, not this core's own LAPIC timer).
+/// Minimal ISR, same discipline as every other handler in this file:
+/// real hardware EOI, then hand off to `schedule()` immediately so the
+/// thread that was just placed on THIS core's queue (`thread::
+/// spawn_pinned_to_cpu`) gets a chance to run without waiting for this
+/// core's own next periodic tick.
+extern "x86-interrupt" fn h_reschedule(_frame: InterruptStackFrame) {
+    crate::apic::eoi();
+    crate::thread::schedule();
+}
+
+/// Phase 9 deliverable 4 (`docs/ROADMAP.md` §5 — "TLB shootdown via IPI
+/// on every cross-core mapping change"): `smp::TLB_SHOOTDOWN_VECTOR`.
+/// Executes a real `invlpg` for the vaddr the initiating core placed in
+/// `smp::TLB_SHOOTDOWN_PENDING_VADDR` BEFORE sending this IPI (real,
+/// necessary ordering — see `smp::shootdown_tlb`'s own doc comment for
+/// why that write happens-before the IPI send, and why a single pending
+/// slot is safe here specifically because shootdowns are serialized by
+/// `smp::shootdown_tlb`'s own lock, never two in flight at once), then
+/// atomically acknowledges via `smp::TLB_SHOOTDOWN_ACKS` so the
+/// initiator's own bounded wait can observe real completion, not just
+/// "the IPI was sent."
+extern "x86-interrupt" fn h_tlb_shootdown(_frame: InterruptStackFrame) {
+    crate::apic::eoi();
+    crate::smp::handle_tlb_shootdown_ipi();
+}
+
 pub fn init() {
     set_entry(0, h_divide_error as *const () as u64, 0);
     set_entry(1, h_debug as *const () as u64, 0);
@@ -281,6 +312,17 @@ pub fn init() {
     set_entry(
         crate::pic::KEYBOARD_VECTOR as usize,
         h_keyboard as *const () as u64,
+        0,
+    );
+    // Phase 9 deliverables 3 and 4 -- real core-to-core IPI vectors.
+    set_entry(
+        crate::smp::RESCHEDULE_VECTOR as usize,
+        h_reschedule as *const () as u64,
+        0,
+    );
+    set_entry(
+        crate::smp::TLB_SHOOTDOWN_VECTOR as usize,
+        h_tlb_shootdown as *const () as u64,
         0,
     );
 

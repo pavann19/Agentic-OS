@@ -31,22 +31,24 @@
 //! (Phase 9 deliverable 4's own TLB-shootdown item) -- stated honestly
 //! as a real, tracked simplification, not silently skipped.
 //!
-//! **Deliberately sequential, not concurrent, in this increment:**
-//! `gdt.rs`'s `GDT`/`TSS` and `klog.rs`'s `SerialWriter`/COM1 access are
-//! all single, unsynchronized, shared kernel state today (found and
-//! recorded during this same phase, see `docs/PROGRESS.md`) -- real
-//! multi-core-safe locking for them is Phase 9 deliverable 5, not this
-//! one. `bring_up_all` brings up ONE AP at a time and waits for it to
-//! signal readiness (and then halt forever) before releasing the next
-//! -- by construction, at most one AP is ever executing non-BSP code at
-//! once, so nothing here is exposed to a real concurrent-access bug yet.
-//! This still genuinely satisfies Phase 9's own exit criterion ("all
-//! firmware-reported cores are brought up and independently execute
-//! real work ... a per-core heartbeat log with distinct APIC IDs") --
-//! each AP really does run its own real code on its own real core, just
-//! not at the same wall-clock instant as any other AP yet.
+//! **Historical note, now resolved:** this module's original increment
+//! (deliverable 1) brought up ONE AP at a time and had it halt forever
+//! once online -- deliberately, because `gdt.rs`'s `GDT`/`TSS` and
+//! `klog.rs`'s `SerialWriter`/COM1 access were single, unsynchronized,
+//! shared kernel state at the time. Deliverable 2 gave every core its
+//! own GDT/TSS; deliverable 5 made the kernel's shared-state lock
+//! (`critical::without_interrupts`) genuinely cross-core, and wrapped
+//! `klog`'s COM1 writer in it. `bring_up_all` below is STILL
+//! sequential during the bring-up loop itself (each AP is fully
+//! verified online before the next is SIPI'd -- a real, simple,
+//! correctness-first bring-up order, not a performance concern this
+//! phase needs to optimize), but every AP that finishes bring-up no
+//! longer halts: `ap_entry` now arms its own local timer and enters a
+//! real, independently-scheduled idle loop (deliverable 3) -- by the
+//! time `bring_up_all` returns, every online core is a genuine,
+//! concurrently-executing participant in the one shared scheduler.
 
-use crate::{apic, klog_info, pmm, serial, vmm};
+use crate::{apic, klog_info, pmm, serial, thread, vmm};
 use core::sync::atomic::{AtomicU32, Ordering};
 use kernel_common::madt::CpuEntry;
 
@@ -90,6 +92,131 @@ pub fn register_cpu(index: usize, apic_id: u32) {
             (&mut *&raw mut APIC_ID_TO_INDEX)[index] = Some(apic_id);
         }
     }
+}
+
+/// Real IPI vectors -- Phase 9 deliverables 3 and 4. Distinct from
+/// `apic::TIMER_VECTOR` (0x20) and `pic::KEYBOARD_VECTOR` (0x21), both
+/// already claimed.
+pub const RESCHEDULE_VECTOR: u8 = 0x22;
+pub const TLB_SHOOTDOWN_VECTOR: u8 = 0x23;
+
+/// Real APIC ID for a registered software cpu_index, or `None` if that
+/// slot was never claimed (an index past however many real cores this
+/// boot actually brought up).
+fn apic_id_for_index(index: usize) -> Option<u32> {
+    if index >= MAX_CPUS {
+        return None;
+    }
+    unsafe { (&*&raw const APIC_ID_TO_INDEX)[index] }
+}
+
+/// Phase 9 deliverable 3: sends a real reschedule IPI to `target_cpu`
+/// (a software cpu_index) — used by `thread::spawn_pinned_to_cpu` so a
+/// thread placed on another core's run queue is picked up immediately,
+/// not just at that core's next periodic timer tick. A silent no-op if
+/// `target_cpu` was never claimed (defensive — callers are not expected
+/// to pass an unregistered index, but this must never fault into
+/// undefined APIC state if one slips through).
+pub fn send_reschedule_ipi(target_cpu: usize) {
+    if let Some(apic_id) = apic_id_for_index(target_cpu) {
+        crate::apic::send_ipi_vector(apic_id, RESCHEDULE_VECTOR);
+    }
+}
+
+/// Phase 9 deliverable 4 (`docs/ROADMAP.md` §5 — "TLB shootdown via IPI
+/// on every cross-core mapping change... a mapping torn down on one
+/// core is provably unusable on another core within a bounded time").
+///
+/// Single pending-request slot, not a queue: correctness relies on
+/// shootdowns being fully serialized by `SHOOTDOWN_LOCK` below (one
+/// initiator, one in-flight vaddr, everyone else's shootdown call spins
+/// until it's their turn) -- real, deliberate, and simple, matching
+/// this codebase's own stated preference for a coarse-but-correct
+/// mechanism over a more complex one this pass doesn't need yet (same
+/// trade-off `critical.rs`'s own kernel-wide lock makes, for the same
+/// reason).
+static SHOOTDOWN_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static TLB_SHOOTDOWN_PENDING_VADDR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static TLB_SHOOTDOWN_TARGET_COUNT: AtomicU32 = AtomicU32::new(0);
+static TLB_SHOOTDOWN_ACKS: AtomicU32 = AtomicU32::new(0);
+
+/// Called by `vmm::unmap_page_shootdown` AFTER it has already unmapped
+/// the entry and `invlpg`'d it locally on THIS core. Broadcasts a real
+/// IPI to every OTHER registered, online core, each of which runs a
+/// real `invlpg` for `vaddr` in its own interrupt handler
+/// (`idt.rs::h_tlb_shootdown` -> `handle_tlb_shootdown_ipi` below) and
+/// acknowledges — this function then spins, bounded, until every
+/// target has actually acknowledged, so a caller returning from this
+/// function has REAL evidence the mapping is unusable everywhere, not
+/// just "the IPI was sent."
+pub fn shootdown_tlb(vaddr: u64) {
+    // Serialize: bounded wait for any other core's own shootdown to
+    // finish first, same "bounded, not infinite" discipline as every
+    // other real wait in this codebase.
+    let mut spins: u64 = 0;
+    while SHOOTDOWN_LOCK
+        .compare_exchange_weak(false, true, core::sync::atomic::Ordering::Acquire, core::sync::atomic::Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+        spins += 1;
+        if spins > 500_000_000 {
+            klog_info!("TLB_SHOOTDOWN_LOCK_STUCK -- proceeding anyway (bounded wait exhausted)");
+            break;
+        }
+    }
+
+    TLB_SHOOTDOWN_PENDING_VADDR.store(vaddr, Ordering::SeqCst);
+    TLB_SHOOTDOWN_ACKS.store(0, Ordering::SeqCst);
+
+    let me = crate::smp::current_cpu_index();
+    let mut target_count: u32 = 0;
+    for cpu in 0..MAX_CPUS {
+        if cpu == me {
+            continue;
+        }
+        if let Some(apic_id) = apic_id_for_index(cpu) {
+            target_count += 1;
+            crate::apic::send_ipi_vector(apic_id, TLB_SHOOTDOWN_VECTOR);
+        }
+    }
+    TLB_SHOOTDOWN_TARGET_COUNT.store(target_count, Ordering::SeqCst);
+
+    if target_count > 0 {
+        let mut spins: u64 = 0;
+        loop {
+            let acked = TLB_SHOOTDOWN_ACKS.load(Ordering::SeqCst);
+            if acked >= target_count {
+                klog_info!(
+                    "TLB_SHOOTDOWN_PASS vaddr=0x{:x} targets={} acked={}",
+                    vaddr, target_count, acked
+                );
+                break;
+            }
+            core::hint::spin_loop();
+            spins += 1;
+            if spins > 500_000_000 {
+                klog_info!(
+                    "TLB_SHOOTDOWN_TIMEOUT vaddr=0x{:x} acked={}/{} -- proceeding anyway",
+                    vaddr, acked, target_count
+                );
+                break;
+            }
+        }
+    }
+
+    SHOOTDOWN_LOCK.store(false, core::sync::atomic::Ordering::Release);
+}
+
+/// Runs on the RECEIVING core, from `idt.rs::h_tlb_shootdown`'s
+/// interrupt context. Real, minimal ISR: read the pending vaddr, real
+/// `invlpg`, acknowledge.
+pub fn handle_tlb_shootdown_ipi() {
+    let vaddr = TLB_SHOOTDOWN_PENDING_VADDR.load(Ordering::SeqCst);
+    unsafe {
+        core::arch::asm!("invlpg [{}]", in(reg) vaddr, options(nostack, preserves_flags));
+    }
+    TLB_SHOOTDOWN_ACKS.fetch_add(1, Ordering::SeqCst);
 }
 
 /// This CORE's own software CPU index, resolved from its real hardware
@@ -168,10 +295,82 @@ extern "C" fn ap_entry() -> ! {
     serial::write_hex_raw(index as u64);
     serial::write_str("\n");
     AP_READY.store(id + 1, Ordering::SeqCst);
-    loop {
-        unsafe {
-            core::arch::asm!("cli", "hlt", options(nomem, nostack));
-        }
+
+    // Phase 9 deliverable 3 (`docs/ROADMAP.md` §5): this is the real
+    // change from deliverable 1's own version of this function, which
+    // intentionally `cli; hlt`'d forever here (that module's own doc
+    // comment: "at most one AP is ever executing non-BSP code at once,
+    // so nothing here is exposed to a real concurrent-access bug yet").
+    // That constraint is gone now -- deliverable 2 gave this core its
+    // own GDT/TSS, deliverable 5 (see critical.rs) made the kernel's
+    // shared-state lock genuinely cross-core, and thread.rs now keeps a
+    // real per-core run queue for this exact core_index. This AP claims
+    // its own idle "thread 0" (`thread::init_as_current_thread_for_cpu`,
+    // real per-core state, not the BSP's), arms its OWN local APIC
+    // timer (`apic::arm_timer_this_core` -- real, per-core hardware
+    // state, see that function's own doc comment for why the BSP's
+    // earlier `apic::init()` alone doesn't cover this), and enters a
+    // real, interruptible idle loop: `sti` then `hlt`, exactly the
+    // BSP's own post-boot idle shape. From this point on this core is a
+    // genuine, independently-scheduled participant -- its own timer
+    // ticks drive `thread::schedule()` on it (`idt.rs::h_timer`, same
+    // handler the BSP uses), and `smp::send_reschedule_ipi`/
+    // `smp::shootdown_tlb` can reach it directly.
+    thread::init_as_current_thread_for_cpu();
+    apic::arm_timer_this_core();
+    // Real bug found via an actual boot crash (page fault, GS_BASE=0):
+    // `syscall::init()`'s MSRs (EFER.SCE, STAR, LSTAR, FMASK,
+    // KERNEL_GS_BASE) are genuinely per-core hardware state, and were
+    // previously only ever set lazily by whichever driver-setup thread
+    // happened to call `syscall::init()` on whatever core IT was
+    // running on. That is NOT good enough once work-stealing
+    // (deliverable 3's own rebalance) exists: a ring-3 thread can be
+    // migrated to a DIFFERENT core between its own setup (where it
+    // called `syscall::init()`, configuring only that ORIGINAL core)
+    // and its next `syscall` instruction — landing on a core that was
+    // NEVER configured, whose `IA32_KERNEL_GS_BASE` is still 0.
+    // Configuring every core UNCONDITIONALLY, right here, before this
+    // core is ever eligible to receive a stolen thread, closes that
+    // window completely -- `syscall::init()`'s own per-core idempotency
+    // makes every driver's existing `syscall::init()` call site still
+    // harmless, just redundant from here on.
+    crate::syscall::init();
+
+    // Real bug found via an actual boot crash (double fault, corrupted
+    // RSP), not by inspection: this core has been running, since SIPI,
+    // on `bring_up_all`'s own bootstrap AP stack -- REALLY only ONE
+    // physical page (4KB) deep in practice (`bring_up_all`'s own doc
+    // comment already disclosed this: `pmm::alloc_page` gives no
+    // contiguity guarantee across calls, and only the FIRST page's
+    // address is ever actually used for `stack_top`). That was fine for
+    // the ORIGINAL version of this function, which ran one tiny,
+    // non-recursive call and then halted forever. It stopped being fine
+    // the instant this core became a genuine, ongoing scheduler
+    // participant (deliverable 3): repeated timer interrupts, each
+    // nesting `h_timer` -> `schedule()` -> `schedule_locked()` ->
+    // `switch_to`'s own callee-saved pushes, on top of whatever this
+    // core's own idle loop already had live, overflows a 4KB stack in
+    // real, observed practice. Fixed by allocating a REAL,
+    // `KERNEL_STACK_SIZE`-sized stack (the exact same size every
+    // spawned thread already gets — `thread.rs`'s own constant) and
+    // switching onto it, via inline asm, BEFORE ever enabling
+    // interrupts on this core — `mem::forget` keeps it alive forever
+    // (this core's idle context never exits, so it's never freed, same
+    // as thread 0's own boot-time stack never being freed either).
+    let idle_stack: alloc::boxed::Box<[u8]> = alloc::vec![0u8; thread::KERNEL_STACK_SIZE].into_boxed_slice();
+    let idle_stack_top = idle_stack.as_ptr() as u64 + idle_stack.len() as u64;
+    core::mem::forget(idle_stack);
+
+    unsafe {
+        core::arch::asm!(
+            "mov rsp, {0}",
+            "sti",
+            "2:",
+            "hlt",
+            "jmp 2b",
+            in(reg) idle_stack_top,
+            options(noreturn)
+        );
     }
 }
 
@@ -193,7 +392,11 @@ unsafe fn write_u64_at(phys: u64, value: u64) {
 /// moves on to the next entry, rather than hanging the BSP (and this
 /// entire boot) forever on hardware that doesn't respond the way this
 /// kernel expects.
-pub fn bring_up_all(cpus: &[CpuEntry]) {
+/// Returns the number of REAL, verified-online cores after bring-up
+/// (BSP + every AP that heartbeated), so callers (`main.rs`) can decide
+/// whether real multi-core evidence (a cross-core pinned-thread demo,
+/// `smp_race_soak`) is even meaningful for this boot.
+pub fn bring_up_all(cpus: &[CpuEntry]) -> u32 {
     let bsp_id = apic::lapic_id();
     klog_info!("SMP_BRINGUP_START bsp_apic_id={}", bsp_id);
     register_cpu(0, bsp_id); // the BSP's own slot -- gdt::init_for_cpu(0) already claimed index 0 at boot; this just makes lapic_id()->index lookups for the BSP resolve correctly from here on.
@@ -216,7 +419,7 @@ pub fn bring_up_all(cpus: &[CpuEntry]) {
                 "SMP_BRINGUP_ABORT trampoline_len={} exceeds safe budget -- refusing to proceed",
                 trampoline_len
             );
-            return;
+            return 1; // BSP only -- bring-up itself never ran
         }
 
         pmm::reserve_range(TRAMPOLINE_PHYS, 4096, "AP Trampoline");
@@ -313,4 +516,14 @@ pub fn bring_up_all(cpus: &[CpuEntry]) {
         "SMP_BRINGUP_DONE brought_up={} skipped_disabled={} timed_out={}",
         brought_up, skipped_disabled, timed_out
     );
+    brought_up + 1 // +1 for the BSP itself, always online
+}
+
+/// Phase 9 deliverable 3's real pinned-thread demo body
+/// (`main.rs`, right after bring-up): logs its own REAL `cpu_index`
+/// (`smp::current_cpu_index()`, resolved from actual hardware
+/// `apic::lapic_id()`) so the serial log itself is the evidence this
+/// thread genuinely ran on the core it was pinned to, then exits.
+pub extern "C" fn pinned_demo_thread() {
+    klog_info!("SMP_PINNED_DEMO_RUNNING cpu_index={}", current_cpu_index());
 }

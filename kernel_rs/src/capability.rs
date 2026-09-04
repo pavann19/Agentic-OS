@@ -168,6 +168,16 @@ pub fn create_object(kind: KernelObjectKind) -> ObjectId {
     })
 }
 
+/// Real, typed count of every object ever created (alive or not) —
+/// `smp_race_soak.rs`'s own cross-core race evidence needs a ground
+/// truth for "how many objects genuinely exist" that itself goes
+/// through the same real, now-cross-core-safe lock every other
+/// `OBJECTS` accessor does, not a separately-tracked counter that
+/// could drift from the Vec's own real length.
+pub fn object_count() -> usize {
+    crate::critical::without_interrupts(|| unsafe { objects_mut().len() })
+}
+
 /// Returns the kind (and any data it carries — physical range, vector,
 /// port range) of a live object, for callers that already resolved a
 /// capability against it and now need to know WHAT it actually names.

@@ -237,7 +237,14 @@ pub fn revoke_process(pid: u32, target_pml4: u64, vaddr_base: u64, phys_base: u6
         unsafe {
             for i in 0..count {
                 let vaddr = vaddr_base + (i as u64) * 4096;
-                vmm::unmap_page(target_pml4, vaddr);
+                // Phase 9 deliverable 4: a capability revocation is
+                // exactly the "cross-core mapping change" case the
+                // roadmap names explicitly -- the process being
+                // revoked could genuinely be scheduled on ANY core by
+                // now (deliverable 3), so a plain local `invlpg`
+                // (`vmm::unmap_page`) is no longer enough to guarantee
+                // the revoked page is actually unreachable everywhere.
+                vmm::unmap_page_shootdown(target_pml4, vaddr);
             }
         }
     }

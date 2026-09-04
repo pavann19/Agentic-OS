@@ -28,7 +28,7 @@ use alloc::collections::VecDeque;
 use core::arch::asm;
 use crate::klog_info;
 
-const KERNEL_STACK_SIZE: usize = 64 * 1024;
+pub const KERNEL_STACK_SIZE: usize = 64 * 1024;
 
 #[repr(C)]
 #[derive(Default)]
@@ -83,6 +83,18 @@ pub struct Thread {
 }
 
 static mut NEXT_TID: ThreadId = 1;
+
+// Phase 9 deliverable 3 (`docs/ROADMAP.md` §5 — "SMP-safe scheduler:
+// per-core run queues... IPI-based reschedule"): what used to be ONE
+// global ready queue and ONE global "currently running" slot are now
+// real, PER-CORE arrays, indexed by `smp::current_cpu_index()` — each
+// core schedules among its OWN threads, not a single queue every core
+// would otherwise contend for on every tick. Every accessor below still
+// runs under `critical::without_interrupts`, which Phase 9 deliverable
+// 5 upgraded into a genuine cross-core lock (see critical.rs's own doc
+// comment) — the array indexing itself needs no separate lock, the
+// existing discipline already covers it.
+//
 // Box<Thread>, not Thread, in both places: `schedule()` takes a raw
 // pointer into the current thread's `saved_rsp` field BEFORE requeuing it,
 // and a `VecDeque<Thread>` can move existing elements on reallocation,
@@ -91,20 +103,42 @@ static mut NEXT_TID: ThreadId = 1;
 // the Thread itself, and any raw pointer into its fields, stays put on the
 // heap regardless. Found by review, not by a crash — worth fixing before
 // it became one.
-static mut THREADS: Option<VecDeque<Box<Thread>>> = None;
-static mut CURRENT: Option<Box<Thread>> = None;
+const RUN_QUEUE_INIT: Option<VecDeque<Box<Thread>>> = None;
+const CURRENT_INIT: Option<Box<Thread>> = None;
+static mut RUN_QUEUES: [Option<VecDeque<Box<Thread>>>; crate::smp::MAX_CPUS] =
+    [RUN_QUEUE_INIT; crate::smp::MAX_CPUS];
+static mut CURRENTS: [Option<Box<Thread>>; crate::smp::MAX_CPUS] = [CURRENT_INIT; crate::smp::MAX_CPUS];
 
-// `&raw mut` + deref, not `&mut THREADS`/`&mut CURRENT` directly — the
-// compiler's own suggested fix for the static_mut_refs lint everywhere
-// else in this codebase (gdt.rs, idt.rs, pmm.rs). Centralized here since
-// thread.rs's scheduler touches both statics from several functions.
+// `&raw mut` + deref, not `&mut RUN_QUEUES`/`&mut CURRENTS` directly —
+// the compiler's own suggested fix for the static_mut_refs lint
+// everywhere else in this codebase (gdt.rs, idt.rs, pmm.rs).
+// Centralized here since thread.rs's scheduler touches both statics
+// from several functions. Each returns THIS core's own slot —
+// `smp::current_cpu_index()` resolves real hardware APIC-ID identity,
+// so a caller on core 2 can never reach through these into core 0's
+// state by accident.
 #[allow(static_mut_refs)]
 unsafe fn threads_mut() -> &'static mut Option<VecDeque<Box<Thread>>> {
-    &mut *&raw mut THREADS
+    &mut (&mut *&raw mut RUN_QUEUES)[crate::smp::current_cpu_index()]
 }
 #[allow(static_mut_refs)]
 unsafe fn current_mut() -> &'static mut Option<Box<Thread>> {
-    &mut *&raw mut CURRENT
+    &mut (&mut *&raw mut CURRENTS)[crate::smp::current_cpu_index()]
+}
+/// Same as `current_mut`/`threads_mut`, but for an EXPLICITLY named
+/// core rather than "whichever core is calling" — needed by
+/// cross-core placement (`spawn_pinned_to_cpu`) and introspection
+/// (`snapshot`, which must report every core's threads, not just the
+/// calling core's own). Callers MUST already hold the kernel lock
+/// (`critical::without_interrupts`) — these do no locking of their own,
+/// same convention as `threads_mut`/`current_mut`.
+#[allow(static_mut_refs)]
+unsafe fn threads_mut_for(cpu: usize) -> &'static mut Option<VecDeque<Box<Thread>>> {
+    &mut (&mut *&raw mut RUN_QUEUES)[cpu]
+}
+#[allow(static_mut_refs)]
+unsafe fn current_ref_for(cpu: usize) -> &'static Option<Box<Thread>> {
+    &(&*&raw const CURRENTS)[cpu]
 }
 
 /// Entry trampoline every new thread's stack is rigged to "return" into.
@@ -203,6 +237,58 @@ unsafe fn spawn_in_locked(entry: extern "C" fn(), address_space: u64) -> ThreadI
         threads_mut().as_mut().unwrap().push_back(thread);
         tid
     }
+}
+
+/// Phase 9 deliverable 3's real, demonstrable IPI-based reschedule:
+/// builds a new thread exactly like `spawn_in`, but pushes it onto
+/// `target_cpu`'s OWN run queue (not the calling core's) and sends
+/// that core a real reschedule IPI (`smp::send_reschedule_ipi`)
+/// immediately, rather than leaving it to be picked up by that core's
+/// own next periodic timer tick (bounded, but up to one full tick
+/// period later). `target_cpu` is a software cpu_index
+/// (`smp::current_cpu_index()`'s own numbering, 0 = BSP), not a raw
+/// APIC ID — `smp::send_reschedule_ipi` does that translation.
+///
+/// Real, not simulated: the target core's own IDT has a handler
+/// installed at `smp::RESCHEDULE_VECTOR` (`idt.rs::h_reschedule`) that
+/// calls `schedule()` directly from interrupt context, the same way
+/// `h_timer` already does — the only difference is WHAT triggered the
+/// interrupt (another core's `send_ipi_vector`, not the local LAPIC
+/// timer).
+pub fn spawn_pinned_to_cpu(entry: extern "C" fn(), address_space: u64, target_cpu: usize) -> ThreadId {
+    crate::critical::without_interrupts(|| unsafe {
+        let tid = NEXT_TID;
+        NEXT_TID += 1;
+
+        let mut stack = alloc::vec![0u8; KERNEL_STACK_SIZE].into_boxed_slice();
+        let stack_top = stack.as_mut_ptr() as u64 + KERNEL_STACK_SIZE as u64;
+        let mut sp = stack_top;
+        sp -= 8;
+        *(sp as *mut u64) = entry as u64;
+        sp -= 8;
+        *(sp as *mut u64) = thread_trampoline as *const () as u64;
+        sp -= core::mem::size_of::<CalleeSaved>() as u64;
+        *(sp as *mut CalleeSaved) = CalleeSaved::default();
+
+        let thread = Box::new(Thread {
+            id: tid,
+            state: ThreadState::Ready,
+            saved_rsp: sp,
+            _stack: stack,
+            address_space,
+            cap_table: crate::capability::CapabilityTable::new(),
+            iopb: [0xFFu8; crate::gdt::IOPB_BYTES],
+        });
+
+        let q = threads_mut_for(target_cpu);
+        if q.is_none() {
+            *q = Some(VecDeque::new());
+        }
+        q.as_mut().unwrap().push_back(thread);
+
+        crate::smp::send_reschedule_ipi(target_cpu);
+        tid
+    })
 }
 
 /// Same as `spawn`, but grants a SET of capabilities (`grants`, each an
@@ -401,10 +487,20 @@ unsafe extern "C" fn switch_to(old_rsp_slot: *mut u64, new_rsp: u64, new_cr3: u6
 // scheduling point that runs on a DIFFERENT, still-valid stack, which
 // `schedule()` reaches on every tick regardless of which thread ends
 // up resumed there.
-static mut ZOMBIE: Option<Box<Thread>> = None;
+// Phase 9 deliverable 3: per-core, same reasoning as RUN_QUEUES/CURRENTS
+// above. A single shared ZOMBIE slot would reopen exactly the race this
+// mechanism exists to prevent, one level up: two DIFFERENT cores each
+// exiting a thread in quick succession (serialized by the kernel lock,
+// but not otherwise related) could overwrite each other's stashed zombie
+// before either got reaped, silently leaking one Box<Thread> and its
+// 64KB stack — the same "drop inline, destructor never runs" bug this
+// file's own history already found and fixed once, reintroduced via a
+// cross-core race instead of a same-core one.
+const ZOMBIE_INIT: Option<Box<Thread>> = None;
+static mut ZOMBIES: [Option<Box<Thread>>; crate::smp::MAX_CPUS] = [ZOMBIE_INIT; crate::smp::MAX_CPUS];
 #[allow(static_mut_refs)]
 unsafe fn zombie_mut() -> &'static mut Option<Box<Thread>> {
-    &mut *&raw mut ZOMBIE
+    &mut (&mut *&raw mut ZOMBIES)[crate::smp::current_cpu_index()]
 }
 
 /// Called from `idt.rs::h_timer` on every tick. Picks the next Ready
@@ -412,17 +508,67 @@ unsafe fn zombie_mut() -> &'static mut Option<Box<Thread>> {
 /// runnable yet (Phase 1's early state, before more than one thread
 /// exists) or scheduling hasn't been initialized.
 ///
-/// Wrapped in `without_interrupts` defensively — this already only ever
-/// runs with hardware IF=0 (interrupt-gate entry), so the wrapper is a
-/// documented no-op here today, not a fix in itself. It exists so the
-/// invariant ("nothing touches THREADS/CURRENT/ZOMBIE without interrupts
-/// disabled") is enforced uniformly and stays true even if this function
-/// is ever called from a differently-configured gate later.
+/// Phase 9 deliverable 5's real fix (see `critical.rs::acquire`'s own
+/// doc comment for the full bug this replaced): does NOT use
+/// `critical::without_interrupts`'s normal closure-scoped
+/// acquire/release — `schedule_locked` below manages the kernel lock
+/// EXPLICITLY, releasing it manually right before the low-level
+/// `switch_to` context switch, because that call does not "return" to
+/// this function in the normal sense for the outgoing thread (see
+/// `critical.rs`'s doc comment for exactly why relying on
+/// `without_interrupts`'s automatic cleanup there deadlocked every
+/// other core the first time it happened). `cli` here is still real and
+/// necessary — `schedule()` is called both from interrupt-gate context
+/// (already IF=0) and from ordinary thread context
+/// (`kill_current_and_reschedule`, IF=1) — this makes both cases
+/// correct uniformly.
 pub fn schedule() {
-    crate::critical::without_interrupts(|| unsafe { schedule_locked() });
+    let flags: u64;
+    unsafe {
+        core::arch::asm!(
+            "pushfq",
+            "pop {0}",
+            "cli",
+            out(reg) flags,
+            options(nomem, preserves_flags)
+        );
+    }
+    crate::critical::acquire();
+    unsafe { schedule_locked(flags) };
+    // Reached ONLY on a bail-out path that released the lock and
+    // restored flags itself WITHOUT switching (see the early `return`s
+    // inside `schedule_locked`) -- the switching path's own `switch_to`
+    // already handles both (release before switching, `sti` on
+    // whichever thread resumes), so there is deliberately nothing left
+    // to do here in that case.
 }
 
-unsafe fn schedule_locked() {
+/// `caller_flags` — the RFLAGS captured by `schedule()` before it
+/// called `cli` — is threaded through explicitly so every EARLY-RETURN
+/// path here (nothing to schedule yet, lost a work-steal race, etc.)
+/// can restore it correctly before bailing, exactly mirroring what
+/// `without_interrupts`'s automatic cleanup used to do. The one path
+/// that reaches `switch_to` does NOT restore `caller_flags` — it
+/// doesn't need to: `switch_to`'s own unconditional `sti` (its own doc
+/// comment explains why) already guarantees interrupts are enabled for
+/// whichever thread ends up resumed, the correct behavior regardless of
+/// what `caller_flags` said (a thread should never resume with
+/// interrupts disabled just because whoever LAST scheduled happened to
+/// call `schedule()` from a `cli`'d context).
+unsafe fn schedule_locked(caller_flags: u64) {
+    // Restores `caller_flags` and releases the kernel lock -- the exact
+    // pairing every early-return path below needs, extracted once
+    // rather than repeated at each `return`.
+    macro_rules! bail {
+        () => {{
+            crate::critical::release();
+            if caller_flags & 0x200 != 0 {
+                core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+            }
+            return;
+        }};
+    }
+
     unsafe {
         // Reap whatever the PREVIOUS tick's exiting thread left behind —
         // safe here specifically because this code is running on
@@ -436,12 +582,12 @@ unsafe fn schedule_locked() {
 
         let threads = match threads_mut().as_mut() {
             Some(t) => t,
-            None => return,
+            None => bail!(),
         };
 
         let mut current = match current_mut().take() {
             Some(t) => t,
-            None => return, // not initialized yet
+            None => bail!(), // not initialized yet
         };
 
         if current.state == ThreadState::Running {
@@ -465,9 +611,48 @@ unsafe fn schedule_locked() {
         let mut next = match threads.pop_front() {
             Some(t) => t,
             None => {
-                // Nothing runnable (shouldn't happen once the idle thread
-                // exists) — put back what we can and bail.
-                return;
+                // Phase 9 deliverable 3's real, periodic load balancing:
+                // this core has nothing of its own left runnable this
+                // tick. Rather than sit idle while another core's queue
+                // backs up, steal ONE thread off the back of whichever
+                // OTHER core currently holds the most — "even a simple
+                // periodic rebalance is acceptable" (docs/ROADMAP.md §5)
+                // is exactly this: it runs on every tick that would
+                // otherwise go idle, not on a separate timer, and moves
+                // at most one thread per steal (no thundering-herd
+                // migration). Real cross-core reach: `threads_mut_for`
+                // indexes another core's OWN run queue directly, safe
+                // here because this whole function already runs under
+                // the kernel-wide lock (critical.rs) that now genuinely
+                // excludes every other core, not just this one's own
+                // interrupts.
+                let me = crate::smp::current_cpu_index();
+                let mut best_cpu = usize::MAX;
+                let mut best_len = 0usize;
+                for cpu in 0..crate::smp::MAX_CPUS {
+                    if cpu == me {
+                        continue;
+                    }
+                    if let Some(q) = threads_mut_for(cpu).as_ref() {
+                        if q.len() > best_len {
+                            best_len = q.len();
+                            best_cpu = cpu;
+                        }
+                    }
+                }
+                if best_cpu != usize::MAX {
+                    if let Some(stolen) = threads_mut_for(best_cpu).as_mut().unwrap().pop_back() {
+                        klog_info!("SMP_WORK_STOLEN thief_cpu={} victim_cpu={} tid={}", me, best_cpu, stolen.id);
+                        stolen
+                    } else {
+                        bail!(); // lost the race to another concurrent steal attempt on the same tick -- nothing left there either, bail cleanly
+                    }
+                } else {
+                    // Genuinely nothing runnable anywhere (shouldn't
+                    // happen once every core has at least its own idle
+                    // thread) — put back what we can and bail.
+                    bail!();
+                }
             }
         };
         next.state = ThreadState::Running;
@@ -534,6 +719,17 @@ unsafe fn schedule_locked() {
         // Thread struct — stable regardless of the VecDeque itself
         // reallocating (only the Box handle moves, never the heap-
         // allocated Thread it points to). See THREADS's doc comment.
+        //
+        // Real, necessary, explicit release RIGHT HERE, before the
+        // switch -- see `critical.rs::acquire`'s own doc comment for
+        // the full deadlock this fixes. `switch_to` never "returns" to
+        // this call site in the normal sense for the outgoing thread,
+        // so this is the ONLY point that can correctly release the
+        // kernel lock on its behalf; `caller_flags` is deliberately NOT
+        // restored here (`switch_to`'s own unconditional `sti` already
+        // covers whichever thread ends up resumed, the correct
+        // behavior regardless of the original caller's own flags).
+        crate::critical::release();
         switch_to(old_rsp_slot, new_rsp, new_address_space);
     }
 }
@@ -592,14 +788,39 @@ pub fn kill_current_and_reschedule() {
     schedule();
 }
 
-/// One-time setup: makes the calling context (kernel_main, post-Phase-0)
-/// "thread 0" so `schedule()` has something valid to save into on the
-/// very first timer tick.
+/// One-time setup: makes the calling context (kernel_main, post-Phase-0,
+/// running on the BSP) "thread 0" so `schedule()` has something valid
+/// to save into on the very first timer tick. `current_mut()` resolves
+/// to the BSP's OWN slot (`smp::current_cpu_index()` == 0 at this point
+/// in boot), so this only ever touches core 0's state.
 pub fn init_as_current_thread() {
+    crate::critical::without_interrupts(|| unsafe { init_as_current_thread_locked() });
+}
+
+/// Phase 9 deliverable 3: same idea as `init_as_current_thread`, for an
+/// AP claiming ITS OWN idle "thread 0" once it's running (`smp.rs::
+/// ap_entry`, after `gdt::init_for_cpu`/`idt::load_current_cpu` have
+/// already run) — every real core needs a valid `CURRENTS[cpu]` before
+/// its own first timer tick can call `schedule()`, exactly the same
+/// bootstrap need the BSP already had, just per-core now instead of
+/// global.
+pub fn init_as_current_thread_for_cpu() {
+    crate::critical::without_interrupts(|| unsafe { init_as_current_thread_locked() });
+}
+
+unsafe fn init_as_current_thread_locked() {
     unsafe {
-        let stack = alloc::vec![0u8; 0].into_boxed_slice(); // kernel_main's real stack isn't ours to own
+        // Real, unique id per core's own idle thread -- a hardcoded 0
+        // was correct back when there was only ever ONE such thread
+        // (the BSP's); with one of these per real core now, a shared
+        // hardcoded id would collide across cores in audit attribution
+        // and introspection (`thread::snapshot`), silently conflating
+        // unrelated cores' own kernel-idle context under one identity.
+        let tid = NEXT_TID;
+        NEXT_TID += 1;
+        let stack = alloc::vec![0u8; 0].into_boxed_slice(); // this core's real boot/entry stack isn't ours to own
         *current_mut() = Some(Box::new(Thread {
-            id: 0,
+            id: tid,
             state: ThreadState::Running,
             saved_rsp: 0, // never read until this thread is switched OUT of, which fills it in
             _stack: stack,
@@ -659,28 +880,38 @@ pub fn current_id() -> ThreadId {
     crate::critical::without_interrupts(|| unsafe { current_mut().as_ref().map(|t| t.id).unwrap_or(0) })
 }
 
-/// Real, typed snapshot of every live thread — `(id, state, is_user)`,
-/// `is_user` meaning this thread runs in its own process address space
-/// rather than the shared kernel one. Phase 5's introspection API
-/// (`introspect.rs`) builds its `ThreadInfo` structs from exactly this,
-/// not from any text-formatted log line — the whole point of "typed
-/// interfaces, no text scraping" (`docs/ROADMAP.md`'s Phase 5 exit
-/// criteria) is that this function returns real struct data, the same
-/// data the scheduler itself operates on, not a re-parsed rendering of
-/// it. Takes the same `critical::without_interrupts` lock every other
-/// THREADS/CURRENT accessor in this file does — a caller (a syscall
-/// handler) walking this while `schedule()` is mid-mutation would be the
-/// exact same TOCTOU class already fixed everywhere else here.
+/// Real, typed snapshot of every live thread ACROSS EVERY REAL CORE —
+/// `(id, state, is_user)`, `is_user` meaning this thread runs in its own
+/// process address space rather than the shared kernel one. Phase 5's
+/// introspection API (`introspect.rs`) builds its `ThreadInfo` structs
+/// from exactly this, not from any text-formatted log line — the whole
+/// point of "typed interfaces, no text scraping" (`docs/ROADMAP.md`'s
+/// Phase 5 exit criteria) is that this function returns real struct
+/// data, the same data the scheduler itself operates on, not a
+/// re-parsed rendering of it. Takes the same `critical::without_interrupts`
+/// lock every other RUN_QUEUES/CURRENTS accessor in this file does — a
+/// caller (a syscall handler) walking this while `schedule()` is
+/// mid-mutation on ANY core would be the exact same TOCTOU class
+/// already fixed everywhere else here.
+///
+/// Phase 9 deliverable 3: walks EVERY core's own `CURRENTS`/`RUN_QUEUES`
+/// slot (`threads_mut_for`/`current_ref_for`, not the calling core's own
+/// `current_mut`/`threads_mut`) — a single-core `snapshot()` would
+/// silently under-report the moment more than one core has real threads
+/// running, exactly the kind of introspection gap Phase 5's own "typed,
+/// not text-scraped" discipline exists to catch.
 pub fn snapshot() -> alloc::vec::Vec<(ThreadId, ThreadState, bool)> {
     crate::critical::without_interrupts(|| unsafe {
         let kernel_pml4 = crate::vmm::kernel_pml4_phys();
         let mut out = alloc::vec::Vec::new();
-        if let Some(t) = current_mut().as_ref() {
-            out.push((t.id, ThreadState::Running, t.address_space != kernel_pml4));
-        }
-        if let Some(threads) = threads_mut().as_ref() {
-            for t in threads.iter() {
-                out.push((t.id, t.state, t.address_space != kernel_pml4));
+        for cpu in 0..crate::smp::MAX_CPUS {
+            if let Some(t) = current_ref_for(cpu).as_ref() {
+                out.push((t.id, ThreadState::Running, t.address_space != kernel_pml4));
+            }
+            if let Some(threads) = threads_mut_for(cpu).as_ref() {
+                for t in threads.iter() {
+                    out.push((t.id, t.state, t.address_space != kernel_pml4));
+                }
             }
         }
         out

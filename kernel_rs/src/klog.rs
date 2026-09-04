@@ -15,22 +15,41 @@ pub fn init() {
     crate::serial::write_str("KLOG_INIT\n");
 }
 
+// Phase 9 deliverable 5: COM1 is one physical UART -- real shared
+// hardware state, not just a shared Rust static. Before this, two real
+// cores logging concurrently (entirely possible once deliverable 3's
+// scheduler runs work on more than one core) could interleave their
+// bytes on the wire, corrupting BOTH lines into unparseable garbage --
+// this module's own doc comment already predicted this exact gap
+// ("klog.rs's... SerialWriter/COM1 access are all single,
+// unsynchronized, shared kernel state", smp.rs's original module doc).
+// `critical::without_interrupts` is now a real, kernel-wide,
+// cross-core lock (see critical.rs's own doc comment) -- wrapping each
+// log call's entire write sequence in it makes one full log line
+// atomic with respect to every other core, not just this one.
+
 pub fn info(args: core::fmt::Arguments) {
-    let _ = write!(SerialWriter, "[INFO] ");
-    let _ = SerialWriter.write_fmt(args);
-    let _ = SerialWriter.write_str("\n");
+    crate::critical::without_interrupts(|| {
+        let _ = write!(SerialWriter, "[INFO] ");
+        let _ = SerialWriter.write_fmt(args);
+        let _ = SerialWriter.write_str("\n");
+    });
 }
 
 pub fn warn(args: core::fmt::Arguments) {
-    let _ = write!(SerialWriter, "[WARN] ");
-    let _ = SerialWriter.write_fmt(args);
-    let _ = SerialWriter.write_str("\n");
+    crate::critical::without_interrupts(|| {
+        let _ = write!(SerialWriter, "[WARN] ");
+        let _ = SerialWriter.write_fmt(args);
+        let _ = SerialWriter.write_str("\n");
+    });
 }
 
 pub fn error(args: core::fmt::Arguments) {
-    let _ = write!(SerialWriter, "[ERROR] ");
-    let _ = SerialWriter.write_fmt(args);
-    let _ = SerialWriter.write_str("\n");
+    crate::critical::without_interrupts(|| {
+        let _ = write!(SerialWriter, "[ERROR] ");
+        let _ = SerialWriter.write_fmt(args);
+        let _ = SerialWriter.write_str("\n");
+    });
 }
 
 #[macro_export]

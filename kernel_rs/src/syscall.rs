@@ -176,8 +176,44 @@ const IA32_LSTAR: u32 = 0xC000_0082;
 const IA32_FMASK: u32 = 0xC000_0084;
 const EFER_SCE: u64 = 1 << 0; // System Call Extensions enable
 
-static mut KERNEL_RSP: u64 = 0;
-static mut USER_RSP_SCRATCH: u64 = 0;
+// Phase 9 deliverable 5's real, live-crash-found fix (a real double
+// fault under `-smp`, root-caused via disassembly + addr2line, not
+// guessed): these used to be TWO PLAIN GLOBAL `static mut`s, shared by
+// every core and every in-flight syscall. That was already a latent
+// bug even before SMP existed -- `syscall_entry`'s own comment below
+// explains dispatch is deliberately preemptible (`sti` mid-entry, so a
+// blocking syscall like `ipc::send`/`receive` doesn't deadlock the
+// timer) -- meaning a SECOND thread's OWN syscall could enter and
+// OVERWRITE `USER_RSP_SCRATCH` while a FIRST thread's syscall was still
+// suspended mid-dispatch; when the first thread resumed and read
+// `USER_RSP_SCRATCH` back to return to user space, it got the SECOND
+// thread's value instead of its own. Real cross-core concurrency
+// (deliverable 3) made this dramatically easier to hit (now genuinely
+// simultaneous, not just interleaved by one core's own preemption), but
+// the bug shape is the same one `gdt.rs`'s `TSS.RSP0`/`IOPB` history
+// already found and fixed twice — a single shared slot standing in for
+// what must be per-execution-context state.
+//
+// Fixed properly this time, with the ARCHITECTURALLY INTENDED mechanism
+// for exactly this problem: `SWAPGS` + `IA32_KERNEL_GS_BASE`, one real
+// per-CPU two-`u64` slot per core (`PER_CPU_SYSCALL_SCRATCH`), indexed
+// by `smp::current_cpu_index()` ONLY at MSR-setup time (once per core,
+// in `init()` — see its own doc comment), never inside the hot
+// `syscall_entry` path itself, which instead reaches its own slot via
+// `swapgs` + GS-relative addressing — real hardware support for "find
+// my own per-core data with no general-purpose register free to use as
+// an index yet", which is exactly the situation at the very first
+// instruction of a SYSCALL entry.
+#[repr(C)]
+struct PerCpuSyscallScratch {
+    kernel_rsp: u64,
+    user_rsp_scratch: u64,
+}
+const PER_CPU_SYSCALL_SCRATCH_ZERO: PerCpuSyscallScratch = PerCpuSyscallScratch { kernel_rsp: 0, user_rsp_scratch: 0 };
+static mut PER_CPU_SYSCALL_SCRATCH: [PerCpuSyscallScratch; crate::smp::MAX_CPUS] =
+    [PER_CPU_SYSCALL_SCRATCH_ZERO; crate::smp::MAX_CPUS];
+
+const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
 unsafe fn rdmsr(msr: u32) -> u64 {
     let (low, high): (u32, u32);
@@ -197,7 +233,9 @@ unsafe fn wrmsr(msr: u32, value: u64) {
 /// `gdt::set_kernel_stack` on every switch) — same real bug, same fix,
 /// see `gdt::set_kernel_stack`'s doc comment for the full story.
 pub fn set_kernel_stack(rsp: u64) {
-    unsafe { KERNEL_RSP = rsp };
+    unsafe {
+        (&mut *&raw mut PER_CPU_SYSCALL_SCRATCH)[crate::smp::current_cpu_index()].kernel_rsp = rsp;
+    }
 }
 
 /// Dispatches one syscall. `num` is RAX at entry; `a0`/`a1` are the first
@@ -414,8 +452,44 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
 #[unsafe(naked)]
 extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
-        "mov [{user_rsp}], rsp",     // stash the user RSP
-        "mov rsp, [{kernel_rsp}]",   // switch onto the kernel stack
+        // Real fix (see PER_CPU_SYSCALL_SCRATCH's own doc comment for
+        // the live crash this replaced): `swapgs` first -- this core's
+        // OWN `IA32_KERNEL_GS_BASE` (set once, per-core, by `init()`)
+        // becomes the active GS base, so `gs:[0]`/`gs:[8]` below reach
+        // THIS core's own two-`u64` scratch slot, never another core's.
+        // No general-purpose register is touched or needed to compute
+        // that address -- exactly why `swapgs` is the real, intended
+        // mechanism for this exact "which core am I" problem at the
+        // very first instruction of a syscall.
+        //
+        // Real SECOND bug found via a live crash (page fault, cr2=0x8 —
+        // a write through a NULL-based GS address) even after the
+        // per-core MSR setup above was fully correct on every core: the
+        // "active GS base" toggle `swapgs` flips is genuinely PER-CORE
+        // hardware state, invisible to `switch_to`/the scheduler
+        // entirely. This kernel's own syscall dispatch is deliberately
+        // PREEMPTIBLE (`sti` a few lines below, so a blocking syscall
+        // like `ipc::send`/`receive` doesn't stall the timer forever) —
+        // if thread A gets preempted mid-dispatch while this core's
+        // "active GS" is still toggled to KERNEL (never restored, since
+        // A's own matching exit-side swap hasn't run yet), and thread B
+        // (a DIFFERENT ring-3 thread) then takes ITS OWN `syscall` on
+        // this SAME core, B's entry `swapgs` toggles the core's ALREADY
+        // -kernel state back to USER instead of TO kernel — so B's
+        // `gs:[8]`/`gs:[0]` accesses land on B's own (zeroed, never
+        // configured) user GS base, i.e. address 8 and 0. Fixed by
+        // toggling BACK to user-active immediately after this narrow,
+        // interrupts-still-disabled pair of GS-relative accesses,
+        // rather than leaving kernel-GS "held" active across the whole
+        // (preemptible) dispatch — the exit path below does the
+        // matching toggle-in/toggle-out pair again, just before it
+        // needs `gs:[8]` one more time. Every GS toggle pair is now
+        // fully atomic with respect to any other thread's own entry on
+        // this core, regardless of what gets preempted in between.
+        "swapgs",
+        "mov gs:[8], rsp",           // stash the user RSP in THIS core's own slot
+        "mov rsp, gs:[0]",           // switch onto THIS core's own current kernel stack
+        "swapgs",                    // restore user-GS-active state -- see the real bug this fixes, above
         "push rcx",                  // user RIP (SYSCALL-saved) — must survive to sysretq
         "push r11",                  // user RFLAGS (SYSCALL-saved) — same
         // Real bug this session found: IA32_FMASK clears IF on SYSCALL
@@ -471,23 +545,49 @@ extern "C" fn syscall_entry() {
         // instant it lands back in ring 3, so nothing stays disabled
         // longer than this narrow gap.
         "cli",
-        "mov rsp, [{user_rsp}]",     // back onto the user's own stack
+        // Real fix, matching entry's own toggle-in/toggle-out pair
+        // (see entry's own doc comment): swap to kernel-GS just long
+        // enough to read this core's own saved user RSP back out, then
+        // immediately swap back to user-GS before `sysretq` -- never
+        // leave kernel-GS "held" active across anything preemptible
+        // (this whole exit sequence runs `cli`'d, so it's already
+        // atomic with respect to this core's own interrupts; the
+        // narrow toggle-in/toggle-out here keeps it correct with
+        // respect to any OTHER thread's entry on this same core too).
+        "swapgs",
+        "mov rsp, gs:[8]",           // back onto the user's own stack (THIS core's own slot -- see entry)
+        "swapgs",                    // restore the user's own GS base before returning to ring 3
         "sysretq",
-        user_rsp = sym USER_RSP_SCRATCH,
-        kernel_rsp = sym KERNEL_RSP,
         dispatch = sym syscall_dispatch,
     );
 }
 
-static SYSCALL_INITIALIZED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+// Phase 9: EFER/STAR/LSTAR/FMASK/KERNEL_GS_BASE are all genuinely
+// PER-CORE hardware MSRs, not shared — a single global "already
+// initialized" flag (the pre-SMP version of this) meant only whichever
+// core happened to call `init()` FIRST ever actually got SYSCALL/SYSRET
+// configured; every OTHER core would `#UD`-fault the first time a
+// ring-3 thread scheduled onto it tried to execute `syscall`. Real,
+// per-CPU idempotency instead: this is still called from the same
+// driver-setup call sites as before (agent.rs, ahci.rs, init.rs, etc.),
+// which already run on whatever core the scheduler happens to place
+// them on — making `init()` itself per-core-aware means every core that
+// ever hosts one of those threads gets correctly configured, with no
+// new call sites needed anywhere.
+const SYSCALL_INITIALIZED_ZERO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static SYSCALL_INITIALIZED: [core::sync::atomic::AtomicBool; crate::smp::MAX_CPUS] =
+    [SYSCALL_INITIALIZED_ZERO; crate::smp::MAX_CPUS];
 
-/// Idempotent: init.rs's real init process and the feature-gated
-/// demo_ring3 proof can both run in the same build and each call this
-/// once before entering ring 3 for the first time. Re-running the MSR
-/// writes with the same values would be harmless anyway, but this avoids
-/// a confusing duplicate "initialized" log line.
+/// Idempotent PER CORE: init.rs's real init process and the
+/// feature-gated demo_ring3 proof can both run in the same build and
+/// each call this once before entering ring 3 for the first time.
+/// Re-running the MSR writes with the same values on the SAME core
+/// would be harmless anyway, but this avoids a confusing duplicate
+/// "initialized" log line — and, correctly, does NOT skip a core just
+/// because some OTHER core already ran this once.
 pub fn init() {
-    if SYSCALL_INITIALIZED.swap(true, core::sync::atomic::Ordering::SeqCst) {
+    let cpu = crate::smp::current_cpu_index();
+    if SYSCALL_INITIALIZED[cpu].swap(true, core::sync::atomic::Ordering::SeqCst) {
         return;
     }
     unsafe {
@@ -509,6 +609,14 @@ pub fn init() {
         // (before the stack switch above is even reachable in the
         // interrupt-safety sense) can't be interrupted mid-transition.
         wrmsr(IA32_FMASK, 0x200);
+
+        // Real fix (see PER_CPU_SYSCALL_SCRATCH's own doc comment):
+        // point THIS core's own IA32_KERNEL_GS_BASE at THIS core's own
+        // scratch slot -- `syscall_entry`'s `swapgs` + `gs:[0]`/`gs:[8]`
+        // then reach exactly this address, on every core, without ever
+        // needing a runtime index lookup inside the hot entry path.
+        let scratch_addr = (&raw const (&*&raw const PER_CPU_SYSCALL_SCRATCH)[cpu]) as u64;
+        wrmsr(IA32_KERNEL_GS_BASE, scratch_addr);
     }
-    klog_info!("SYSCALL/SYSRET initialized (single-core kernel-stack model)");
+    klog_info!("SYSCALL/SYSRET initialized cpu_index={} (real per-core GS-based kernel-stack model)", cpu);
 }
