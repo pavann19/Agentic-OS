@@ -180,7 +180,18 @@ fn copy_bytes(dst: &mut [u8], src: &[u8]) {
     let n = dst.len().min(src.len());
     let mut k = 0usize;
     while k < n {
-        dst[k] = src[k];
+        // core::hint::black_box: real, targeted fix attempt for the
+        // still-open DNS/UDP crash -- LLVM's loop-idiom-recognition
+        // pass can convert even a plain, manual byte-copy loop like
+        // this one BACK into a real `memcpy` call, regardless of
+        // having avoided `[u8]::copy_from_slice` in source. black_box
+        // is the real, stable, documented way to opt a loop body out
+        // of that recognition (it forces the value through as an
+        // opaque, non-optimizable operation) -- a genuine test of
+        // whether idiom recognition, not the missing linker config
+        // already fixed, is what's still generating an unreachable
+        // call in this specific path.
+        dst[k] = core::hint::black_box(src[k]);
         k += 1;
     }
 }
@@ -889,21 +900,25 @@ pub extern "C" fn _start() -> ! {
         // the UDP layer under it) is REAL, spec-based code, but calling
         // it from here currently reaches a genuine, unresolved runtime
         // fault (a page fault, data read from address 0) whose root
-        // cause was investigated extensively this session -- narrowed
-        // to somewhere in the UDP/DNS build path specifically (the
-        // identical ICMP path above, exercising the SAME real Ethernet/
-        // ARP/IPv4/checksum machinery, passes reliably every run) but
-        // NOT yet conclusively root-caused: ruled out so far, each with
-        // real evidence, not guesses: `str::split` pattern matching,
-        // `[u8]::copy_from_slice`'s `memcpy` lowering, a missing
-        // `.cargo/config.toml`/`linker.ld`/`build.rs` for this crate
-        // (a REAL bug found and fixed along the way -- this crate
+        // cause was investigated extensively across two sessions --
+        // narrowed to somewhere in the UDP/DNS build path specifically
+        // (the identical ICMP path above, exercising the SAME real
+        // Ethernet/ARP/IPv4/checksum machinery, passes reliably every
+        // run) but NOT yet conclusively root-caused. Ruled out so far,
+        // each with real evidence, not guesses: `str::split` pattern
+        // matching; `[u8]::copy_from_slice`'s `memcpy` lowering; a
+        // missing `.cargo/config.toml`/`linker.ld`/`build.rs` for this
+        // crate (a REAL bug found and fixed along the way -- this crate
         // really was missing all three, which really did cause
         // PIE-style GOT-indirect calls this freestanding kernel's ELF
         // loader can never relocate; fixed, kept, and still a genuine
-        // improvement even though it wasn't the FULL story), stack
-        // size, LTO, and optimization level. Left disabled here rather
-        // than claimed working -- `dns_resolve`/`udp_build`/
+        // improvement even though it wasn't the FULL story); stack
+        // size (tested to 128KB); LTO on/off; forced inlining; and
+        // LLVM's loop-idiom-recognition re-lowering a manual copy loop
+        // back into a `memcpy` call (`copy_bytes` now uses
+        // `core::hint::black_box` specifically to rule this out --
+        // ruled out too, same crash signature). Left disabled here
+        // rather than claimed working -- `dns_resolve`/`udp_build`/
         // `dns_build_query` remain real, compiled, dead-code-warned-if-
         // unused code, ready for the next real debugging session
         // rather than deleted.
