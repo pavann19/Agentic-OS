@@ -1362,7 +1362,7 @@ code changes here. It stays open, honestly, alongside Phase 6 starting.
 
 ---
 
-## Phase 9 — Multi-Core Execution (SMP) (1/6 deliverables complete — IN PROGRESS)
+## Phase 9 — Multi-Core Execution (SMP) (2/6 deliverables complete — IN PROGRESS)
 
 ADR-007 and ADR-008 (`docs/ROADMAP.md` §2) signed off 2026-09-03, unblocking Phases 11 and 12 later. Phase 9 itself needed no new sign-off and started immediately.
 
@@ -1383,3 +1383,15 @@ Real AP bring-up: `kernel_rs::smp` + `kernel_rs::smp_trampoline.s` — a from-sc
 **Also found while reading the code for this phase, not yet fixed:** `kernel_rs::gdt`'s `GDT`, `TSS` (including `TSS.rsp0`/`TSS.ist`/`TSS.iopb`) are all single, global `static mut`s — correct for a single core, but exactly the kind of shared-mutable-kernel-state deliverable 5 ("every existing shared kernel structure... audited and made SMP-safe") anticipated needing to fix. Only one CPU can point its task register at a given TSS at a time, so real SMP needs a genuinely separate GDT/TSS per core, not a shared one — this is why `ap_entry` never calls `gdt::init()` or loads a TSS at all in this increment. Noted here as a concrete, real item for that later deliverable — not silently deferred without a trace.
 
 **Also deliberately left as a stated simplification:** the trampoline's low identity mapping is never torn down once APs are up (real teardown needs cross-core TLB-shootdown synchronization, deliverable 4, not built yet); each AP's "stack" is really only the first allocated 4KB page deep in practice (`pmm::alloc_page()` gives no contiguity guarantee across calls) — fine for `ap_entry`'s own tiny, non-recursive body, not a real 16KB guarantee; real per-thread kernel stacks (Phase 1) are the eventual, correct replacement.
+
+**Deliverable 2 — Per-CPU kernel data (GDT/TSS/IST/local scheduler state) — DONE for GDT/TSS/IST; local scheduler state is deliverable 3.**
+
+Closes the exact gap deliverable 1's own notes above named and left open: `gdt.rs`'s `GDT`/`TSS` (RSP0, IST, IOPB) are now real per-CPU arrays (`GDTS`/`TSSES`/`DOUBLE_FAULT_STACKS`, indexed 0..`smp::MAX_CPUS`), not single global statics — `gdt::init()` became `gdt::init_for_cpu(cpu_index)`, building and loading exactly one core's own descriptor table, TSS, and double-fault IST stack.
+
+Real per-CPU index resolution: `smp::register_cpu`/`current_cpu_index` — a small (≤32-entry) real APIC-ID → software-index registry, resolved via `apic::lapic_id()` (real hardware, not a passed-in guess) rather than GS-base-relative per-CPU storage (a stated, real simplification — the eventual O(1) mechanism is real future work, not built this increment; this lookup-table approach is correct, just not the fastest one). `apic::is_initialized()` guards the handful of early-boot, BSP-only call sites that run before `apic::init()` has mapped the LAPIC at all.
+
+The BSP claims index 0 at boot (`gdt::init_for_cpu(0)`, before `smp::current_cpu_index()` can even resolve — trivially correct since no AP exists yet). Each AP now claims its own index (handed to it via the trampoline data page, same mechanism `DATA_ENTRY_OFF`/`DATA_PML4_OFF`/`DATA_STACK_OFF` already used) and calls `gdt::init_for_cpu`/`idt::load_current_cpu` for itself, before anything else runs on that core — `idt.rs::init()` was split into entry-building (BSP-only, once) and a new `load_current_cpu()` (`lidt` only, safe for any core to call against the one shared, already-built table, since IDT contents are identical across cores — only the IDTR register itself is per-core state).
+
+**Verified live, real `-smp 4` QEMU boot** (`scripts/test-smp-percpu.ps1`, new): all 3 APs online, each reporting its own distinct `cpu_index` alongside its real hardware APIC ID (`[SMP] AP_ONLINE apic_id=0x1 cpu_index=0x1` etc.), `SMP_BRINGUP_DONE brought_up=3 skipped_disabled=0 timed_out=0`. Full 12-suite regression suite re-run clean (one transient `test-keyboard` failure inside that same back-to-back run reproduced as the suite's known fixed-`BootWaitSeconds`-under-load flakiness, not a regression — passed clean standalone immediately after, same as this project's established discipline for distinguishing a real bug from test-harness timing noise). `host_tests`: 74/74, unaffected (this is real-hardware-only wiring, no new pure-logic surface).
+
+**Still open, unchanged from deliverable 1's own notes:** local per-core scheduler state (deliverable 3), TLB shootdown (deliverable 4), and the rest of the shared-structure audit — `klog.rs`'s COM1 writer, the capability table, the audit log, IOMMU domain assignment, the PMM/heap (deliverable 5) — remain real, unaddressed shared state; `smp::bring_up_all` is still deliberately sequential for exactly that reason.
