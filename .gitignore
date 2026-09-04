@@ -56,5 +56,6 @@ _evidence/disk-e1000-test.img
 _evidence/disk-e1000-ahci.img
 user_rs/e1000_driver/target/
 user_rs/nvme_driver/target/
+user_rs/netstack_driver/target/
 _evidence/disk-authority-revoke-test.img
 _evidence/disk-authority-revoke-ahci.img

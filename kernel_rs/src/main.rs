@@ -48,6 +48,7 @@ pub mod iommu;
 pub mod klog;
 pub mod object_store;
 pub mod nvme;
+pub mod netstack; // Phase 10 -- real network-stack process, see its own module doc
 pub mod pci;
 pub mod pic;
 pub mod pmm;
@@ -235,6 +236,13 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     virtio_net::spawn_if_present(&pci_devices);
     ahci::spawn_if_present(&pci_devices);
     nvme::spawn_if_present(&pci_devices);
+    // Phase 10: netstack.rs REPLACES e1000.rs's own device ownership
+    // when the network_stack feature is on -- both would otherwise
+    // race for the same PCI device's BAR/DMA (see netstack.rs's own
+    // module doc). Default boot (feature off) is completely unaffected.
+    #[cfg(feature = "network_stack")]
+    netstack::spawn_if_present(&pci_devices);
+    #[cfg(not(feature = "network_stack"))]
     e1000::spawn_if_present(&pci_devices);
 
     // Phase 3: device manager -- discovery, driver binding, lifecycle,

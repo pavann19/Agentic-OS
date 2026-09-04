@@ -41,6 +41,13 @@ research_authority_hw_demo = []
 # virtio-net driver. See virtio_net.rs's module doc and
 # scripts/test-synthesis-fault-demo.ps1.
 synthesis_induced_fault = []
+# Phase 10 (docs/ROADMAP.md Sec5): the real network-stack process
+# (netstack.rs/user_rs/netstack_driver) owns the e1000-class NIC
+# instead of e1000.rs's own Phase 8 demo -- the two are mutually
+# exclusive (both would race for the same device's BAR/DMA). Off by
+# default so the default boot's existing, already-evidenced Phase 8
+# e1000 demo is unaffected; see scripts/test-network.ps1.
+network_stack = []
 
 [profile.dev]
 panic = "abort"
