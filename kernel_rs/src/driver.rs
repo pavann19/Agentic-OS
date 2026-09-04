@@ -38,6 +38,36 @@ pub fn create_port_capability(table: &mut CapabilityTable, base: u16, count: u16
     table.grant(object_id, rights)
 }
 
+/// Phase 10 deliverable 1: mints a real `Socket` capability object and
+/// grants it into `table` — same real pattern as every other
+/// `create_*_capability` here (create the typed object, grant it,
+/// return the `CapId`). Kernel-mode setup code only, matching this
+/// entire module's own discipline: no running ring-3 process can mint
+/// its own capabilities, only receive ones granted at spawn time.
+///
+/// `rights` deliberately reuses `Rights::SEND`/`Rights::RECEIVE` rather
+/// than minting dedicated `SOCKET_*` bits — a socket IS, semantically,
+/// an IPC channel to the network (may send data out, may receive data
+/// in), the same real actions those two bits already name for
+/// `IpcEndpoint`. This differs from `MAP`/`WAIT`/`PORT_IO`, which each
+/// got their own bit because THEIR actions have no existing analogue.
+pub fn create_socket_capability(
+    table: &mut CapabilityTable,
+    protocol: crate::capability::SocketProtocol,
+    local_port: u16,
+    remote_ip: [u8; 4],
+    remote_port: u16,
+    rights: Rights,
+) -> CapId {
+    let object_id = crate::capability::create_object(KernelObjectKind::Socket {
+        protocol,
+        local_port,
+        remote_ip,
+        remote_port,
+    });
+    table.grant(object_id, rights)
+}
+
 #[derive(Debug)]
 pub enum DriverError {
     Cap(CapError),

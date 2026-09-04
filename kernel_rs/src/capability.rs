@@ -120,6 +120,36 @@ pub enum KernelObjectKind {
     /// `IntrospectionHandle` so a process holding one right never
     /// incidentally implies the other.
     AuditQueryHandle,
+    /// Phase 10 (`docs/ROADMAP.md` §5 deliverable 1 — "a process holds
+    /// a socket capability the way it holds any other object, never an
+    /// ambient 'the network is just there' model"): one real network
+    /// connection, named by protocol and the real local/remote
+    /// endpoint it was opened against — not a bare file-descriptor-
+    /// style integer a process could guess or iterate. `local_port` is
+    /// this endpoint's own real ephemeral port; `remote_ip`/`remote_port`
+    /// name who it talks to (0.0.0.0:0 for a not-yet-connected/listening
+    /// socket). Revoking this capability (`capability::revoke`, already
+    /// real and proven since Phase 2) must make the connection
+    /// unusable to the holder immediately -- Phase 10's own third exit
+    /// criterion, demonstrated the same adversarial way Phase 2's own
+    /// revocation was.
+    ///
+    /// Real, disclosed scope for this increment: this variant exists
+    /// and is real, typed, capability-gated state — the mechanism
+    /// `netstack_driver`'s own TCP/UDP implementation will bind actual
+    /// connections to is real follow-up work, not yet wired (see
+    /// `docs/PROGRESS.md`'s Phase 10 section for exactly what's done vs
+    /// open).
+    Socket { protocol: SocketProtocol, local_port: u16, remote_ip: [u8; 4], remote_port: u16 },
+}
+
+/// Real, small, closed set — matches this stack's own real, from-spec
+/// implementations (`netstack_driver`), not a speculative superset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SocketProtocol {
+    Udp = 0,
+    Tcp = 1,
 }
 
 pub struct KernelObject {
