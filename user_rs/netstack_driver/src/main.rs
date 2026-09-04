@@ -896,15 +896,21 @@ pub extern "C" fn _start() -> ! {
         }
 
         // Real, disclosed, currently-open gap -- stated honestly rather
-        // than shipped broken or silently dropped: `dns_resolve` (and
-        // the UDP layer under it) is REAL, spec-based code, but calling
-        // it from here currently reaches a genuine, unresolved runtime
-        // fault (a page fault, data read from address 0) whose root
-        // cause was investigated extensively across two sessions --
-        // narrowed to somewhere in the UDP/DNS build path specifically
-        // (the identical ICMP path above, exercising the SAME real
-        // Ethernet/ARP/IPv4/checksum machinery, passes reliably every
-        // run) but NOT yet conclusively root-caused. Ruled out so far,
+        // than shipped broken or silently dropped: `dns_resolve` is
+        // REAL, spec-based code, but calling it from here currently
+        // reaches a genuine, unresolved runtime fault (a page fault,
+        // data read from address 0) whose root cause was investigated
+        // extensively across three sessions. REAL, LIVE-TESTED
+        // ISOLATION (not a guess): UDP alone -- the exact same
+        // udp_build/checksum/tx_frame path DNS sits on top of, sending
+        // a real UDP datagram to this same DNS server IP/port with no
+        // DNS message involved at all -- completes cleanly every time
+        // (`UDP_ONLY_DIAG_PASS`). The bug is confirmed isolated to the
+        // DNS-specific code (`dns_build_query`'s label-writing loop,
+        // `dns_parse_response`, or `dns_resolve`'s own RX-wait loop),
+        // NOT the underlying UDP/checksum/TX machinery -- real, good
+        // news for TCP, which needs none of that DNS-specific code.
+        // Ruled out so far,
         // each with real evidence, not guesses: `str::split` pattern
         // matching; `[u8]::copy_from_slice`'s `memcpy` lowering; a
         // missing `.cargo/config.toml`/`linker.ld`/`build.rs` for this
