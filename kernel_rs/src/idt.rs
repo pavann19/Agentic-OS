@@ -284,6 +284,22 @@ pub fn init() {
         0,
     );
 
+    load_current_cpu();
+    crate::klog_info!("IDT initialized: all 32 CPU exception vectors handled");
+}
+
+/// Phase 9 deliverable 2: loads THIS core's own IDTR to point at the
+/// one, shared IDT table `init()` already built (the table's contents
+/// are identical for every core -- the same handler addresses and the
+/// same IST index -- only the CPU's own IDTR register is per-core
+/// state, exactly like `gdt.rs`'s GDTR). The BSP reaches this via
+/// `init()` above; every AP calls it directly (`smp.rs::ap_entry`)
+/// once it's running, WITHOUT re-running `init()`'s entry-building
+/// loop -- `bring_up_all` brings APs up one at a time (this module's
+/// own sequencing discipline), but the shared `IDT` static is still
+/// written by exactly one core (the BSP, once, before any AP exists),
+/// so no AP ever needs or should rebuild it.
+pub fn load_current_cpu() {
     unsafe {
         let idtr = IdtDescriptor {
             limit: (core::mem::size_of::<[IdtEntry; IDT_ENTRIES]>() - 1) as u16,
@@ -291,5 +307,4 @@ pub fn init() {
         };
         core::arch::asm!("lidt [{}]", in(reg) &idtr, options(readonly, nostack, preserves_flags));
     }
-    crate::klog_info!("IDT initialized: all 32 CPU exception vectors handled");
 }

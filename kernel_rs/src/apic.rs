@@ -66,6 +66,16 @@ pub fn lapic_id() -> u32 {
     unsafe { (read_reg(REG_ID) >> 24) & 0xFF }
 }
 
+/// Phase 9 deliverable 2: whether this core's own LAPIC MMIO mapping is
+/// live yet. `smp::current_cpu_index()` guards on this before ever
+/// calling `lapic_id()` — a handful of early-boot call sites (BSP-only,
+/// before `apic::init()` has run) touch per-CPU state before any LAPIC
+/// is reachable, and reading MMIO through a zeroed `LAPIC_VADDR` would
+/// be an immediate page fault, not a graceful fallback.
+pub fn is_initialized() -> bool {
+    unsafe { LAPIC_VADDR != 0 }
+}
+
 fn icr_wait_idle() {
     // Bounded, not infinite -- a stuck/never-idle ICR must never hang
     // the BSP forever (same "prove it timed out, don't just spin"

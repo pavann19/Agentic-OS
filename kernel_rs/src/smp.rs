@@ -54,6 +54,65 @@ const TRAMPOLINE_PHYS: u64 = 0x8000;
 const DATA_ENTRY_OFF: u64 = 0xFE0;
 const DATA_PML4_OFF: u64 = 0xFE8;
 const DATA_STACK_OFF: u64 = 0xFF0;
+/// Phase 9 deliverable 2: this AP's own software CPU index (0 = BSP,
+/// always pre-assigned; 1..N handed out in bring-up order), written
+/// into the trampoline's data page right before that AP's SIPI so
+/// `ap_entry` can read it back once it's running and use it to claim
+/// its OWN slot in `gdt.rs`'s per-CPU GDT/TSS arrays — see this
+/// module's other doc comments for why nothing here uses real
+/// GS-base-relative per-CPU storage yet (that's real follow-up work;
+/// this lookup-table approach is correct, just not the eventual O(1)
+/// mechanism).
+const DATA_CPU_INDEX_OFF: u64 = 0xFD8;
+
+/// Phase 9: upper bound on real CPUs this kernel tracks per-CPU state
+/// for (GDT/TSS in `gdt.rs`, the index registry below). Matches
+/// `main.rs`'s own MADT-parsing array bound — both are real, stated
+/// limits, not a guess; a firmware reporting more than this is a
+/// real, not-yet-hit case this kernel does not yet handle.
+pub const MAX_CPUS: usize = 32;
+
+/// Real APIC-ID -> software-CPU-index registry. `None` until that slot
+/// is claimed. Populated once for the BSP (index 0, at the start of
+/// `bring_up_all`) and once per AP (inside `ap_entry`, using the index
+/// `bring_up_all` assigned it before SIPI-ing it) — never mutated
+/// concurrently, since bring-up stays deliberately sequential (this
+/// module's own doc comment on why).
+static mut APIC_ID_TO_INDEX: [Option<u32>; MAX_CPUS] = [None; MAX_CPUS];
+
+/// Claims `index` for `apic_id`. Called exactly once per real core,
+/// either from `bring_up_all` (BSP, index 0) or from `ap_entry` itself
+/// (every AP, using the index it was handed via the trampoline data
+/// page).
+pub fn register_cpu(index: usize, apic_id: u32) {
+    if index < MAX_CPUS {
+        unsafe {
+            (&mut *&raw mut APIC_ID_TO_INDEX)[index] = Some(apic_id);
+        }
+    }
+}
+
+/// This CORE's own software CPU index, resolved from its real hardware
+/// APIC ID (`apic::lapic_id()`) against the registry above. Returns 0
+/// (the BSP's slot) if the LAPIC isn't mapped yet (a handful of
+/// early-boot call sites run before `apic::init()`, always on the BSP,
+/// where 0 is always correct) or if this core's own ID was never
+/// registered (shouldn't happen for any core that reached Rust code at
+/// all, but fails safe to the BSP's slot rather than an out-of-bounds
+/// index).
+pub fn current_cpu_index() -> usize {
+    if !crate::apic::is_initialized() {
+        return 0;
+    }
+    let id = crate::apic::lapic_id();
+    let table = unsafe { &*&raw const APIC_ID_TO_INDEX };
+    for (i, slot) in table.iter().enumerate() {
+        if *slot == Some(id) {
+            return i;
+        }
+    }
+    0
+}
 
 const AP_STACK_PAGES: u64 = 4; // 16KB -- a real, minimal, temporary stack; Phase 1's real per-thread kernel stacks are the eventual replacement once the scheduler itself is SMP-aware (deliverable 3).
 
@@ -89,8 +148,24 @@ static AP_READY: AtomicU32 = AtomicU32::new(0);
 #[no_mangle]
 extern "C" fn ap_entry() -> ! {
     let id = apic::lapic_id();
+
+    // Phase 9 deliverable 2: claim this core's OWN GDT/TSS/double-fault
+    // stack slot and load a real per-core IDTR -- BEFORE anything else
+    // runs on this core, same as the BSP's own boot order (gdt::init
+    // then idt::init, both ahead of everything else in main.rs). The
+    // index was assigned by bring_up_all and handed over via the
+    // trampoline data page (this module's own doc comment on why: no
+    // GS-base per-CPU storage yet, so this is how a just-started AP
+    // learns which slot is its).
+    let index = unsafe { core::ptr::read_volatile(pmm::p2v_pub(TRAMPOLINE_PHYS + DATA_CPU_INDEX_OFF) as *const u64) } as usize;
+    crate::smp::register_cpu(index, id);
+    crate::gdt::init_for_cpu(index);
+    crate::idt::load_current_cpu();
+
     serial::write_str("[SMP] AP_ONLINE apic_id=");
     serial::write_hex_raw(id as u64);
+    serial::write_str(" cpu_index=");
+    serial::write_hex_raw(index as u64);
     serial::write_str("\n");
     AP_READY.store(id + 1, Ordering::SeqCst);
     loop {
@@ -121,6 +196,7 @@ unsafe fn write_u64_at(phys: u64, value: u64) {
 pub fn bring_up_all(cpus: &[CpuEntry]) {
     let bsp_id = apic::lapic_id();
     klog_info!("SMP_BRINGUP_START bsp_apic_id={}", bsp_id);
+    register_cpu(0, bsp_id); // the BSP's own slot -- gdt::init_for_cpu(0) already claimed index 0 at boot; this just makes lapic_id()->index lookups for the BSP resolve correctly from here on.
 
     unsafe {
         // One-time setup, shared by every AP this call brings up: copy
@@ -165,6 +241,7 @@ pub fn bring_up_all(cpus: &[CpuEntry]) {
     let mut brought_up = 0u32;
     let mut skipped_disabled = 0u32;
     let mut timed_out = 0u32;
+    let mut next_index: usize = 1; // 0 is the BSP's, always
 
     for cpu in cpus {
         if cpu.apic_id == bsp_id {
@@ -175,6 +252,13 @@ pub fn bring_up_all(cpus: &[CpuEntry]) {
             skipped_disabled += 1;
             continue;
         }
+        if next_index >= MAX_CPUS {
+            klog_info!("SMP_AP_SKIPPED apic_id={} (MAX_CPUS={} exhausted -- real, stated limit)", cpu.apic_id, MAX_CPUS);
+            continue;
+        }
+        let cpu_index = next_index;
+        next_index += 1;
+        unsafe { write_u64_at(TRAMPOLINE_PHYS + DATA_CPU_INDEX_OFF, cpu_index as u64) };
 
         // A real, dedicated stack for this AP -- direct-map-window
         // virtual address, reachable the instant this AP's own paging

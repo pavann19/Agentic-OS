@@ -106,7 +106,7 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     // handler to be diagnosable at all. This ordering was decided
     // mid-session after a CR3 switch produced a silent, undiagnosable
     // hang with no exception handling in place yet — see PHASE0_PROGRESS.md.
-    gdt::init();
+    gdt::init_for_cpu(0); // BSP is always cpu_index 0 (Phase 9 deliverable 2 -- per-CPU GDT/TSS)
     idt::init();
 
     klog_info!("PMM_INIT_START");

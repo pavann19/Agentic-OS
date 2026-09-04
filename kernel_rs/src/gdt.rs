@@ -13,6 +13,19 @@ use crate::klog_info;
 
 const GDT_ENTRIES: usize = 7; // null, code, data, TSS (2 entries: TSS is 16 bytes = 2 slots)
 
+/// Phase 9 deliverable 2: GDT/TSS/double-fault-stack are now real,
+/// PER-CPU state, indexed by `smp::current_cpu_index()` /
+/// `smp::MAX_CPUS` -- `smp.rs`'s own module doc already named this
+/// gap explicitly ("gdt.rs's GDT/TSS ... single, unsynchronized shared
+/// kernel state today"). One core's TSS.RSP0/IOPB/IST must never be
+/// visible to another core the way it already had to stop being
+/// visible across THREADS on one core (see this file's own
+/// `set_iopb`/`set_kernel_stack` doc comments for that earlier,
+/// single-core version of the same bug class) -- a shared TSS across
+/// real concurrent cores would be that bug again, just races-instead-
+/// of-single-threaded-races.
+use crate::smp::MAX_CPUS;
+
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct GdtEntry {
@@ -40,6 +53,7 @@ pub const IOPB_PORTS: usize = 1024;
 pub const IOPB_BYTES: usize = IOPB_PORTS / 8 + 1; // +1 for the mandatory trailing all-1s byte (Intel SDM)
 
 #[repr(C, packed)]
+#[derive(Clone, Copy)]
 pub struct Tss {
     reserved0: u32,
     pub rsp0: u64,
@@ -73,16 +87,17 @@ pub const DOUBLE_FAULT_IST_VALUE: u8 = 1;
 const DOUBLE_FAULT_IST_ARRAY_INDEX: usize = 0;
 const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
 
-static mut GDT: [GdtEntry; GDT_ENTRIES] = [GdtEntry {
+const GDT_ENTRY_ZERO: GdtEntry = GdtEntry {
     limit_low: 0,
     base_low: 0,
     base_mid: 0,
     access: 0,
     flags_limit_high: 0,
     base_high: 0,
-}; GDT_ENTRIES];
+};
+const GDT_ZERO: [GdtEntry; GDT_ENTRIES] = [GDT_ENTRY_ZERO; GDT_ENTRIES];
 
-static mut TSS: Tss = Tss {
+const TSS_ZERO: Tss = Tss {
     reserved0: 0,
     rsp0: 0,
     rsp1: 0,
@@ -95,6 +110,14 @@ static mut TSS: Tss = Tss {
     iopb: [0xFF; IOPB_BYTES], // default-deny every port
 };
 
+/// One GDT and one TSS PER real CPU (see this file's module-level doc
+/// comment above `GDT_ENTRIES` for why). `init_for_cpu(index)` builds
+/// and loads exactly one slot; every other function here that used to
+/// touch the single global `TSS` now resolves `smp::current_cpu_index()`
+/// first and touches only that CPU's own slot.
+static mut GDTS: [[GdtEntry; GDT_ENTRIES]; MAX_CPUS] = [GDT_ZERO; MAX_CPUS];
+static mut TSSES: [Tss; MAX_CPUS] = [TSS_ZERO; MAX_CPUS];
+
 // A double-fault-dedicated stack, statically allocated (not via the PMM —
 // this must exist and be mapped BEFORE the VMM/PMM's own correctness can
 // be trusted, since a double fault is exactly the kind of thing that can
@@ -102,26 +125,35 @@ static mut TSS: Tss = Tss {
 // the same kernel-segment mapping every other kernel .bss page gets).
 #[repr(align(16))]
 struct DoubleFaultStack([u8; DOUBLE_FAULT_STACK_SIZE]);
-static mut DOUBLE_FAULT_STACK: DoubleFaultStack = DoubleFaultStack([0; DOUBLE_FAULT_STACK_SIZE]);
+const DF_STACK_ZERO: DoubleFaultStack = DoubleFaultStack([0; DOUBLE_FAULT_STACK_SIZE]);
+/// One double-fault stack PER CPU -- a shared one would defeat its own
+/// purpose the instant two cores double-fault concurrently (each core
+/// pushing its own exception frame onto the SAME "known-good" stack is
+/// exactly the corruption this mechanism exists to prevent in the
+/// first place).
+static mut DOUBLE_FAULT_STACKS: [DoubleFaultStack; MAX_CPUS] = [DF_STACK_ZERO; MAX_CPUS];
 
-fn set_entry(index: usize, base: u32, limit: u32, access: u8, flags: u8) {
+fn set_entry(cpu: usize, index: usize, base: u32, limit: u32, access: u8, flags: u8) {
     unsafe {
-        GDT[index].base_low = (base & 0xFFFF) as u16;
-        GDT[index].base_mid = ((base >> 16) & 0xFF) as u8;
-        GDT[index].base_high = ((base >> 24) & 0xFF) as u8;
-        GDT[index].limit_low = (limit & 0xFFFF) as u16;
-        GDT[index].flags_limit_high = (((limit >> 16) & 0x0F) as u8) | (flags & 0xF0);
-        GDT[index].access = access;
+        let gdt = &mut (&mut *&raw mut GDTS)[cpu];
+        gdt[index].base_low = (base & 0xFFFF) as u16;
+        gdt[index].base_mid = ((base >> 16) & 0xFF) as u8;
+        gdt[index].base_high = ((base >> 24) & 0xFF) as u8;
+        gdt[index].limit_low = (limit & 0xFFFF) as u16;
+        gdt[index].flags_limit_high = (((limit >> 16) & 0x0F) as u8) | (flags & 0xF0);
+        gdt[index].access = access;
     }
 }
 
-/// Sets a 16-byte (two-slot) TSS descriptor at `index`/`index+1`. Unlike a
-/// normal code/data descriptor, a TSS descriptor's base is a full 64-bit
-/// address (there is no 64-bit-mode long-mode segmentation to abbreviate
-/// it), so it needs the extra slot for the high 32 bits.
-fn set_tss_entry(index: usize, base: u64, limit: u32) {
+/// Sets a 16-byte (two-slot) TSS descriptor at `index`/`index+1` in CPU
+/// `cpu`'s own GDT. Unlike a normal code/data descriptor, a TSS
+/// descriptor's base is a full 64-bit address (there is no 64-bit-mode
+/// long-mode segmentation to abbreviate it), so it needs the extra
+/// slot for the high 32 bits.
+fn set_tss_entry(cpu: usize, index: usize, base: u64, limit: u32) {
     unsafe {
-        let low = (&raw mut GDT[index]) as *mut u8;
+        let gdt = &mut (&mut *&raw mut GDTS)[cpu];
+        let low = (&raw mut gdt[index]) as *mut u8;
         let base32 = base as u32;
         let base_high32 = (base >> 32) as u32;
 
@@ -143,11 +175,20 @@ fn set_tss_entry(index: usize, base: u64, limit: u32) {
 pub const USER_DATA_SELECTOR: u16 = (5 << 3) | 3; // 0x2B
 pub const USER_CODE_SELECTOR: u16 = (6 << 3) | 3; // 0x33
 
-pub fn init() {
+/// Phase 9 deliverable 2: builds and loads CPU `cpu`'s OWN GDT+TSS+
+/// double-fault stack — real, per-core state, not a shared global
+/// anymore (see this file's module-level doc comment on why a shared
+/// TSS across real concurrent cores is exactly the RSP0/IOPB bug class
+/// already found and fixed once for single-core-multi-THREAD, just one
+/// level up). The BSP calls this with `cpu = 0` at boot, before
+/// `smp::current_cpu_index()` can even resolve (no APs exist yet, so 0
+/// is trivially correct); every AP calls it for its OWN assigned index
+/// from `smp.rs::ap_entry`, before anything else runs on that core.
+pub fn init_for_cpu(cpu: usize) {
     unsafe {
-        set_entry(0, 0, 0, 0, 0); // null
-        set_entry(1, 0, 0xFFFFF, 0x9A, 0xA0); // kernel code, selector 0x08
-        set_entry(2, 0, 0xFFFFF, 0x92, 0x80); // kernel data, selector 0x10
+        set_entry(cpu, 0, 0, 0, 0, 0); // null
+        set_entry(cpu, 1, 0, 0xFFFFF, 0x9A, 0xA0); // kernel code, selector 0x08
+        set_entry(cpu, 2, 0, 0xFFFFF, 0x92, 0x80); // kernel data, selector 0x10
         // DPL=3 versions of the same access-byte pattern as the kernel
         // descriptors above (bits 5-6 = DPL, set to 11 instead of 00):
         // kernel code 0x9A -> user code 0xFA; kernel data 0x92 -> user
@@ -155,27 +196,28 @@ pub fn init() {
         // indices (5, 6) here — that ordering is what SYSCALL/SYSRET's
         // STAR MSR will rely on later; getting it right now avoids
         // reshuffling GDT indices when that item lands.
-        set_entry(5, 0, 0xFFFFF, 0xF2, 0x80); // user data, selector 0x28
-        set_entry(6, 0, 0xFFFFF, 0xFA, 0xA0); // user code, selector 0x30
+        set_entry(cpu, 5, 0, 0xFFFFF, 0xF2, 0x80); // user data, selector 0x28
+        set_entry(cpu, 6, 0, 0xFFFFF, 0xFA, 0xA0); // user code, selector 0x30
 
-        let df_stack_top =
-            (&raw const DOUBLE_FAULT_STACK.0) as u64 + DOUBLE_FAULT_STACK_SIZE as u64;
-        TSS.ist[DOUBLE_FAULT_IST_ARRAY_INDEX] = df_stack_top;
+        let tss = &mut (&mut *&raw mut TSSES)[cpu];
+        let df_stack = &mut (&mut *&raw mut DOUBLE_FAULT_STACKS)[cpu];
+        let df_stack_top = (&raw const df_stack.0) as u64 + DOUBLE_FAULT_STACK_SIZE as u64;
+        tss.ist[DOUBLE_FAULT_IST_ARRAY_INDEX] = df_stack_top;
         // iomap_base points AT the real iopb field now (Phase 3), not past
         // the end of the struct — computed via pointer arithmetic so it
         // stays correct if Tss's layout ever changes, rather than a
         // hand-counted offset that could silently drift out of sync.
-        let tss_base_addr = (&raw const TSS) as u64;
-        let iopb_addr = (&raw const TSS.iopb) as u64;
-        TSS.iomap_base = (iopb_addr - tss_base_addr) as u16;
+        let tss_base_addr = (&raw const *tss) as u64;
+        let iopb_addr = (&raw const tss.iopb) as u64;
+        tss.iomap_base = (iopb_addr - tss_base_addr) as u16;
 
-        let tss_base = (&raw const TSS) as u64;
+        let tss_base = (&raw const *tss) as u64;
         let tss_limit = (core::mem::size_of::<Tss>() - 1) as u32;
-        set_tss_entry(3, tss_base, tss_limit); // selector 0x18-0x20, TSS uses slots 3+4
+        set_tss_entry(cpu, 3, tss_base, tss_limit); // selector 0x18-0x20, TSS uses slots 3+4
 
         let gdtr = GdtDescriptor {
             limit: (core::mem::size_of::<[GdtEntry; GDT_ENTRIES]>() - 1) as u16,
-            base: (&raw const GDT) as u64,
+            base: (&raw const (&*&raw const GDTS)[cpu]) as u64,
         };
         core::arch::asm!("lgdt [{}]", in(reg) &gdtr, options(readonly, nostack, preserves_flags));
 
@@ -200,7 +242,7 @@ pub fn init() {
 
         core::arch::asm!("ltr ax", in("ax") 0x18u16, options(nostack, preserves_flags));
     }
-    klog_info!("GDT+TSS initialized (double-fault IST stack ready)");
+    klog_info!("GDT+TSS initialized for cpu_index={} (double-fault IST stack ready)", cpu);
 }
 
 /// Real bug found and fixed (Phase 7's shell -- its `rawin` command,
@@ -223,13 +265,17 @@ pub fn init() {
 /// `thread::allow_port_for_current`) and pushes it live immediately, not
 /// the shared global array every other thread would also see.
 
-/// Copies `bitmap` into the one live TSS's IOPB -- called on every
-/// scheduler switch (thread.rs) and once by `driver.rs::grant_port_access`
-/// for an immediate live update on the granting thread's own first entry
-/// into ring 3.
+/// Copies `bitmap` into the CURRENTLY RUNNING CORE's OWN live TSS's
+/// IOPB -- called on every scheduler switch (thread.rs, which always
+/// runs on the core it's switching) and once by
+/// `driver.rs::grant_port_access` for an immediate live update on the
+/// granting thread's own first entry into ring 3. Phase 9 deliverable
+/// 2: resolves `smp::current_cpu_index()` first -- a real, necessary
+/// change from the single-core version, since a thread being switched
+/// in on core 2 must never touch core 0's TSS.
 pub fn set_iopb(bitmap: &[u8; IOPB_BYTES]) {
     unsafe {
-        TSS.iopb = *bitmap;
+        (&mut *&raw mut TSSES)[crate::smp::current_cpu_index()].iopb = *bitmap;
     }
 }
 
@@ -272,8 +318,11 @@ pub fn deny_port_bits(bitmap: &mut [u8; IOPB_BYTES], port: u16) {
 /// harmless now (the very next schedule() tick re-asserts the correct
 /// per-thread value regardless), kept mainly so a thread interrupted
 /// before ever being scheduled out even once still has a correct value.
+/// Phase 9 deliverable 2: same core-resolution fix as `set_iopb` above
+/// — writes the CURRENTLY RUNNING CORE's OWN TSS.RSP0, never a shared
+/// global one.
 pub fn set_kernel_stack(rsp0: u64) {
     unsafe {
-        TSS.rsp0 = rsp0;
+        (&mut *&raw mut TSSES)[crate::smp::current_cpu_index()].rsp0 = rsp0;
     }
 }
