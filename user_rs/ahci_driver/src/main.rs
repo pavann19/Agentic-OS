@@ -299,6 +299,21 @@ pub extern "C" fn _start() -> ! {
             com1_write_str(core::str::from_utf8(&model[..model_len]).unwrap_or("?"));
             com1_write_str("\"\n");
             syscall1(0xA4C1_600D);
+
+            #[cfg(feature = "crash_test")]
+            {
+                // Phase 9.5a real crash-to-restart evidence: the real
+                // work above already completed (a real IDENTIFY DEVICE
+                // command, a real decoded model string) -- THIS is the
+                // deliberate part. `hlt` is CPL0-only; executing it here
+                // at ring 3 raises a real #GP (vector 13), the exact
+                // technique kernel_rs::fault_isolation_demo already
+                // proved kills only this process, letting
+                // kernel_rs::supervisor observe a REAL death (not a
+                // simulated report_crash() call) and restart it.
+                com1_write_str("[AHCI_DRIVER] CRASH_TEST_ARMED -- deliberately faulting now\n");
+                core::arch::asm!("hlt");
+            }
         } else {
             com1_write_str("[AHCI_DRIVER] AHCI_SELF_CHECK_FAIL: empty/invalid model string\n");
             syscall1(0xA4C1_BAD2);

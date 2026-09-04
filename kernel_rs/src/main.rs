@@ -58,6 +58,7 @@ pub mod service_manager;
 pub mod shell;
 pub mod smp;
 pub mod smp_race_soak; // Phase 9 deliverable 3's real cross-core race evidence, see its own module doc
+pub mod supervisor; // Phase 9.5a -- real crash-to-restart supervision, see its own module doc
 pub mod syscall;
 pub mod thread;
 pub mod tools;
@@ -246,20 +247,23 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     let mut devmgr = device_manager::DeviceManager::new();
     devmgr.discover(&pci_devices);
     devmgr.bind_all();
-    // Bring the real SATA/AHCI controller (00:1f.2) up to Running, then
-    // deliberately simulate a crash and recovery on it, to prove the
-    // restart-on-crash state machine against a real device entry rather
-    // than a synthetic one -- see device_manager.rs's honesty note: this
-    // proves the state machine, not that a real driver actually crashed.
+    // Phase 9.5a: the real SATA/AHCI controller (00:1f.2) -- previously
+    // brought up to Running and then given a DELIBERATELY SIMULATED
+    // crash+recovery here, to prove the restart-on-crash state machine
+    // against a real device entry before any real supervisor existed to
+    // drive it from an actual fault (see device_manager.rs's own
+    // module-doc honesty note, and docs/PROGRESS.md's Phase 3 section
+    // for that original evidence). That simulated call is REMOVED now
+    // that `supervisor.rs` drives `report_crash` from a REAL
+    // `PROCESS_KILLED` event on this exact device -- keeping both would
+    // double-transition the same device's state machine and make real
+    // and simulated evidence indistinguishable in the log, exactly the
+    // ambiguity Phase 9.5a's own exit criteria require avoiding.
     devmgr.mark_running(0, 0x1f, 2);
-    let restarted = devmgr.report_crash(0, 0x1f, 2);
-    klog_info!("DEVMGR_SIMULATED_CRASH device=00:1f.2 restart_scheduled={}", restarted);
-    if restarted {
-        devmgr.mark_running(0, 0x1f, 2);
-    }
     devmgr.log_summary();
     device_manager::install_global(devmgr);
     klog_info!("DEVMGR_INIT_DONE");
+    supervisor::register(0, 0x1f, 2, ahci::respawn);
 
     // Phase 3: init and a service manager as the first user-space
     // processes. spawn_init() starts service_manager_thread (kernel-side

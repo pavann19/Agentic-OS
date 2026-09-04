@@ -110,9 +110,15 @@ fn halt_forever() -> ! {
 /// unconditionally fatal — that's the kernel itself faulting, not a
 /// process's own mistake, and there is no safe "just kill it" recovery
 /// for that.
-fn recover_or_halt(frame: &InterruptStackFrame) -> ! {
+fn recover_or_halt(vector: u8, frame: &InterruptStackFrame) -> ! {
     if frame.code_segment & 0x3 == 3 {
         klog_error!("PROCESS_KILLED: fault occurred in ring 3 -- terminating this process, system continues");
+        // Phase 9.5a: real observation point, BEFORE the thread is
+        // actually killed (thread::current_id() must still resolve to
+        // the dying thread here) -- if this was a registered driver
+        // process, this drives a REAL crash-to-restart, not a
+        // simulated one. A no-op for any other ring-3 thread.
+        crate::supervisor::on_process_killed(vector);
         crate::thread::kill_current_and_reschedule();
         // Only reached in the degenerate case where NOTHING else was
         // runnable (shouldn't happen once thread 0 exists) -- still
@@ -129,7 +135,7 @@ macro_rules! handler_no_ec {
     ($name:ident, $vector:expr) => {
         extern "x86-interrupt" fn $name(frame: InterruptStackFrame) {
             report($vector, None, &frame);
-            recover_or_halt(&frame);
+            recover_or_halt($vector, &frame);
         }
     };
 }
@@ -138,7 +144,7 @@ macro_rules! handler_with_ec {
     ($name:ident, $vector:expr) => {
         extern "x86-interrupt" fn $name(frame: InterruptStackFrame, error_code: u64) {
             report($vector, Some(error_code), &frame);
-            recover_or_halt(&frame);
+            recover_or_halt($vector, &frame);
         }
     };
 }
@@ -192,7 +198,7 @@ extern "x86-interrupt" fn h_page_fault(frame: InterruptStackFrame, error_code: u
         error_code & 4 != 0,
         error_code & 16 != 0,
     );
-    recover_or_halt(&frame);
+    recover_or_halt(14, &frame);
 }
 
 handler_no_ec!(h_reserved_15, 15);

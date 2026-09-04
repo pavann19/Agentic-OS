@@ -12,6 +12,20 @@ edition = "2021"
 [dependencies]
 kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
 
+[features]
+# Phase 9.5a real crash-to-restart evidence (docs/ROADMAP.md sec5): off
+# by default, matching kernel_rs's own fault_test_*/
+# research_authority_hw_demo precedent -- a normal build of this driver
+# never deliberately faults. When enabled, this driver still does its
+# REAL work first (maps the real device, issues the real IDENTIFY
+# DEVICE command, decodes the real model string -- AHCI_SELF_CHECK_PASS
+# is real evidence this build is not a stub), then deliberately
+# executes `hlt` (a CPL0-only instruction, the SAME technique
+# kernel_rs::fault_isolation_demo already proved triggers a real #GP at
+# ring 3) to produce a REAL, hardware-detected fault for
+# kernel_rs::supervisor to observe and act on.
+crash_test = []
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

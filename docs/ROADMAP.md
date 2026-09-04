@@ -1,6 +1,6 @@
 # Agentic OS — Build Roadmap
 
-**Status:** Phases 0–9 complete and evidenced (see `docs/PROGRESS.md`). ADR-007 and ADR-008 (§2) signed off 2026-09-03 — Phases 11 and 12 are unblocked. Phase 9 (SMP) completed 2026-09-04. **Phase 9.5 (self-healing and self-improvement) added 2026-09-04 and sequenced before Phase 10** — found while planning Phase 10, whose own deliverable 4 depends on real crash-and-restart machinery that does not yet exist; **gated on ADR-009 and ADR-010 sign-off, both currently Proposed.** Phase 11 (Tier 3 hardware breadth) is unblocked and may proceed in parallel; Phase 12 (display server) still additionally depends on Phase 3's GPU path.
+**Status:** Phases 0–9 complete and evidenced (see `docs/PROGRESS.md`). ADR-007 and ADR-008 (§2) signed off 2026-09-03 — Phases 11 and 12 are unblocked. Phase 9 (SMP) completed 2026-09-04. **Phase 9.5 (self-healing and self-improvement) added 2026-09-04, then split 2026-09-04 at the user's explicit request into Phase 9.5a (minimal supervision, no ADR gate, sequenced before Phase 10) and Phase 9.5b (the full self-improvement machinery, deferred — user's choice — until after Phase 11/12, gated on ADR-009 and ADR-010 sign-off, both currently Proposed).** Phase 11 (Tier 3 hardware breadth) is unblocked and may proceed in parallel; Phase 12 (display server) still additionally depends on Phase 3's GPU path.
 **Date:** 2026-08-27; Phases 9–15 added 2026-09-03
 **Supersedes:** the previous `docs/ROADMAP.md` (preserved in git history at commit `6818872`)
 **Scope:** ground-up construction plan derived from the code actually in this repository, extended from "Tier 1/Tier 2 code-complete" (original Phase 8 endpoint) through to "a real, daily-driveable OS" (Phase 15)
@@ -296,13 +296,13 @@ Pros: a misbehaving window is contained exactly like a misbehaving driver or age
 
 ### ADR-009: Self-modification is evidence-gated adoption — the OS is the judge, never the author
 
-**Status:** Proposed — **requires sign-off before Phase 9.5 starts.**
+**Status:** Proposed — **requires sign-off before Phase 9.5b starts.**
 
 **Context:** The stated goal is an OS that heals itself, upgrades its own code, fixes its own bugs, and adopts research breakthroughs into the running system. That goal collides head-on with §1.3's hardest non-goal — "any model inference, prompt handling, or agent reasoning inside the kernel. Ever." — which §1.3.1 explicitly declined to reverse even while reversing two others ("in-kernel model inference remain[s] out of scope through the entire roadmap, Phase 15 included").
 
 The collision is only apparent, and resolving it correctly is the whole point of this ADR. "The OS improves itself" contains two entirely separable capabilities: **authoring** a change, and **deciding whether that change may take effect**. Only the first requires reasoning. The second requires containment, verification, evidence, and rollback — which is precisely what this OS has spent nine phases building, and precisely what a language model is worst at being trusted with.
 
-There is also direct precedent inside this project. Phase 6 already built this exact loop for one narrow case: a synthesized `virtio-net` driver, run against a disposable snapshot, classified by real captured failure evidence, retried under a bounded budget, promoted only on a real success marker. Two facts about it matter here. First, it works, and it caught a real bug in a real synthesized driver (the 10-byte vs. 12-byte `virtio_net_hdr`) using independent host-side evidence rather than the component's own self-report. Second, **the loop lives in `scripts/test-synthesis.ps1` — on the host, outside the OS.** It is a developer's test harness, not a capability the running system possesses. Phase 9.5 is the work of moving that judgment inside, and generalizing it from drivers to the system.
+There is also direct precedent inside this project. Phase 6 already built this exact loop for one narrow case: a synthesized `virtio-net` driver, run against a disposable snapshot, classified by real captured failure evidence, retried under a bounded budget, promoted only on a real success marker. Two facts about it matter here. First, it works, and it caught a real bug in a real synthesized driver (the 10-byte vs. 12-byte `virtio_net_hdr`) using independent host-side evidence rather than the component's own self-report. Second, **the loop lives in `scripts/test-synthesis.ps1` — on the host, outside the OS.** It is a developer's test harness, not a capability the running system possesses. Phase 9.5b is the work of moving that judgment inside, and generalizing it from drivers to the system.
 
 Finally: `docs/PRIOR_ART.md`'s own honest verdict already identified "hardware-contained evidence-gated driver-code promotion" as this project's **most defensible novelty** — the one item in a long table of "not novel" findings that survived a real prior-art review. This ADR generalizes exactly that mechanism. That is not a coincidence to gloss over; it is the strongest available signal that this is the right thing to build.
 
@@ -347,7 +347,7 @@ And **three tiers, separated by how much is genuinely the OS's own work**, becau
 
 ### ADR-010: A permanently immutable core, excluded from self-modification
 
-**Status:** Proposed — **requires sign-off before Phase 9.5 starts.**
+**Status:** Proposed — **requires sign-off before Phase 9.5b starts.**
 
 **Context:** ADR-009 lets the system adopt changes to its own code on evidence. That machinery contains an obvious and fatal circularity if left unbounded: a change to the verification harness can make every subsequent change pass. A change to the audit log can erase the record of what happened. A change to the capability enforcement core can grant the proposer whatever it likes. A change to the rollback mechanism can make the escape hatch stop working. In each case the system would continue reporting success, truthfully by its own standards, while its actual safety properties were gone.
 
@@ -379,7 +379,7 @@ Two binding rules: the list may only be *extended* by a human editing this ADR, 
 #### Consequences
 
 - **Easier:** the safety argument for ADR-009 becomes checkable by inspection — the question "could a bad change disable the thing that would catch it?" has a bounded, enumerable answer instead of requiring whole-system reasoning.
-- **Harder:** the boundary must be enforced mechanically and tested adversarially (a proposal deliberately targeting the core, refused and audited, is a Phase 9.5 exit criterion), and it will occasionally block a change that would genuinely have been an improvement. That cost is accepted.
+- **Harder:** the boundary must be enforced mechanically and tested adversarially (a proposal deliberately targeting the core, refused and audited, is a Phase 9.5b exit criterion), and it will occasionally block a change that would genuinely have been an improvement. That cost is accepted.
 - **Revisit:** only to *extend* the list. If experience shows some component outside it can also invalidate future judgments, it belongs inside it, and that is a documentation change plus an enforcement change, never a runtime decision.
 
 ---
@@ -705,32 +705,52 @@ Every phase through 8 was explicitly single-core (§6, old dependency diagram; `
 
 ---
 
-### Phase 9.5 — Self-Healing And Self-Improvement
+### Phase 9.5a — Minimal Real Supervision (self-healing, no self-modification)
 
-**Depends on:** Phase 9. **Gated by ADR-009 and ADR-010 sign-off (§2) — do not start without both.** **Blocks:** Phase 10 (see below), and is a prerequisite for any future claim that this system improves itself.
+**Depends on:** Phase 9. **Does NOT require ADR-009/ADR-010 sign-off** — deliberately scoped to contain zero self-modification, zero adoption of external code, zero policy learned from anything but a fixed, hand-written formula. It is pure wiring between two mechanisms Phases 1 and 3 already built and evidenced. **Blocks:** Phase 10 (see below).
 
-**Why this phase exists, and why it is numbered 9.5 rather than appended:** it was inserted after Phase 9 closed, when a concrete gap was found while planning Phase 10 — **Phase 10's own deliverable 4 and fourth exit criterion require crash-and-restart of a real user-space process, and that machinery does not exist.** What exists is one half of it at each end and no wire between them: `idt.rs` catches a real ring-3 fault and kills exactly that process (real, evidenced since Phase 1), and `device_manager.rs` holds a real bounded restart-on-crash state machine (real, evidenced since Phase 3) — but nothing observes a real death and drives that state machine. `report_crash()` has only ever been called from a *deliberately simulated* crash in `main.rs`, which `device_manager.rs`'s own module doc states plainly rather than hides. The fractional number is deliberate: it records honestly that this phase was discovered mid-roadmap rather than planned from the start, and avoids renumbering Phases 10–15 in a way that would make already-written `docs/PROGRESS.md` history read falsely.
+**Why split from Phase 9.5, and why now:** the user chose, explicitly, to defer the self-improvement machinery (Tiers A–C, the ADR-009 adoption pipeline, ADR-010's enforced immutable core) to later in the roadmap, while still unblocking Phase 10, whose deliverable 4 needs ONLY real crash-and-restart, not adoption or learning. Splitting the phase makes that boundary explicit rather than letting "self-healing" and "self-improvement" blur into one undifferentiated claim. 9.5a is what ships now; 9.5b (below) carries the full scope the original Phase 9.5 section described, unchanged, deferred.
 
 **Deliverables**
 
-1. **A real in-OS supervisor.** Observes genuine process death — the actual `PROCESS_KILLED` path in `idt.rs`, not a simulated call — and drives `device_manager`'s existing restart policy against it. Restarts a real user-space driver process for real. Quarantines a component that exhausts its restart budget instead of restarting forever.
-2. **Structured, queryable health history** as real typed kernel state: per-component crash counts, causes (fault vector, IOMMU violation, timeout), and outcomes, built on ADR-005's audit log rather than beside it, and exposed through Phase 5's typed introspection surface — never text-scraped.
-3. **Tier A self-tuning (ADR-009).** Real behavior derived from that recorded history rather than from constants: restart backoff computed from a component's own real crash pattern, and least-privilege authority envelopes narrowed from real observed IOMMU fault addresses — the promotion of research §3 (`docs/RESEARCH_TRACK.md`) out of the research track into production, which is a decision this phase makes explicitly rather than by drift.
-4. **Tier B adoption pipeline (ADR-009).** Pre-declared machine-checkable criterion; contained trial; promote-or-reject; full audit of both outcomes; durable rollback to the previous known-good version. Generalizes `scripts/test-synthesis.ps1`'s host-side loop into a real in-OS capability.
-5. **Immutable-core enforcement (ADR-010).** Mechanical, not documentary. A proposal touching the enumerated core is refused and the refusal is audited.
-6. **Tier C prior-art gate (ADR-009).** A proposal claimed as a research breakthrough must pass a recorded prior-art check before that claim may be attached to it, held to `docs/PRIOR_ART.md`'s existing standard.
-7. **`kernel_common`-style host tests** for everything here that is pure logic — criterion evaluation, backoff derivation, exclusion-list matching, health-history accounting — same discipline as every phase before it.
+1. **A real in-OS supervisor.** Observes genuine process death — the actual `PROCESS_KILLED` path in `idt.rs`, not a simulated call — and drives `device_manager`'s existing restart policy against it. Restarts a real user-space driver process for real. Quarantines a component that exhausts its restart budget (a fixed constant, `device_manager::MAX_RESTARTS`, unchanged from Phase 3 — no learned backoff here, that is 9.5b's Tier A) instead of restarting forever.
+2. **Structured, queryable health history** as real typed kernel state: per-component crash counts, causes (fault vector, IOMMU violation, timeout), and outcomes, built on ADR-005's audit log rather than beside it, and exposed through Phase 5's typed introspection surface — never text-scraped. (This deliverable is shared, unchanged, with what was Phase 9.5's deliverable 2 — real infrastructure 9.5b will read from later, not redone.)
+3. **`kernel_common`-style host tests** for the pure logic here — health-history accounting, quarantine-threshold arithmetic — same discipline as every phase before it.
 
 **Exit criteria**
 
-- A real user-space driver process is killed by a real fault; the supervisor observes that **real** death (evidence must distinguish this from the existing simulated path) and restarts it; unrelated processes are demonstrably unaffected.
-- A component that keeps failing exhausts its budget and is quarantined, with the complete history retained — never an unbounded restart loop.
+- A real user-space driver process is killed by a real fault; the supervisor observes that **real** death (evidence must distinguish this from the existing simulated path in `main.rs`) and restarts it; unrelated processes are demonstrably unaffected.
+- A component that keeps failing exhausts its (fixed) budget and is quarantined, with the complete history retained — never an unbounded restart loop.
+- The network-stack process (once Phase 10 exists) can be killed mid-transfer and restarts under this same mechanism, satisfying Phase 10's own fourth exit criterion.
+
+**Evidence:** real-death-to-restart transcript with the fault and the restart causally linked; quarantine-after-budget history.
+
+**Explicitly out of scope here, deferred to 9.5b:** any code adoption, any change to the running system's own code or policy, anything requiring ADR-009 or ADR-010. This phase restarts a crashed process with the exact code it already had — it does not fix, tune, or improve anything.
+
+---
+
+### Phase 9.5b — Self-Improvement (deferred)
+
+**Depends on:** Phase 9.5a. **Gated by ADR-009 and ADR-010 sign-off (§2) — do not start without both.** **Deliberately deferred** — the user chose to build 9.5a now and push this to later in the roadmap (after Phase 11 and/or Phase 12, at the user's discretion; nothing downstream of Phase 9.5a depends on 9.5b starting at any particular point). Re-read ADR-009 and ADR-010 in full before starting this — they are the actual design, not a formality to click through.
+
+**Why this remains its own phase rather than folding into 9.5a:** everything here is qualitatively different work from 9.5a — 9.5a restarts a process with code it already had; this phase lets the system change what code it has. That is exactly the boundary ADR-009 exists to police, and collapsing the two phases would blur the line the split was meant to make explicit.
+
+**Deliverables** (unchanged from the original Phase 9.5 design — see ADR-009/ADR-010 for the full reasoning)
+
+1. **Tier A self-tuning (ADR-009).** Real behavior derived from 9.5a's recorded health history rather than from constants: restart backoff computed from a component's own real crash pattern, and least-privilege authority envelopes narrowed from real observed IOMMU fault addresses — the promotion of research §3 (`docs/RESEARCH_TRACK.md`) out of the research track into production.
+2. **Tier B adoption pipeline (ADR-009).** Pre-declared machine-checkable criterion; contained trial; promote-or-reject; full audit of both outcomes; durable rollback to the previous known-good version. Generalizes `scripts/test-synthesis.ps1`'s host-side loop into a real in-OS capability.
+3. **Immutable-core enforcement (ADR-010).** Mechanical, not documentary. A proposal touching the enumerated core is refused and the refusal is audited.
+4. **Tier C prior-art gate (ADR-009).** A proposal claimed as a research breakthrough must pass a recorded prior-art check before that claim may be attached to it, held to `docs/PRIOR_ART.md`'s existing standard.
+5. **`kernel_common`-style host tests** for the remaining pure logic — criterion evaluation, backoff derivation, exclusion-list matching — same discipline as every phase before it.
+
+**Exit criteria**
+
 - A deliberately introduced bug in a non-core component is corrected by an adopted change, with the pre-declared criterion shown **failing before and passing after** — the falsifiability requirement of ADR-009 clause 2, demonstrated rather than asserted.
 - A proposed change targeting the ADR-010 immutable core is refused, and the refusal appears in the audit log.
 - A trial that fails and rolls back leaves the system **byte-identical** to its pre-trial state, verified by hash, using the same durability bar Phase 8's power-loss testing already meets.
 - Tier A self-tuning demonstrably changes real behavior based on real recorded history — shown by two runs with different histories producing different, correct decisions, not by reading the code.
 
-**Evidence:** real-death-to-restart transcript with the fault and the restart causally linked; quarantine-after-budget history; before/after criterion evaluation for the adopted bug fix; audited immutable-core refusal; pre/post-rollback hash comparison; two-history self-tuning comparison.
+**Evidence:** before/after criterion evaluation for the adopted bug fix; audited immutable-core refusal; pre/post-rollback hash comparison; two-history self-tuning comparison.
 
 **Explicitly out of scope, so it cannot be implied later:** the OS does not author changes and does not perform research. ADR-009 Option C is the whole basis of this phase — every proposal originates outside the kernel, and the system's contribution is judgment, containment, and rollback. Any description of this capability that omits that is an overclaim.
 
@@ -738,7 +758,7 @@ Every phase through 8 was explicitly single-core (§6, old dependency diagram; `
 
 ### Phase 10 — Network Stack And Real Connectivity
 
-**Depends on:** Phase 9, **and Phase 9.5** (deliverable 4 and the fourth exit criterion below both require the real crash-and-restart supervisor built there). **Blocks:** Phases 12–15 (Phase 11 does not depend on this one and may run in parallel).
+**Depends on:** Phase 9, **and Phase 9.5a** (deliverable 4 and the fourth exit criterion below both require the real crash-and-restart supervisor built there — Phase 9.5b, the self-improvement machinery, is NOT required). **Blocks:** Phases 12–15 (Phase 11 does not depend on this one and may run in parallel).
 
 Phase 6 already proved a NIC driver (`virtio-net`, then real `e1000`) can move a frame. Nothing above the link layer exists yet — no IP, no TCP, no sockets, no name resolution. A real OS is a networked OS.
 
@@ -915,14 +935,20 @@ ADR sign-off
             │
      ┌──────┴───────────────┐
      ▼                      ▼
-  Phase 9.5              Phase 11
-  Self-Healing +         Hardware
-  Self-Improvement       Breadth (Tier 3)
-  │ ADR-009 + ADR-010    │ ADR-007 gate
-  │ gate                 │
-     │                   │   (Phase 11 needs neither 9.5 nor 10)
+  Phase 9.5a              Phase 11
+  Minimal Supervision    Hardware
+  (no ADR gate)          Breadth (Tier 3)
+     │                   │ ADR-007 gate
+     │                   │
+     │                   │   (Phase 11 needs neither 9.5a/b nor 10)
      ▼                   │
   Phase 10               │
+  (needs 9.5a only)      │
+     │                   │
+     ·  ·  ·  ·  ·  ·  · │   Phase 9.5b (self-improvement, ADR-009+
+     ·  deferred by      │   ADR-010 gate) -- deferred by the user's
+     ·  user's choice    │   own choice to somewhere after Phase 11/12;
+     ·  ·  ·  ·  ·  ·  · │   nothing below requires it at any fixed point
   Network Stack          │
   (needs 9.5's real      │
    crash-and-restart)    │
@@ -957,8 +983,8 @@ There is no parallel track that skips ahead. Phase 6 in particular cannot be pul
 | 6 | Filesystem: implement documented format vs. design new | Implement a documented format | Medium — a custom format costs debugging tools you would have to write |
 | 7 | ADR-007 — reverse the hardware-breadth non-goal, narrowly (Tier 3) | Adopt, bounded to a published matrix | Blocks Phase 11 entirely; deciding late just delays "runs on more than one machine," no compounding cost |
 | 8 | ADR-008 — reverse the GUI non-goal, as a capability-native compositor only | Adopt Option C, reject Option B (ported conventional compositor architecture) | Blocks Phase 12 entirely; choosing Option B late would mean a second, incompatible security model bolted onto the OS — effectively as permanent a mistake as getting ADR-002 wrong |
-| 9 | ADR-009 — self-modification is evidence-gated adoption; the OS judges, never authors | Adopt Option C, reject Option A (in-kernel authorship) outright — it violates §1.3 and removes the only independent check | Blocks Phase 9.5, which in turn blocks Phase 10. Choosing Option A late is unrecoverable: once the judge and the author are the same component, no later evidence from that system can be trusted |
-| 10 | ADR-010 — a permanently immutable core, excluded from self-modification | Adopt Option C. The list may only ever be extended, never narrowed by a running system | Blocks Phase 9.5 alongside ADR-009. Deciding late, or too narrowly, means a single bad change can disable the machinery that would have caught it — and the system keeps reporting success afterward |
+| 9 | ADR-009 — self-modification is evidence-gated adoption; the OS judges, never authors | Adopt Option C, reject Option A (in-kernel authorship) outright — it violates §1.3 and removes the only independent check | Blocks Phase 9.5b only (Phase 9.5a and Phase 10 do not need it — split at the user's request 2026-09-04). Choosing Option A late is unrecoverable: once the judge and the author are the same component, no later evidence from that system can be trusted |
+| 10 | ADR-010 — a permanently immutable core, excluded from self-modification | Adopt Option C. The list may only ever be extended, never narrowed by a running system | Blocks Phase 9.5b alongside ADR-009 — deferred by the user, no fixed deadline. Deciding late, or too narrowly, means a single bad change can disable the machinery that would have caught it — and the system keeps reporting success afterward |
 
 ---
 

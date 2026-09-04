@@ -10,12 +10,17 @@
 //! bounded restart-on-crash policy — not a data structure with nothing
 //! behind it.
 //!
-//! Honesty note: `report_crash()` is exercised in `main.rs` via a
-//! DELIBERATE simulated crash on the real SATA controller device this
-//! kernel already found (`pci::enumerate()`'s 00:1f.2), because no actual
-//! crashable user-space driver exists yet to generate one on its own.
-//! This proves the state machine and restart-cap logic for real; it does
-//! not claim a real driver crashed.
+//! Updated history, not hidden: `report_crash()` was originally only
+//! ever exercised via a DELIBERATE simulated crash in `main.rs`, on the
+//! real SATA controller device this kernel finds (`pci::enumerate()`'s
+//! 00:1f.2), because no actual crashable user-space driver existed yet
+//! to generate one on its own — that proved the state machine and
+//! restart-cap logic for real, but explicitly did NOT claim a real
+//! driver had crashed. Phase 9.5a (`supervisor.rs`) closes that gap:
+//! `report_crash()` is now driven by a REAL `PROCESS_KILLED` event on
+//! that exact device, and the simulated call site in `main.rs` has been
+//! removed rather than left alongside real evidence it would now be
+//! ambiguous with.
 
 use crate::klog_info;
 use crate::pci::PciDevice;
@@ -74,20 +79,47 @@ pub struct DeviceManager {
     pub devices: Vec<ManagedDevice>,
 }
 
-// Single-core simplification, same pattern and same justification as
-// syscall.rs's RING3_IPC_TABLE/INIT_SVC_TABLE: one kernel-wide instance,
-// reachable via a raw-pointer accessor rather than a lock, because there
-// is exactly one core to race with itself. Revisit before SMP, same as
-// every other kernel-wide `static mut` in this codebase.
+// Phase 9.5a: this WAS a single-core simplification (raw-pointer
+// access, no lock, because there was exactly one core to race with
+// itself) -- the exact gap this module's own earlier comment flagged
+// as "revisit before SMP". Phase 9 finished without this specific
+// revisit happening (SMP's own audit pass covered pmm/capability/
+// audit/iommu/thread/klog explicitly, per docs/PROGRESS.md, but not
+// every kernel-wide static in the codebase) -- closed now, since
+// Phase 9.5a's real supervisor is the first caller that can genuinely
+// touch this from more than one core's own crash-handling path
+// concurrently (two different driver processes on two different real
+// cores faulting at the same wall-clock instant). `critical::
+// without_interrupts` is now a real, kernel-wide, cross-core lock
+// (see critical.rs's own doc comment, Phase 9 deliverable 5) --
+// wrapping every access in it closes this specific, previously
+// disclosed-but-unaddressed gap.
 static mut GLOBAL: Option<DeviceManager> = None;
 
 /// Installs the `DeviceManager` main.rs builds from the real PCI scan as
 /// the kernel-wide instance `service_manager.rs` reads from. Called once,
 /// after `discover()`/`bind_all()` have already populated it.
 pub fn install_global(dm: DeviceManager) {
-    unsafe { GLOBAL = Some(dm) };
+    crate::critical::without_interrupts(|| unsafe { GLOBAL = Some(dm) });
 }
 
+/// Runs `f` against the real global `DeviceManager` under the kernel's
+/// real cross-core lock -- the correct, SMP-safe way to touch it now.
+/// Prefer this over `global()` below for any call site that does more
+/// than one operation, so the whole sequence stays atomic with respect
+/// to another core's own concurrent crash-handling.
+pub fn with_global<R>(f: impl FnOnce(&mut DeviceManager) -> R) -> R {
+    crate::critical::without_interrupts(|| unsafe { f((&mut *&raw mut GLOBAL).as_mut().unwrap()) })
+}
+
+/// Real bug-shaped gap, stated honestly: returns a 'static mut`
+/// reference OUTSIDE the lock -- any caller still using this directly
+/// (rather than `with_global`) reopens exactly the cross-core race this
+/// module's own doc comment above just described, for the DURATION of
+/// whatever it does with the reference. Kept only because several
+/// existing call sites (`main.rs`, `service_manager.rs`) already use
+/// it and migrating them is real, tracked follow-up work, not silently
+/// left unstated. New call sites (`supervisor.rs`) use `with_global`.
 pub fn global() -> &'static mut DeviceManager {
     unsafe { (&mut *&raw mut GLOBAL).as_mut().unwrap() }
 }
@@ -145,30 +177,54 @@ impl DeviceManager {
     /// whether a restart was actually scheduled, so the caller (whatever
     /// eventually re-spawns the driver process) knows whether to try
     /// again or give up.
-    pub fn report_crash(&mut self, bus: u8, device: u8, function: u8) -> bool {
+    /// Phase 9.5a: `fault_vector` is the REAL CPU exception vector that
+    /// killed the process, when this was driven by a genuine fault
+    /// (`supervisor.rs::on_process_killed`) -- `None` for the
+    /// simulated-crash call sites this module's own doc already
+    /// disclosed (kept working, unchanged, for exactly the honesty this
+    /// project holds itself to: a caller that cannot honestly claim a
+    /// real fault vector must not fabricate one).
+    ///
+    /// The restart-vs-quarantine decision itself is no longer decided
+    /// inline here -- `kernel_common::supervision::decide_restart` is
+    /// the same pure logic, now shared and host-tested
+    /// (`host_tests::supervision_tests`), rather than duplicated.
+    pub fn report_crash(&mut self, bus: u8, device: u8, function: u8, fault_vector: Option<u8>) -> bool {
         let Some(dev) = self.find_mut(bus, device, function) else {
             return false;
         };
         dev.state = DeviceState::Crashed;
+        let bdf = kernel_common::supervision::pack_bdf(bus, device, function);
         klog_info!(
             "DEVMGR: {:02x}:{:02x}.{} crashed (restart_count={})",
             bus, device, function, dev.restart_count
         );
-        if dev.restart_count >= MAX_RESTARTS {
-            dev.state = DeviceState::Failed;
-            klog_info!(
-                "DEVMGR: {:02x}:{:02x}.{} exceeded MAX_RESTARTS={}, giving up",
-                bus, device, function, MAX_RESTARTS
-            );
-            return false;
+        crate::audit::record(crate::audit::AuditEvent::ProcessCrashed {
+            bdf,
+            fault_vector: fault_vector.unwrap_or(0xFF), // 0xFF: no real vector -- the simulated-crash call site, never a real one
+        });
+
+        match kernel_common::supervision::decide_restart(dev.restart_count, MAX_RESTARTS) {
+            kernel_common::supervision::RestartDecision::Quarantine => {
+                dev.state = DeviceState::Failed;
+                klog_info!(
+                    "DEVMGR: {:02x}:{:02x}.{} exceeded MAX_RESTARTS={}, giving up",
+                    bus, device, function, MAX_RESTARTS
+                );
+                crate::audit::record(crate::audit::AuditEvent::ProcessQuarantined { bdf });
+                false
+            }
+            kernel_common::supervision::RestartDecision::Restart { attempt } => {
+                dev.restart_count = attempt;
+                dev.state = DeviceState::Restarting;
+                klog_info!(
+                    "DEVMGR: {:02x}:{:02x}.{} restarting (attempt {}/{})",
+                    bus, device, function, attempt, MAX_RESTARTS
+                );
+                crate::audit::record(crate::audit::AuditEvent::ProcessRestarted { bdf, attempt });
+                true
+            }
         }
-        dev.restart_count += 1;
-        dev.state = DeviceState::Restarting;
-        klog_info!(
-            "DEVMGR: {:02x}:{:02x}.{} restarting (attempt {}/{})",
-            bus, device, function, dev.restart_count, MAX_RESTARTS
-        );
-        true
     }
 
     fn find_mut(&mut self, bus: u8, device: u8, function: u8) -> Option<&mut ManagedDevice> {

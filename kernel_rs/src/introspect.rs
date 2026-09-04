@@ -73,7 +73,7 @@ pub fn snapshot_threads(max_entries: usize) -> alloc::vec::Vec<ThreadInfo> {
 /// One capability-scoped audit entry — `syscall.rs` syscall 9's real
 /// payload. `kind` mirrors `audit::AuditEvent`'s variant order (0=Grant,
 /// 1=Derive, 2=Revoke, 3=Denied, 4=IpcSend, 5=IpcReceive,
-/// 6=InterruptDelivered, 7=InterruptAcknowledged, 8=PolicyDenied); `a`/
+/// 6=InterruptDelivered, 7=InterruptAcknowledged, 8=PolicyDenied, 9=IommuFault, 10=ProcessCrashed, 11=ProcessRestarted, 12=ProcessQuarantined); `a`/
 /// `b` carry that variant's own fields (object_id/rights, cap_id, or
 /// vector — zero where a variant doesn't use one), the same "typed
 /// fields over one generic pair, not a separate struct per variant"
@@ -104,6 +104,9 @@ fn event_discriminant(event: crate::audit::AuditEvent) -> (u32, u32, u32) {
         InterruptAcknowledged { vector } => (7, vector as u32, 0),
         PolicyDenied { rights } => (8, rights, 0),
         IommuFault { source_id, reason } => (9, source_id as u32, reason as u32),
+        ProcessCrashed { bdf, fault_vector } => (10, bdf, fault_vector as u32),
+        ProcessRestarted { bdf, attempt } => (11, bdf, attempt),
+        ProcessQuarantined { bdf } => (12, bdf, 0),
     }
 }
 

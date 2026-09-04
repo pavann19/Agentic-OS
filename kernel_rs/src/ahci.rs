@@ -60,6 +60,18 @@ pub fn spawn_if_present(devices: &[pci::PciDevice]) {
     thread::spawn(ahci_driver_thread);
 }
 
+/// Phase 9.5a: real respawn entry point — registered once via
+/// `supervisor::register` (main.rs), called by `supervisor::
+/// on_process_killed` when a real fault kills the driver process and a
+/// restart is approved. Just re-spawns the SAME thread entry point
+/// `spawn_if_present` used the first time, reading the SAME
+/// `AHCI_PARAMS` (still valid — this device's BAR/identity don't
+/// change across a restart) — a respawned driver runs identical code,
+/// not improvised recovery.
+pub fn respawn() {
+    thread::spawn(ahci_driver_thread);
+}
+
 struct AhciParams {
     bus: u8,
     device: u8,
@@ -73,6 +85,13 @@ static mut AHCI_PARAMS: Option<AhciParams> = None;
 extern "C" fn ahci_driver_thread() {
     unsafe {
         let p = (&*(&raw const AHCI_PARAMS)).as_ref().unwrap();
+        // Phase 9.5a: record THIS thread (thread::current_id(), real,
+        // fresh on every spawn AND every respawn) as the current owner
+        // of this real device's driver -- what lets a later real fault
+        // on this exact thread be traced back to this exact device by
+        // idt.rs's fault path, which has nothing but thread::current_id()
+        // to work with.
+        crate::supervisor::mark_thread_owner(p.bus, p.device, p.function);
         let space = vmm::new_address_space();
 
         let entry = match crate::elf::load(space, AHCI_DRIVER_ELF) {

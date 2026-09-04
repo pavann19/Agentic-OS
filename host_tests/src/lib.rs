@@ -1132,3 +1132,72 @@ mod discovered_envelope_tests {
         assert_eq!(discover_envelope(&attempts, &mut out), 0);
     }
 }
+
+#[cfg(test)]
+mod supervision_tests {
+    // Phase 9.5a -- real host verification of kernel_common::supervision,
+    // the pure logic kernel_rs::device_manager/kernel_rs::supervisor
+    // wrap with real thread/PCI/audit state. See that module's own doc.
+    use kernel_common::supervision::*;
+
+    #[test]
+    fn pack_unpack_round_trips_for_a_real_bus_device_function() {
+        let packed = pack_bdf(0x00, 0x1f, 0x02); // the real ich9-ahci controller this project's own PCI scan finds
+        assert_eq!(unpack_bdf(packed), (0x00, 0x1f, 0x02));
+    }
+
+    #[test]
+    fn pack_unpack_round_trips_at_the_real_max_values() {
+        let packed = pack_bdf(0xFF, 0xFF, 0xFF);
+        assert_eq!(unpack_bdf(packed), (0xFF, 0xFF, 0xFF));
+    }
+
+    #[test]
+    fn pack_unpack_round_trips_for_zero() {
+        let packed = pack_bdf(0, 0, 0);
+        assert_eq!(unpack_bdf(packed), (0, 0, 0));
+        assert_eq!(packed, 0);
+    }
+
+    #[test]
+    fn different_bus_device_function_triples_never_collide() {
+        // Exhaustive over every real device/function PCI allows (0..32,
+        // 0..8), for several representative bus values.
+        for bus in [0x00u8, 0x01, 0xFF] {
+            let mut seen = std::vec::Vec::new();
+            for device in 0..32u8 {
+                for function in 0..8u8 {
+                    let p = pack_bdf(bus, device, function);
+                    assert!(!seen.contains(&p), "collision at bus={} device={} function={}", bus, device, function);
+                    seen.push(p);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_fresh_device_with_zero_prior_restarts_is_allowed_attempt_one() {
+        assert_eq!(decide_restart(0, 3), RestartDecision::Restart { attempt: 1 });
+    }
+
+    #[test]
+    fn the_last_allowed_attempt_is_exactly_at_the_budget_boundary() {
+        // max_restarts=3: prior_restart_count 0,1,2 are all still allowed (attempts 1,2,3); 3 is not.
+        assert_eq!(decide_restart(2, 3), RestartDecision::Restart { attempt: 3 });
+    }
+
+    #[test]
+    fn exhausting_the_budget_exactly_triggers_quarantine_not_one_more_restart() {
+        assert_eq!(decide_restart(3, 3), RestartDecision::Quarantine);
+    }
+
+    #[test]
+    fn a_device_already_past_budget_stays_quarantined_not_reset() {
+        assert_eq!(decide_restart(4, 3), RestartDecision::Quarantine);
+    }
+
+    #[test]
+    fn a_zero_restart_budget_quarantines_immediately_never_restarts_once() {
+        assert_eq!(decide_restart(0, 0), RestartDecision::Quarantine);
+    }
+}

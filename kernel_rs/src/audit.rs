@@ -41,6 +41,26 @@ pub enum AuditEvent {
     /// bus/device/function that triggered it (VT-d's own SID field,
     /// bus in the high byte); `reason` is VT-d's own fault-reason code.
     IommuFault { source_id: u16, reason: u8 },
+    /// Phase 9.5a: a real user-space driver process died -- `bdf` is
+    /// `kernel_common::supervision::pack_bdf`'s packed bus/device/
+    /// function, `fault_vector` the real CPU exception vector that
+    /// killed it (see `idt.rs::recover_or_halt`, now threading the
+    /// real vector through instead of discarding it once the fault was
+    /// logged). Distinct from `IommuFault` above -- this is a CPU
+    /// exception (idt.rs), not a DMA-containment violation (iommu.rs);
+    /// a real driver can die either way, and this event only covers
+    /// the former.
+    ProcessCrashed { bdf: u32, fault_vector: u8 },
+    /// Phase 9.5a: the supervisor (`supervisor.rs`) decided to restart
+    /// the crashed device's driver process -- `attempt` is the 1-based
+    /// restart attempt number (`kernel_common::supervision::
+    /// RestartDecision::Restart`'s own field).
+    ProcessRestarted { bdf: u32, attempt: u32 },
+    /// Phase 9.5a: the device exhausted `device_manager::MAX_RESTARTS`
+    /// and was left permanently `Failed` rather than restarted again --
+    /// real evidence a bounded retry budget was honored, not an
+    /// unbounded restart loop.
+    ProcessQuarantined { bdf: u32 },
 }
 
 #[derive(Clone, Copy)]
