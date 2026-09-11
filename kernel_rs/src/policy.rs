@@ -22,13 +22,18 @@
 use crate::capability::Rights;
 
 /// The declarative rule: every capability an agent process may ever be
-/// granted, unioned into one mask. Currently: introspection and
-/// audit-query only — no agent gets a hardware capability (MAP/WAIT/
-/// PORT_IO) through this path. Widening this is a real, deliberate
-/// policy change a future phase would make explicitly (e.g. once a real
-/// hardware-capable agent use case exists) — not something any single
-/// grant call can talk its way around.
-const AGENT_MAX_RIGHTS: Rights = Rights(Rights::INTROSPECT.0 | Rights::AUDIT_QUERY.0);
+/// granted, unioned into one mask. Introspection and audit-query from
+/// Phase 5; no agent gets a raw hardware capability (MAP/WAIT/PORT_IO)
+/// through this path. SEND/RECEIVE were added here in Phase 10,
+/// deliberately and explicitly (not a silent widening) — a `Socket`
+/// object (`capability.rs`) is resolved via exactly these two bits
+/// (see `driver.rs::create_socket_capability`'s own doc comment for
+/// why Socket reuses them rather than minting dedicated bits), and an
+/// agent process holding a socket capability genuinely needs to
+/// exercise it. This is the real, named "once a real hardware-capable
+/// agent use case exists" moment the old comment on this line
+/// predicted.
+const AGENT_MAX_RIGHTS: Rights = Rights(Rights::INTROSPECT.0 | Rights::AUDIT_QUERY.0 | Rights::SEND.0 | Rights::RECEIVE.0);
 
 /// Real grant-time check: is `rights` entirely covered by this policy?
 /// Same "reject outright, never silently clamp" discipline

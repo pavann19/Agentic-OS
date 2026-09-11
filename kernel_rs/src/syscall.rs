@@ -435,6 +435,36 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
                 Err(_) => u64::MAX,
             }
         }
+        10 => {
+            // Phase 10: the real ring-3-reachable counterpart to
+            // `socket_demo.rs`'s kernel-thread proof -- a0 = the
+            // CALLER's own `CapId` for a `Socket` capability it was
+            // granted at spawn. Resolves it against the calling
+            // thread's OWN cap_table (same `resolve_current_capability`
+            // every other per-process check here uses), requiring
+            // `Rights::SEND` — the same bit `driver.rs::
+            // create_socket_capability`'s doc comment explains a
+            // Socket is deliberately gated on. A revoked or
+            // never-granted capability refuses here exactly as it
+            // does for `socket_demo.rs`'s kernel-thread holder,
+            // because it is the identical check.
+            match thread::resolve_current_capability(a0 as capability::CapId, capability::Rights::SEND) {
+                Ok(cap) => match capability::object_kind(cap.object_id) {
+                    Some(capability::KernelObjectKind::Socket { .. }) => {
+                        klog_info!("SYSCALL_SOCKET_USE_OK cap={}", a0);
+                        0
+                    }
+                    _ => {
+                        klog_info!("SYSCALL_SOCKET_USE_WRONG_KIND cap={}", a0);
+                        u64::MAX
+                    }
+                },
+                Err(_) => {
+                    klog_info!("SYSCALL_SOCKET_USE_DENIED cap={}", a0);
+                    u64::MAX
+                }
+            }
+        }
         _ => {
             klog_info!("SYSCALL_UNKNOWN num={}", num);
             u64::MAX

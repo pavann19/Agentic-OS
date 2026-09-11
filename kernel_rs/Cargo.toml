@@ -48,6 +48,11 @@ synthesis_induced_fault = []
 # default so the default boot's existing, already-evidenced Phase 8
 # e1000 demo is unaffected; see scripts/test-network.ps1.
 network_stack = []
+# Phase 10 exit criterion 3: real, adversarial proof that revoking a
+# `Socket` capability mid-use makes it unusable immediately. Off by
+# default -- same discipline as every other demo feature above; see
+# socket_demo.rs's own module doc and scripts/test-socket-revoke.ps1.
+socket_revoke_demo = []
 
 [profile.dev]
 panic = "abort"

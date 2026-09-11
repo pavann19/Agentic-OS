@@ -59,6 +59,7 @@ pub mod service_manager;
 pub mod shell;
 pub mod smp;
 pub mod smp_race_soak; // Phase 9 deliverable 3's real cross-core race evidence, see its own module doc
+pub mod socket_demo; // Phase 10 -- real adversarial Socket capability revocation demo, off by default (see Cargo.toml)
 pub mod supervisor; // Phase 9.5a -- real crash-to-restart supervision, see its own module doc
 pub mod syscall;
 pub mod thread;
@@ -608,6 +609,9 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
 
     #[cfg(feature = "demo_ring3")]
     thread::spawn(demo_ring3_thread);
+
+    #[cfg(feature = "socket_revoke_demo")]
+    socket_demo::start();
 
     // Phase 2: capability substrate. Real proof of every exit criterion
     // from docs/ROADMAP.md's Phase 2 section, not just "it compiles":
