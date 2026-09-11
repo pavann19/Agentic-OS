@@ -1196,6 +1196,23 @@ pub extern "C" fn _start() -> ! {
         if ok {
             com1_write_str("[NETSTACK] NETSTACK_ICMP_SELF_CHECK_PASS: real ICMP echo reply received from 10.0.2.2\n");
             syscall1(0x9E75_6000);
+
+            #[cfg(feature = "crash_test")]
+            {
+                // Phase 10 deliverable 4 / exit criterion 4: the real
+                // work above already completed (a real ICMP echo
+                // round-trip against the real gateway) -- THIS is the
+                // deliberate part, same technique `ahci_driver`'s own
+                // `crash_test` feature already proved: `hlt` is
+                // CPL0-only, so executing it here at ring 3 raises a
+                // real #GP, letting `kernel_rs::supervisor` observe a
+                // genuine death (not a simulated report_crash() call)
+                // and drive the same real restart policy already
+                // evidenced against AHCI, now against the network
+                // stack.
+                com1_write_str("[NETSTACK] CRASH_TEST_ARMED -- deliberately faulting now\n");
+                core::arch::asm!("hlt");
+            }
         } else {
             com1_write_str("[NETSTACK] NETSTACK_ICMP_SELF_CHECK_FAIL: no real echo reply within bound\n");
             syscall1(0x9E75_BAD0);

@@ -21,3 +21,16 @@ opt-level = 1
 panic = "abort"
 opt-level = 2
 lto = true
+
+[features]
+# Phase 10 deliverable 4 / exit criterion 4 (docs/ROADMAP.md): "The
+# network-stack process is killed mid-transfer; it restarts; no other
+# process's sockets are affected." Same real technique
+# `ahci_driver`'s own `crash_test` feature uses (see its Cargo.toml):
+# do the real work first (a real ICMP self-check against the real
+# gateway), THEN deliberately execute `hlt` at ring 3 -- a CPL0-only
+# instruction that raises a genuine #GP, letting kernel_rs::supervisor
+# observe a REAL death and restart this exact process, same mechanism
+# already proven against AHCI. Off by default; see
+# scripts/test-netstack-crash.ps1.
+crash_test = []
