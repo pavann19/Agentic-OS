@@ -17,7 +17,7 @@ param(
     [string]$OvmfCode = "C:\Program Files\qemu\share\edk2-x86_64-code.fd",
     [string]$FatDir = "boot_rs\qemu_fatdir",
     [string]$SerialLog = "_evidence\latest\serial-network.log",
-    [int]$BootWaitSeconds = 20
+    [int]$BootWaitSeconds = 60
 )
 
 $ErrorActionPreference = "Stop"
@@ -96,12 +96,18 @@ $checks = @(
     "NETSTACK_IOMMU_DOMAIN_ASSIGNED",
     "device live, MAC=",
     "pinging real gateway 10.0.2.2",
-    "NETSTACK_ICMP_SELF_CHECK_PASS"
-    # DNS/UDP self-check is real, compiled code but currently disabled
-    # at its one call site -- a genuine, disclosed, unresolved runtime
-    # fault found this session (see netstack_driver's own main.rs
-    # comment at that call site for the full investigation). Not
-    # checked here until that's resolved.
+    "NETSTACK_ICMP_SELF_CHECK_PASS",
+    # Real DNS/TCP/HTTP self-checks, re-enabled 2026-09-11 after the
+    # real root cause of the long-open "aggregate construction" crash
+    # was found and fixed (a broken codegen path for large `[0u8; N]`
+    # array-literal zero-inits -- see main.rs's own doc comment near
+    # `copy_bytes`/`MaybeUninit` for the full disassembly-verified
+    # finding). This is Phase 10 exit criterion 1, verified against a
+    # REAL external server (not a QEMU-local address -- independently
+    # confirmed via this script's own pcap capture).
+    "NETSTACK_DNS_SELF_CHECK_PASS",
+    "NETSTACK_TCP_SELF_CHECK_CONNECTED",
+    "NETSTACK_HTTP_SELF_CHECK_PASS"
 )
 foreach ($c in $checks) {
     if ($content.Contains($c)) {
@@ -117,5 +123,43 @@ if (-not $allPassed) {
     exit 1
 }
 
+# Independent, pcap-based confirmation that the HTTP self-check really
+# reached an external, non-QEMU-local address -- not just that the
+# serial log CLAIMS it did. Parses raw Ethernet/IPv4/TCP headers
+# directly (no library dependency) and asserts at least one real TCP
+# packet has a destination outside 10.0.2.0/24 (QEMU's own user-mode
+# subnet).
+$pyCheck = @'
+import struct, sys
+with open(sys.argv[1], "rb") as f:
+    data = f.read()
+off = 24
+external_seen = False
+while off + 16 <= len(data):
+    _, _, incl_len, _ = struct.unpack("<IIII", data[off:off+16])
+    off += 16
+    pkt = data[off:off+incl_len]
+    off += incl_len
+    if len(pkt) >= 34 and pkt[12:14] == b"\x08\x00" and pkt[23] == 6:
+        dst = pkt[30:34]
+        if dst[0] != 10 or dst[1] != 0 or dst[2] != 2:
+            external_seen = True
+print("EXTERNAL_TCP_SEEN" if external_seen else "NO_EXTERNAL_TCP")
+'@
+$pyCheckFile = "_evidence\latest\check-external-tcp.py"
+Set-Content -Path $pyCheckFile -Value $pyCheck -NoNewline
+$pyResult = & python3 $pyCheckFile $PcapFile 2>&1
+if ($pyResult -match "EXTERNAL_TCP_SEEN") {
+    Write-Output "  PASS: pcap independently confirms a real TCP packet to a non-QEMU-local address (genuine external egress)"
+} else {
+    Write-Output "  FAIL: pcap shows no TCP traffic outside QEMU's own 10.0.2.0/24 subnet -- HTTP self-check may have only reached a local address"
+    $allPassed = $false
+}
+
+if (-not $allPassed) {
+    Write-Error "Network stack self-check FAILED -- see log at $SerialLog"
+    exit 1
+}
+
 Write-Output ""
-Write-Output "Network stack verified: real Ethernet RX + ARP resolve + IPv4 + ICMP echo request/reply against QEMU's real gateway, independently captured in $PcapFile."
+Write-Output "Network stack verified: real Ethernet RX + ARP resolve + IPv4 + ICMP echo request/reply against QEMU's real gateway; real DNS resolution, a real TCP 3-way handshake, and a real byte-verified HTTP GET against an external, non-QEMU-emulated server (Phase 10 exit criterion 1) -- independently captured in $PcapFile."
