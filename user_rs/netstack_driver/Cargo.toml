@@ -34,3 +34,9 @@ lto = true
 # already proven against AHCI. Off by default; see
 # scripts/test-netstack-crash.ps1.
 crash_test = []
+# Phase 10 exit criterion 2: "Two independent Agentic OS instances
+# exchange TCP traffic directly." Mutually exclusive real server/
+# client roles for a real two-QEMU-instance test
+# (scripts/test-tcp-two-instance.ps1) -- off by default.
+tcp_server_demo = []
+tcp_client_demo = []
