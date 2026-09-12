@@ -163,6 +163,16 @@ pub extern "C" fn _start() -> ! {
         com1_write_str("[COMPOSITOR_DRIVER] COMPOSITOR_SELF_CHECK_DRAWN: two real surfaces filled, out-of-bounds pixels refused\n");
         syscall4(COMPOSITOR_READY_TOKEN);
 
+        #[cfg(feature = "crash_test")]
+        {
+            // Phase 9.5a/12 real crash-to-restart evidence: the real
+            // work above already completed (both surfaces drawn,
+            // readiness signaled) -- THIS is the deliberate part. Same
+            // technique already proven on ahci_driver/netstack_driver.
+            com1_write_str("[COMPOSITOR_DRIVER] CRASH_TEST_ARMED -- deliberately faulting now\n");
+            core::arch::asm!("hlt");
+        }
+
         loop {
             core::hint::spin_loop();
         }

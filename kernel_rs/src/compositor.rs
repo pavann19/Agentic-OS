@@ -83,6 +83,19 @@ pub struct FbParams {
 
 static mut FB_PARAMS: Option<FbParams> = None;
 
+/// Phase 12 exit criterion 3: a reserved, non-PCI synthetic bus/device/
+/// function identity for the compositor's own driver thread -- there is
+/// no real PCI device behind it, but `device_manager.rs`/`supervisor.rs`
+/// only ever key on this triple, never on any other field of a real
+/// `PciDevice`, so a fixed sentinel works exactly like a real bdf would.
+/// Bus 0xFE is never reached by `pci::enumerate`'s real scan in any QEMU
+/// topology this project boots (a handful of devices on bus 0, nothing
+/// past a couple of bridges) -- chosen to be unmistakably synthetic
+/// rather than colliding with a real future device.
+pub const SYNTHETIC_BUS: u8 = 0xFE;
+pub const SYNTHETIC_DEVICE: u8 = 0;
+pub const SYNTHETIC_FUNCTION: u8 = 0;
+
 pub fn spawn(params: FbParams) {
     unsafe {
         FB_PARAMS = Some(params);
@@ -92,6 +105,17 @@ pub fn spawn(params: FbParams) {
     thread::spawn(compositor_driver_thread);
     thread::spawn(window_client_a_thread);
     thread::spawn(window_client_b_thread);
+}
+
+/// Phase 9.5a's real respawn entry point, reused for the compositor
+/// (registered via `supervisor::register` in `main.rs`): re-invokes the
+/// SAME thread entry point `spawn` used the first time, reading the SAME
+/// `FB_PARAMS` (still valid across a restart -- the framebuffer's
+/// identity doesn't change) -- a respawned compositor runs identical
+/// code, not improvised recovery, matching `ahci::respawn`'s own
+/// discipline.
+pub fn respawn() {
+    thread::spawn(compositor_driver_thread);
 }
 
 extern "C" fn window_client_a_thread() {
@@ -197,6 +221,13 @@ pub fn syscall_fill_surface(cap_id: capability::CapId, color: u32) -> u64 {
 
 extern "C" fn compositor_driver_thread() {
     unsafe {
+        // Phase 9.5a: record THIS thread as the current owner of the
+        // compositor's synthetic device identity -- the same discipline
+        // `ahci_driver_thread` uses -- so a later real fault on this
+        // exact thread traces back to the compositor via
+        // `supervisor::on_process_killed`, which has nothing but
+        // `thread::current_id()` to work with.
+        crate::supervisor::mark_thread_owner(SYNTHETIC_BUS, SYNTHETIC_DEVICE, SYNTHETIC_FUNCTION);
         let params = (&*(&raw const FB_PARAMS)).as_ref().unwrap();
         let space = vmm::new_address_space();
 

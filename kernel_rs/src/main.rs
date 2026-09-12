@@ -329,13 +329,30 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         // exclusion discipline `netstack.rs`/`e1000.rs` already use).
         // Default boot (feature off) is completely unaffected.
         #[cfg(feature = "compositor_demo")]
-        compositor::spawn(compositor::FbParams {
-            phys_base: fb.base_address as u64,
-            size: fb.buffer_size,
-            width: fb.width,
-            height: fb.height,
-            pixels_per_scan_line: fb.pixels_per_scan_line,
-        });
+        {
+            compositor::spawn(compositor::FbParams {
+                phys_base: fb.base_address as u64,
+                size: fb.buffer_size,
+                width: fb.width,
+                height: fb.height,
+                pixels_per_scan_line: fb.pixels_per_scan_line,
+            });
+            // Phase 12 exit criterion 3: wire the compositor into the
+            // SAME real crash-to-restart mechanism Phase 9.5a proved on
+            // AHCI/netstack -- `device_manager.rs` requires a
+            // pre-existing `ManagedDevice` entry for `report_crash` to
+            // do anything, so `register_synthetic` gives the compositor
+            // one under its reserved, non-PCI bdf identity.
+            device_manager::with_global(|dm| {
+                dm.register_synthetic(
+                    compositor::SYNTHETIC_BUS,
+                    compositor::SYNTHETIC_DEVICE,
+                    compositor::SYNTHETIC_FUNCTION,
+                    device_manager::DriverKind::Compositor,
+                )
+            });
+            supervisor::register(compositor::SYNTHETIC_BUS, compositor::SYNTHETIC_DEVICE, compositor::SYNTHETIC_FUNCTION, compositor::respawn);
+        }
         #[cfg(not(feature = "compositor_demo"))]
         user_driver::spawn_framebuffer_driver(
             fb.base_address as u64,

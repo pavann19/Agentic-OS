@@ -1564,7 +1564,7 @@ Verified live, reproducible, against the real `usb-kbd`:
 
 ---
 
-## Phase 12 — Display Server And Agent-Native Visual Surface (exit criterion 1 met — IN PROGRESS)
+## Phase 12 — Display Server And Agent-Native Visual Surface (exit criteria 1 and 3 met — IN PROGRESS)
 
 Real, disclosed scope for this increment: a minimal real compositor proving the `Surface` capability type (ADR-008: "window and surface objects are typed, capability-scoped") is real, its bounds are actually enforced, AND — as of this session's second increment — that two genuinely separate processes cannot reach each other's surfaces. Not the full compositor/GPU/input/UI-toolkit breadth of deliverables 2-5. Started 2026-09-12.
 
@@ -1593,4 +1593,17 @@ Real bug found and fixed bringing this up: the verify thread's first version cal
 ```
 Both client processes' own `CapId 0` happen to be the same integer — real, deliberate evidence for the exit criterion: identical-looking capability handles in two separate tables name completely different, non-interfering objects, because resolution is always scoped to the calling process's own table, never a global namespace.
 
-**Not yet started:** an actual compositor SERVICE that composites multiple live client surfaces together on screen (this increment's clients each own a fixed, kernel-assigned region — there's no window manager, moving, resizing, or z-ordering yet), GPU 2D acceleration (deliverable 2), input routing (deliverable 3), a UI toolkit (deliverable 4), the typed agent window-introspection API (deliverable 5). Exit criteria 2-4 (agent-driven UI via the typed API, compositor crash-and-restart, input routing) are not met yet.
+**Exit criterion 3 met (2026-09-12) — real compositor crash-and-restart, via a real `device_manager.rs` model extension.** `device_manager.rs` previously required every `ManagedDevice` to be backed by a real, discovered `PciDevice` — a real, disclosed architectural gap, since the compositor is a kernel-spawned process with no PCI device behind it, and `report_crash`/`find_mut` both require a pre-existing entry. Closed with a genuinely minimal extension, not a full redesign: a new `DriverKind::Compositor` variant and `DeviceManager::register_synthetic(bus, device, function, driver_kind)`, which registers a `ManagedDevice` under a reserved, non-PCI-colliding synthetic identity (`compositor::SYNTHETIC_BUS/DEVICE/FUNCTION` = `0xFE:00.0`) — sound because `device_manager.rs`/`supervisor.rs` never key crash/restart logic on anything but the bus/device/function triple, never on `ManagedDevice.pci`'s other fields. `compositor.rs` gained `respawn()` (re-invokes the same `compositor_driver_thread` entry point, identical to `ahci::respawn`'s own discipline) and a `mark_thread_owner` call at thread start, wired into `main.rs` alongside the existing `compositor_demo` spawn site exactly like AHCI's own Phase 9.5a wiring.
+
+New `compositor_driver` `crash_test` feature (off by default, same technique as `ahci_driver`/`netstack_driver`: real work first — both surfaces drawn, the adversarial bounds check run, readiness signaled — then a deliberate ring-3 `hlt` raising a genuine #GP). Verified live, `scripts/test-compositor-crash.ps1` (new), first run clean:
+```
+[INFO] SUPERVISOR_REGISTERED device=fe:00.0
+[COMPOSITOR_DRIVER] CRASH_TEST_ARMED -- deliberately faulting now
+[INFO] PROCESS_KILLED: fault occurred in ring 3
+[INFO] SUPERVISOR_REAL_DEATH device=fe:00.0 ...
+[INFO] DEVMGR: fe:00.0 restarting (attempt 1/3)
+[INFO] SUPERVISOR_RESPAWN device=fe:00.0
+```
+Also confirmed both separate `window_client_driver` processes completed their own real adversarial self-checks (`WINDOW_CLIENT_SURFACE_GRANTED label=A`/`B`, `FOREIGN_CAP_DENIED_OK` x2) — real evidence the compositor's crash left other processes' own state and work untouched, the specific honesty requirement this exit criterion's own wording calls for ("document exactly what survives and what doesn't"): every OTHER process's state survives completely; the compositor's own two drawn surfaces are what get redrawn from scratch by the respawned instance, since a fresh process has no memory of the crashed one's state (no checkpoint/restore attempted or claimed). Wired into the regression suite (now 16 scripts); all pass.
+
+**Not yet started, real and substantially larger remaining scope, deliberately not attempted this pass:** an actual compositor SERVICE that composites multiple live client surfaces together on screen (this increment's clients each own a fixed, kernel-assigned region — there's no window manager, moving, resizing, or z-ordering yet), GPU 2D acceleration (deliverable 2), input routing from real keyboard/mouse/USB-HID to the focused window (deliverable 3, exit criterion 4), a minimal native UI toolkit (deliverable 4), and the typed agent window-introspection/input API (deliverable 5, exit criterion 2 — reading window content and issuing input purely through a typed interface, never pixel-scraping). These require real UI-toolkit and input-routing infrastructure that doesn't exist anywhere in this kernel yet; each is its own multi-session undertaking, not a small addition, so they are named here as open rather than attempted partially.

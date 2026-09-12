@@ -25,3 +25,15 @@ opt-level = 1
 panic = "abort"
 opt-level = 2
 lto = true
+
+[features]
+# Phase 12 exit criterion 3: "A crashed compositor is restarted by the
+# device manager without taking down running application processes'
+# own state." Same real technique already proven on ahci_driver/
+# netstack_driver: do the real work first (both surfaces drawn, the
+# adversarial bounds self-check run, readiness signaled), THEN
+# deliberately execute `hlt` at ring 3 -- a CPL0-only instruction,
+# raising a genuine #GP that kernel_rs::supervisor observes and
+# restarts from, same mechanism, not simulated. Off by default; see
+# scripts/test-compositor-crash.ps1.
+crash_test = []

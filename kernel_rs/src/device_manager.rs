@@ -55,6 +55,10 @@ pub enum DriverKind {
     VgaController,
     SmBusController,
     Unknown,
+    /// Phase 12: a real kernel-spawned process that is NOT backed by a
+    /// discovered PCI device (`compositor.rs`) -- see `register_synthetic`
+    /// below for how it still gets a real `ManagedDevice` entry.
+    Compositor,
 }
 
 fn classify(d: &PciDevice) -> DriverKind {
@@ -225,6 +229,29 @@ impl DeviceManager {
                 true
             }
         }
+    }
+
+    /// Phase 12: registers a real, non-PCI-backed kernel process (the
+    /// compositor) as a `ManagedDevice` so `report_crash`/`find_mut` --
+    /// both of which require a pre-existing entry -- work for it exactly
+    /// like they do for a real PCI driver. `bus`/`device`/`function` here
+    /// are a reserved, non-PCI-colliding synthetic identity (see
+    /// `compositor.rs`'s own constants), not a real bus address; the rest
+    /// of `device_manager.rs`/`supervisor.rs` never distinguishes real
+    /// from synthetic entries, since crash/restart logic only ever keys
+    /// on the bdf triple, never `ManagedDevice.pci`'s other fields.
+    /// Idempotent, matching `supervisor::register`'s own convention.
+    pub fn register_synthetic(&mut self, bus: u8, device: u8, function: u8, driver_kind: DriverKind) {
+        if self.find_mut(bus, device, function).is_some() {
+            return;
+        }
+        self.devices.push(ManagedDevice {
+            pci: PciDevice { bus, device, function, vendor_id: 0, device_id: 0, class: 0, subclass: 0, prog_if: 0, header_type: 0 },
+            driver_kind,
+            state: DeviceState::Running,
+            restart_count: 0,
+        });
+        klog_info!("DEVMGR: registered synthetic {:02x}:{:02x}.{} -> {:?}", bus, device, function, driver_kind);
     }
 
     fn find_mut(&mut self, bus: u8, device: u8, function: u8) -> Option<&mut ManagedDevice> {
