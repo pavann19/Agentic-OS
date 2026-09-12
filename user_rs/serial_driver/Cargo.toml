@@ -16,6 +16,10 @@ edition = "2021"
 # slot whenever LLVM lowers a large zero-init/copy into a memset/memcpy
 # call on this toolchain.
 kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+# Phase 13 deliverable 3: the real, first migration proof that
+# agentic_sdk (new) is a genuine drop-in for this crate's own
+# hand-rolled COM1/syscall code -- see agentic_sdk's own module doc.
+agentic_sdk = { path = "../agentic_sdk" }
 
 [profile.dev]
 panic = "abort"

@@ -27,78 +27,24 @@
 //! 1's still-open "one exception halts the machine" gap), which is fine
 //! for a one-shot proof-of-mechanism demo but wrong for something meant
 //! to represent a real, ongoing driver.
+//!
+//! Phase 13 deliverable 3: this is the first crate migrated to
+//! `agentic_sdk` (new) instead of hand-rolling its own COM1/syscall
+//! code — the real proof that crate is a genuine drop-in, not just an
+//! untested library. Behavior is byte-identical: same COM1 output, same
+//! syscall 1 with the same real full-clobber-list fix this crate's own
+//! doc originally described (now `agentic_sdk::syscall::syscall3`'s
+//! one canonical implementation instead of being re-derived here).
 
 #![no_std]
 #![no_main]
 
-const COM1: u16 = 0x3F8;
-
-#[inline(always)]
-unsafe fn outb(port: u16, value: u8) {
-    core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
-}
-
-#[inline(always)]
-unsafe fn inb(port: u16) -> u8 {
-    let value: u8;
-    core::arch::asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack, preserves_flags));
-    value
-}
-
-fn tx_ready() -> bool {
-    unsafe { (inb(COM1 + 5) & 0x20) != 0 }
-}
-
-fn write_byte(b: u8) {
-    while !tx_ready() {}
-    unsafe { outb(COM1, b) };
-}
-
-fn write_str(s: &str) {
-    for b in s.bytes() {
-        if b == b'\n' {
-            write_byte(b'\r');
-        }
-        write_byte(b);
-    }
-}
-
-/// syscall(num=1, a0=value): the kernel's existing "log a value" syscall
-/// -- reused here (not a new syscall) specifically so this real ELF
-/// process's proof-of-life is visible via the normal klog path too, as a
-/// second, independent confirmation alongside the raw COM1 bytes above.
-unsafe fn syscall1(value: u64) {
-    // Real bug found and fixed on virtio_blk_driver (first driver whose
-    // code relied on a register surviving a syscall -- see that crate's
-    // module doc): SYSCALL/SYSRET does NOT save/restore general-purpose
-    // registers the way an interrupt/iretq does, and the kernel's own
-    // syscall_dispatch is a normal extern "C" fn free to clobber every
-    // System V caller-saved register (rdi/rsi/rdx/rcx/r8-r11), not just
-    // the two (rcx/r11) the hardware itself repurposes. Marking only
-    // those two as clobbered (as this function used to) let the compiler
-    // believe rsi/rdx/r8/r9/r10 survive a syscall unchanged -- true only
-    // by accident whenever nothing after the call happens to still need
-    // them, which was true for every prior driver until virtio_blk_driver
-    // wasn't. Full clobber list now, matching the real ABI.
-    core::arch::asm!(
-        "syscall",
-        inout("rax") 1u64 => _,
-        in("rdi") value,
-        lateout("rsi") _,
-        lateout("rdx") _,
-        lateout("rcx") _,
-        lateout("r8") _,
-        lateout("r9") _,
-        lateout("r10") _,
-        lateout("r11") _,
-        options(nostack)
-    );
-}
-
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    write_str("\n[USERSPACE_SERIAL_DRIVER] real ELF64 ring-3 process, real PortIoRange capability, real COM1 write\n");
-    unsafe { syscall1(0xD067) }; // "D067" ~ "driver" -- distinguishes this real-ELF process's syscall from the hand-built demos' markers (0xCAFE, 0x1234, 0xC0DE)
+    agentic_sdk::com1::write_str("\n[USERSPACE_SERIAL_DRIVER] real ELF64 ring-3 process, real PortIoRange capability, real COM1 write\n");
+    // "D067" ~ "driver" -- distinguishes this real-ELF process's syscall
+    // from the hand-built demos' markers (0xCAFE, 0x1234, 0xC0DE).
+    unsafe { agentic_sdk::syscall::syscall1(1, 0xD067) };
     loop {
         core::hint::spin_loop();
     }

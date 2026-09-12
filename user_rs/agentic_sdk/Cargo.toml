@@ -1,0 +1,20 @@
+[package]
+name = "agentic_sdk"
+version = "0.1.0"
+edition = "2021"
+
+# Phase 13 deliverable 3 (docs/ROADMAP.md Sec5): "A native SDK/toolchain
+# targeting the real capability ABI... documented well enough that an
+# app can be built without reading kernel source." A plain #![no_std]
+# library crate, not a binary -- it is never built standalone, only
+# pulled in as a path dependency the way every user_rs/*_driver crate
+# already pulls in kernel_common. Because of that, it deliberately
+# carries NO .cargo/config.toml, build.rs, or linker.ld of its own:
+# cargo has no mechanism for a path dependency to inject target/link
+# configuration into whatever binary crate depends on it -- those three
+# files still have to exist in every app's own directory (see
+# docs/SDK.md for exactly what they contain and why). What THIS crate
+# removes is the OTHER kind of duplication: the actual syscall-wrapper
+# and COM1 I/O source code every user_rs/*_driver crate has been
+# re-typing by hand since Phase 3.
+[dependencies]
