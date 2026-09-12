@@ -18,6 +18,11 @@ edition = "2021"
 # (capability ids are table-local, not global).
 [dependencies]
 kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+# Phase 12 deliverable 4: this crate's own first real use of the
+# minimal UI toolkit's scrollable-text-region widget (agentic_sdk::
+# text_widget), drawing real PSF1 text into this process's own held
+# Surface via SYS_SURFACE_DRAW_TEXT.
+agentic_sdk = { path = "../agentic_sdk" }
 
 [profile.dev]
 panic = "abort"

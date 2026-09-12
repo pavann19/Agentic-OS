@@ -68,6 +68,7 @@ pub mod smp_race_soak; // Phase 9 deliverable 3's real cross-core race evidence,
 pub mod socket_demo; // Phase 10 -- real adversarial Socket capability revocation demo, off by default (see Cargo.toml)
 pub mod supervisor; // Phase 9.5a -- real crash-to-restart supervision, see its own module doc
 pub mod syscall;
+pub mod text; // Phase 12 deliverable 4 -- minimal real PSF1 text rendering, see its own module doc
 pub mod thread;
 pub mod tools;
 pub mod user_driver;
@@ -335,6 +336,10 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         // Default boot (feature off) is completely unaffected.
         #[cfg(feature = "compositor_demo")]
         {
+            // Phase 12 deliverable 4: real PSF1 font, already loaded by
+            // boot_rs since Phase 0 (`bootinfo::BootInfoPayload::font`)
+            // but never used by kernel_rs until now.
+            text::init(info.payload.font);
             compositor::spawn(compositor::FbParams {
                 phys_base: fb.base_address as u64,
                 size: fb.buffer_size,

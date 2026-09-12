@@ -181,6 +181,21 @@ pub extern "C" fn _start() -> ! {
             syscall1(0x9C1E_BAD1 | info.label as u64);
         }
 
+        // Phase 12 deliverable 4: real, minimal UI toolkit exercise --
+        // draw a real two-line block of PSF1 text into this process's
+        // OWN surface via agentic_sdk::text_widget (which itself calls
+        // SYS_SURFACE_DRAW_TEXT, syscall 14), at the surface's top-left
+        // corner -- deliberately away from the center pixel
+        // compositor.rs's own verify thread already samples for the
+        // solid-fill self-check above, so the two checks never collide.
+        let mut text_region: agentic_sdk::text_widget::TextRegion<2, 16> = agentic_sdk::text_widget::TextRegion::new();
+        text_region.push_line(b"HI");
+        text_region.push_line(b"OK");
+        text_region.render(info.surface_cap, 16, 0x00FFFFFF, info.color);
+        com1_write_str("[WINDOW_CLIENT_");
+        com1_write_str(core::str::from_utf8(core::slice::from_ref(&info.label)).unwrap_or("?"));
+        com1_write_str("] TEXT_DRAWN via SYS_SURFACE_DRAW_TEXT\n");
+
         syscall4(0xC1E0_0000 | info.label as u64);
 
         // Phase 12 exit criterion 4: real, UNBOUNDED poll for routed

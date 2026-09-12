@@ -160,6 +160,54 @@ pub unsafe fn write_user_bytes(pml4_phys: u64, vaddr: u64, data: &[u8]) {
     }
 }
 
+/// Phase 12 deliverable 4 (minimal UI toolkit): the read-side sibling of
+/// `validate_user_buffer_writable` above — required WRITABLE dropped
+/// (reading text a process wants drawn doesn't need to write back to
+/// it), PRESENT|USER kept. First real need for this direction: `SYS_
+/// SURFACE_DRAW_TEXT` reads the caller's own request struct AND its
+/// text bytes directly out of the CALLING process's address space
+/// (safe specifically because a syscall handler runs under the
+/// CALLER's own CR3 — unchanged by `SYSCALL`/`SYSRET` — so a validated
+/// user vaddr is a real, dereferenceable pointer here, not a foreign
+/// address needing translation).
+pub unsafe fn validate_user_buffer_readable(pml4_phys: u64, vaddr: u64, len: u64) -> bool {
+    if len == 0 {
+        return false;
+    }
+    let Some(end) = vaddr.checked_add(len) else {
+        return false;
+    };
+    let mut page = vaddr & !0xFFF;
+    while page < end {
+        let pte = debug_translate(pml4_phys, page);
+        let required = PAGE_PRESENT | PAGE_USER;
+        if pte & required != required {
+            return false;
+        }
+        page += 0x1000;
+    }
+    true
+}
+
+/// Reads `len` bytes out of an already-`validate_user_buffer_readable`-
+/// checked user range, one byte at a time via `read_volatile` — same
+/// explicit-loop discipline `write_user_bytes` already documents (never
+/// a slice copy, to avoid this toolchain's known indirect-`memcpy`-call
+/// bug).
+pub unsafe fn read_user_bytes(pml4_phys: u64, vaddr: u64, out: &mut [u8]) {
+    for (i, slot) in out.iter_mut().enumerate() {
+        let addr = vaddr + i as u64;
+        let (i4, i3, i2, i1) = indices(addr);
+        let pml4 = pmm::p2v_pub(pml4_phys) as *mut u64;
+        let pdpt = pmm::p2v_pub(*pml4.add(i4) & ADDR_MASK) as *mut u64;
+        let pd = pmm::p2v_pub(*pdpt.add(i3) & ADDR_MASK) as *mut u64;
+        let pt = pmm::p2v_pub(*pd.add(i2) & ADDR_MASK) as *mut u64;
+        let leaf_phys = (*pt.add(i1)) & ADDR_MASK;
+        let src = pmm::p2v_pub(leaf_phys + (addr & 0xFFF)) as *const u8;
+        *slot = core::ptr::read_volatile(src);
+    }
+}
+
 /// Maps one 4K page. `flags` should be `PAGE_WRITABLE`/`PAGE_NO_EXECUTE` as
 /// needed — `PAGE_PRESENT` is always added. Intermediate tables are
 /// allocated on demand via the PMM (so this must only be called while the

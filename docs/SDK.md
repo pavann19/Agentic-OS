@@ -79,6 +79,18 @@ agentic_sdk = { path = "../agentic_sdk" }
   `agentic_sdk::syscall`'s own doc) requires — `SYSCALL`/`SYSRET` does
   not save/restore registers the way an interrupt does, and the
   kernel's dispatch is free to clobber any of them.
+- `agentic_sdk::surface::draw_text(surface_cap, x, y, text, fg, bg)` —
+  real PSF1 text rendering into a held `Surface` capability (`SYS_
+  SURFACE_DRAW_TEXT`, syscall 14), bounds-checked by the kernel exactly
+  like `SYS_SURFACE_FILL` already is. ASCII/Latin-1 glyph indices only
+  (PSF1's own 256-glyph table), no UTF-8 decoding.
+- `agentic_sdk::text_widget::TextRegion<LINES, COLS>` — Phase 12
+  deliverable 4's one real, minimal widget: a fixed-capacity scrollable
+  text region (`push_line` shifts the oldest line out once full,
+  `render` draws every held line into a surface via `draw_text`). Real,
+  disclosed scope: no line-wrapping, no cursor — the single primitive a
+  terminal emulator, text editor, or file-manager list view (Phase 13's
+  own planned reference apps) all reduce to.
 
 `user_rs/serial_driver` is migrated to `agentic_sdk` as this crate's
 own first, real proof that it is a genuine drop-in: same COM1 output,

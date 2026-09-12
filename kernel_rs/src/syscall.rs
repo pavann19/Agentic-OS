@@ -522,6 +522,17 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
             crate::input_routing::deliver_key_event(a0 as u8);
             0
         }
+        14 => {
+            // Phase 12 deliverable 4: SYS_SURFACE_DRAW_TEXT -- a0 = the
+            // CALLER's own CapId for a Surface, a1 = the vaddr (in the
+            // CALLER's own address space) of a SurfaceTextRequest.
+            // Real per-process isolation identical to syscall 11: the
+            // Surface capability and the request/text pointers are all
+            // resolved/validated against the CALLING thread's own
+            // context only. See compositor::syscall_draw_text's own
+            // doc for the real bounds enforcement.
+            crate::compositor::syscall_draw_text(a0 as capability::CapId, a1)
+        }
         _ => {
             klog_info!("SYSCALL_UNKNOWN num={}", num);
             u64::MAX

@@ -240,6 +240,94 @@ pub fn syscall_fill_surface(cap_id: capability::CapId, color: u32) -> u64 {
     0
 }
 
+/// Real request struct a caller writes into its OWN mapped memory
+/// before invoking `SYS_SURFACE_DRAW_TEXT` -- the syscall ABI here
+/// only carries two plain integer arguments (`a0`/`a1`), so a request
+/// with more fields than that (position, both colors, and a text
+/// pointer/length) is passed by reference, the same shape every driver
+/// crate's own `INFO_VADDR`-mapped info struct already uses to hand the
+/// kernel more than two words of setup data.
+#[repr(C)]
+struct SurfaceTextRequest {
+    x: u32,
+    y: u32,
+    fg: u32,
+    bg: u32,
+    text_vaddr: u64,
+    text_len: u32,
+}
+
+/// Real, disclosed bound on a single draw call's text -- generous for
+/// one line of a terminal/editor/file-manager row (Phase 13's own
+/// planned reference apps), not a general unbounded string API.
+const MAX_DRAW_TEXT_LEN: u32 = 256;
+
+/// Phase 12 deliverable 4: SYS_SURFACE_DRAW_TEXT -- `a0` = the CALLER's
+/// own `CapId` for a `Surface`, `a1` = the vaddr of a `SurfaceTextRequest`
+/// in the CALLER's own mapped memory. Same real per-process isolation
+/// as `syscall_fill_surface`: the Surface capability is resolved
+/// against the CALLING thread's own `cap_table` only, and every drawn
+/// pixel is bounds-checked against THAT surface's own real rectangle
+/// (`text::draw_text`'s own per-pixel clip) -- a request naming
+/// coordinates or a text length that would reach outside the caller's
+/// own surface is truncated, never drawn into another process's
+/// region, structurally, not by convention.
+pub fn syscall_draw_text(cap_id: capability::CapId, request_vaddr: u64) -> u64 {
+    let cap = match thread::resolve_current_capability(cap_id, Rights::MAP) {
+        Ok(c) => c,
+        Err(_) => {
+            klog_info!("SYSCALL_SURFACE_DRAW_TEXT_DENIED cap={}", cap_id);
+            return u64::MAX;
+        }
+    };
+    let (sx, sy, swidth, sheight) = match capability::object_kind(cap.object_id) {
+        Some(capability::KernelObjectKind::Surface { x, y, width, height }) => (x, y, width, height),
+        _ => {
+            klog_info!("SYSCALL_SURFACE_DRAW_TEXT_WRONG_KIND cap={}", cap_id);
+            return u64::MAX;
+        }
+    };
+    unsafe {
+        let pml4 = vmm::current_cr3();
+        let req_size = core::mem::size_of::<SurfaceTextRequest>() as u64;
+        if !vmm::validate_user_buffer_readable(pml4, request_vaddr, req_size) {
+            klog_info!("SYSCALL_SURFACE_DRAW_TEXT_BAD_REQUEST_PTR cap={}", cap_id);
+            return u64::MAX;
+        }
+        let mut req_bytes = [0u8; core::mem::size_of::<SurfaceTextRequest>()];
+        vmm::read_user_bytes(pml4, request_vaddr, &mut req_bytes);
+        let req: SurfaceTextRequest = core::ptr::read_unaligned(req_bytes.as_ptr() as *const SurfaceTextRequest);
+
+        let text_len = req.text_len.min(MAX_DRAW_TEXT_LEN) as usize;
+        if text_len == 0 || !vmm::validate_user_buffer_readable(pml4, req.text_vaddr, text_len as u64) {
+            klog_info!("SYSCALL_SURFACE_DRAW_TEXT_BAD_TEXT_PTR cap={}", cap_id);
+            return u64::MAX;
+        }
+        let mut text_buf = [0u8; MAX_DRAW_TEXT_LEN as usize];
+        vmm::read_user_bytes(pml4, req.text_vaddr, &mut text_buf[..text_len]);
+
+        let params = match (&*(&raw const FB_PARAMS)).as_ref() {
+            Some(p) => p,
+            None => return u64::MAX,
+        };
+        crate::text::draw_text(
+            params.phys_base,
+            params.pixels_per_scan_line,
+            sx + req.x,
+            sy + req.y,
+            &text_buf[..text_len],
+            req.fg,
+            req.bg,
+            sx,
+            sy,
+            swidth,
+            sheight,
+        );
+    }
+    klog_info!("SYSCALL_SURFACE_DRAW_TEXT_OK cap={} rect=({},{},{},{})", cap_id, sx, sy, swidth, sheight);
+    0
+}
+
 extern "C" fn compositor_driver_thread() {
     unsafe {
         // Phase 9.5a: record THIS thread as the current owner of the
@@ -418,6 +506,45 @@ extern "C" fn compositor_verify_thread() {
             klog_info!("COMPOSITOR_MULTIPROC_SELF_CHECK_PASS: two SEPARATE real processes each drew only their own real Surface, mediated entirely through syscall_fill_surface -- neither reached the other's or the gap between them");
         } else {
             klog_info!("COMPOSITOR_MULTIPROC_SELF_CHECK_FAIL: multi-process readback did not match expected real colors/bounds");
+        }
+
+        // Phase 12 deliverable 4: real, independent readback that PSF1
+        // text actually landed -- both window clients drew a real
+        // two-line block via SYS_SURFACE_DRAW_TEXT at their own
+        // surface's top-left corner (local (0,0)) before this. Rather
+        // than assume a specific glyph's exact bitmap (font-dependent,
+        // never inspected here), this scans a small region covering
+        // that block and counts pixels matching the real foreground
+        // color used (0x00FFFFFF): a real glyph render produces SOME
+        // (the strokes) but not ALL (the gaps between/around them)
+        // matching pixels -- a uniform result either way (0 or every
+        // pixel) would mean nothing was actually drawn, not a real
+        // bitmap pattern.
+        const TEXT_FG: u32 = 0x00FF_FFFF;
+        let count_fg = |base_x: u32, base_y: u32| -> (u32, u32) {
+            let mut matches = 0u32;
+            let mut total = 0u32;
+            for dy in 0..32u32 {
+                for dx in 0..16u32 {
+                    if read_pixel(base_x + dx, base_y + dy) == TEXT_FG {
+                        matches += 1;
+                    }
+                    total += 1;
+                }
+            }
+            (matches, total)
+        };
+        let (text_a_fg, text_a_total) = count_fg(0, CLIENT_ROW_Y);
+        let (text_b_fg, text_b_total) = count_fg(SURFACE_SIZE + GAP_PX, CLIENT_ROW_Y);
+        klog_info!(
+            "COMPOSITOR_TEXT_READBACK client_a_fg={}/{} client_b_fg={}/{}",
+            text_a_fg, text_a_total, text_b_fg, text_b_total
+        );
+        let real_glyph_pattern = |fg: u32, total: u32| fg > 0 && fg < total;
+        if real_glyph_pattern(text_a_fg, text_a_total) && real_glyph_pattern(text_b_fg, text_b_total) {
+            klog_info!("COMPOSITOR_TEXT_SELF_CHECK_PASS: both windows' real PSF1 text produced a genuine glyph pattern (neither blank nor solid), independently read back");
+        } else {
+            klog_info!("COMPOSITOR_TEXT_SELF_CHECK_FAIL: text readback did not show a real glyph pattern");
         }
     }
 }
