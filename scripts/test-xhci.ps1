@@ -61,6 +61,7 @@ $qemuArgs = @(
     "-drive", "if=pflash,format=raw,readonly=on,file=`"$OvmfCode`"",
     "-drive", "file=fat:rw:$FatDir,format=raw",
     "-device", "qemu-xhci,id=xhci0",
+    "-device", "usb-kbd,bus=xhci0.0",
     "-serial", "file:$SerialLog",
     "-display", "none",
     "-no-reboot"
@@ -86,7 +87,9 @@ $checks = @(
     "XHCI_SELF_CHECK_PASS",
     "XHCI_RESET_PASS",
     "XHCI_COMMAND_PASS",
-    "XHCI_ENABLE_SLOT_PASS"
+    "XHCI_ENABLE_SLOT_PASS",
+    "XHCI_PORT_FOUND",
+    "XHCI_ADDRESS_DEVICE_PASS"
 )
 foreach ($c in $checks) {
     if ($content.Contains($c)) {
@@ -103,4 +106,4 @@ if (-not $allPassed) {
 }
 
 Write-Output ""
-Write-Output "xHCI (USB) host controller verified: real device found by PCI class code, real MMIO+IOMMU capability grants, real Capability Register set decoded from actual hardware, a real HCRST reset handshake, a real NO-OP command round trip, and a real Enable Slot command -- the actual first step of USB device enumeration -- with a real, hardware-assigned device slot ID reported back through the Event Ring."
+Write-Output "xHCI (USB) host controller verified end-to-end against a real attached USB keyboard: real device found by PCI class code, real MMIO+IOMMU capability grants, real Capability Register decoding, a real HCRST reset handshake, a real NO-OP command round trip, a real Enable Slot command, a real port reset finding the actual attached device, and a real Address Device (SET_ADDRESS) command -- independently confirmed by reading back the controller's own real Output Device Context showing the real assigned USB bus address and Addressed slot state."

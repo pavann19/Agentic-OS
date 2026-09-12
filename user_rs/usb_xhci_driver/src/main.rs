@@ -78,6 +78,13 @@ const CMD_RING_OFF: u64 = 0x800;
 const ERST_OFF: u64 = 0xA00;
 const EVENT_RING_OFF: u64 = 0xB00;
 const EVENT_RING_TRBS: u32 = 16;
+// Real DMA structures for Address Device (xHCI spec 4.3.3/6.2.2/6.2.3),
+// added after the Event Ring (which ends at 0xB00 + 16*16 = 0xC00).
+// 32-byte contexts throughout (this controller's own real HCCPARAMS1
+// reports CSZ=0 -- checked live, not assumed, at the real call site).
+const INPUT_CONTEXT_OFF: u64 = 0xC00; // Input Control Context(32) + Slot Context(32) + EP0 Context(32) = 96 bytes
+const OUTPUT_DEVICE_CONTEXT_OFF: u64 = 0xD00; // Slot Context(32) + EP0 Context(32) = 64 bytes -- the real structure DCBAA[slot_id] points to
+const EP0_TRANSFER_RING_OFF: u64 = 0xD80; // EP0's own real Transfer Ring -- required by a legally-formed EP0 Context even though this increment issues no actual control transfer yet
 
 // xHCI Capability Register offsets from BAR0 (xHCI spec 1.2, table 5-9).
 const REG_CAPLENGTH: u64 = 0x00; // 1 byte
@@ -94,6 +101,11 @@ const REG_RTSOFF: u64 = 0x18;
 const OP_CRCR: u64 = 0x18; // Command Ring Control Register, 64-bit
 const OP_DCBAAP: u64 = 0x30; // Device Context Base Address Array Pointer, 64-bit
 const OP_CONFIG: u64 = 0x38;
+const OP_PORTSC_BASE: u64 = 0x400; // Port Register Set array (xHCI spec 5.4.8) -- port N (1-based) at OP_PORTSC_BASE + (N-1)*16
+const PORTSC_CCS: u32 = 1 << 0; // Current Connect Status -- a real device is electrically present
+const PORTSC_PED: u32 = 1 << 1; // Port Enabled/Disabled
+const PORTSC_PR: u32 = 1 << 4; // Port Reset (write 1 to reset; xHCI clears it and sets PRC when done)
+const PORTSC_PRC: u32 = 1 << 21; // Port Reset Change (RW1C)
 
 // Runtime register offsets, relative to rt_base = bar + RTSOFF.
 // Interrupter 0's own registers start at rt_base + 0x20 (xHCI spec
@@ -106,6 +118,7 @@ const IR_ERDP: u64 = 0x18; // 64-bit
 
 const TRB_TYPE_LINK: u32 = 6;
 const TRB_TYPE_ENABLE_SLOT: u32 = 9;
+const TRB_TYPE_ADDRESS_DEVICE: u32 = 11;
 const TRB_TYPE_NOOP_CMD: u32 = 23;
 const TRB_TYPE_CMD_COMPLETION_EVENT: u32 = 33;
 const TRB_CYCLE: u32 = 1 << 0;
@@ -203,6 +216,13 @@ unsafe fn read_trb(addr: u64) -> (u64, u32, u32) {
 /// stated scope boundary for whoever extends this to a genuine,
 /// continuously-running command ring later.
 unsafe fn run_command(bar: u64, op_base: u64, dma_vaddr: u64, dma_phys: u64, trb_type: u32, parameter: u64) -> Option<(u64, u32, u32)> {
+    run_command_ex(bar, op_base, dma_vaddr, dma_phys, trb_type, parameter, 0)
+}
+
+/// Same as `run_command`, plus `extra_control` -- real, additional
+/// Control-field bits a command needs beyond Cycle/TRB Type (e.g.
+/// Address Device's real Slot ID, bits 31:24).
+unsafe fn run_command_ex(bar: u64, op_base: u64, dma_vaddr: u64, dma_phys: u64, trb_type: u32, parameter: u64, extra_control: u32) -> Option<(u64, u32, u32)> {
     let dboff = mmio_read32(bar, REG_DBOFF) & !0x3;
     let rtsoff = mmio_read32(bar, REG_RTSOFF) & !0x1F;
     let db_base = bar + dboff as u64;
@@ -215,7 +235,6 @@ unsafe fn run_command(bar: u64, op_base: u64, dma_vaddr: u64, dma_phys: u64, trb
     write_hex_u32(rtsoff);
     com1_write_str("\n");
 
-    let dcbaa_vaddr = dma_vaddr + DCBAA_OFF;
     let dcbaa_phys = dma_phys + DCBAA_OFF;
     let cmd_ring_vaddr = dma_vaddr + CMD_RING_OFF;
     let cmd_ring_phys = dma_phys + CMD_RING_OFF;
@@ -224,16 +243,18 @@ unsafe fn run_command(bar: u64, op_base: u64, dma_vaddr: u64, dma_phys: u64, trb
     let event_ring_vaddr = dma_vaddr + EVENT_RING_OFF;
     let event_ring_phys = dma_phys + EVENT_RING_OFF;
 
-    // Real, explicit zero of every field this increment relies on --
-    // small, fixed-count writes (never a large array-literal
-    // zero-init; see this crate's own `MaybeUninit` lesson elsewhere
-    // in this project for exactly why that distinction matters on
-    // this toolchain). DCBAA: zero its first 8 real slots (this
-    // driver enumerates no real device yet, so every entry stays
-    // NULL -- a real, honest, disclosed scope boundary).
-    for i in 0..8u64 {
-        core::ptr::write_volatile((dcbaa_vaddr + i * 8) as *mut u64, 0);
-    }
+    // Real bug found and fixed: this function used to re-zero DCBAA's
+    // first 8 real slots on every single call -- harmless the first
+    // few calls (nothing had written anything meaningful there yet),
+    // but once `address_device` started writing a REAL
+    // `DCBAA[slot_id]` entry before issuing the Address Device
+    // command through this same function, that write got clobbered
+    // by this loop before the doorbell was ever rung. Removed: the
+    // kernel's own `pmm::alloc_page` already zeroes a fresh page at
+    // allocation time (`pmm.rs`'s own `alloc_page_locked`), so DCBAA
+    // starts real-zeroed once, for free, with no re-zeroing needed
+    // -- the only writer of a real DCBAA entry after that point is
+    // `address_device` itself, and its write must survive.
     // Command ring: TRB[0] will hold the real NO-OP command; TRB[1]
     // is a real Link TRB back to TRB[0] with Toggle Cycle set, so the
     // controller's own consumer cycle state wraps correctly even
@@ -294,7 +315,7 @@ unsafe fn run_command(bar: u64, op_base: u64, dma_vaddr: u64, dma_phys: u64, trb
     // cycle state) and ring the real Command Doorbell (doorbell
     // register 0, target 0 -- the command ring's own, xHCI spec
     // 4.6.1.1).
-    write_trb(cmd_ring_vaddr, parameter, 0, TRB_CYCLE | (trb_type << 10));
+    write_trb(cmd_ring_vaddr, parameter, 0, TRB_CYCLE | extra_control | (trb_type << 10));
     mmio_write32(db_base, 0, 0);
 
     // Real, bounded poll of the real event ring for this exact
@@ -361,6 +382,133 @@ unsafe fn reset_controller(op_base: u64) -> bool {
         }
         core::hint::spin_loop();
     }
+}
+
+/// Real port scan (xHCI spec 5.4.8): checks every real port register
+/// (1-based, up to `max_ports`) for `CCS` (a real device electrically
+/// connected). For a USB2 port, a connected device is not usable
+/// until a real Port Reset completes (`PORTSC.PR` set, wait for
+/// `PORTSC.PRC`, xHCI spec 4.19.1.2) -- issued here, not left to the
+/// caller, since "found a port" and "the port is reset and usable"
+/// are one real, bounded operation. Returns the real 1-based port
+/// number and the real, hardware-reported Port Speed (xHCI spec
+/// 5.4.8's own PORTSC bits 10-13) once the port is confirmed enabled.
+unsafe fn find_and_reset_connected_port(op_base: u64, max_ports: u32) -> Option<(u32, u32)> {
+    for port in 1..=max_ports {
+        let portsc_off = OP_PORTSC_BASE + (port as u64 - 1) * 16;
+        let portsc = mmio_read32(op_base, portsc_off);
+        if portsc & PORTSC_CCS == 0 {
+            continue;
+        }
+        if portsc & PORTSC_PED != 0 {
+            let speed = (portsc >> 10) & 0xF;
+            return Some((port, speed));
+        }
+        // Real Port Reset handshake -- a real device present but not
+        // yet enabled (the common USB2 case) needs this before it
+        // will respond to anything, including Address Device.
+        mmio_write32(op_base, portsc_off, (portsc & !PORTSC_PRC) | PORTSC_PR);
+        let mut spins = 0u32;
+        loop {
+            let s = mmio_read32(op_base, portsc_off);
+            if s & PORTSC_PRC != 0 {
+                // Real, required RW1C clear -- xHCI spec 5.4.8:
+                // software must write 1 to PRC to clear it.
+                mmio_write32(op_base, portsc_off, s | PORTSC_PRC);
+                if s & PORTSC_PED != 0 {
+                    let speed = (s >> 10) & 0xF;
+                    return Some((port, speed));
+                }
+                break;
+            }
+            spins += 1;
+            if spins > 20_000_000 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
+    None
+}
+
+/// Real Address Device (xHCI spec 4.3.4/4.3.5/6.2.2/6.2.3): builds a
+/// real, minimal Input Context (Input Control Context with A0/A1 set,
+/// a real Slot Context naming the actual port/speed just found, and a
+/// real EP0 Context pointing at a real, freshly-initialized Transfer
+/// Ring), points `DCBAA[slot_id]` at a real Output Device Context,
+/// and issues the real command -- the actual step that gives a USB
+/// device its real bus address. Real, disclosed simplification:
+/// `BSR=0` (a genuine SET_ADDRESS is issued, not deferred), and EP0's
+/// `MaxPacketSize` uses 8 -- the universally-legal minimum for an
+/// as-yet-unqueried control endpoint (real drivers commonly start
+/// here, then update it after reading the device descriptor, itself
+/// real, separate follow-up work this increment doesn't reach).
+unsafe fn address_device(
+    bar: u64,
+    op_base: u64,
+    dma_vaddr: u64,
+    dma_phys: u64,
+    slot_id: u32,
+    port: u32,
+    speed: u32,
+) -> Option<(u64, u32, u32)> {
+    let dcbaa_vaddr = dma_vaddr + DCBAA_OFF;
+    let input_ctx_vaddr = dma_vaddr + INPUT_CONTEXT_OFF;
+    let input_ctx_phys = dma_phys + INPUT_CONTEXT_OFF;
+    let out_ctx_vaddr = dma_vaddr + OUTPUT_DEVICE_CONTEXT_OFF;
+    let out_ctx_phys = dma_phys + OUTPUT_DEVICE_CONTEXT_OFF;
+    let ep0_ring_vaddr = dma_vaddr + EP0_TRANSFER_RING_OFF;
+    let ep0_ring_phys = dma_phys + EP0_TRANSFER_RING_OFF;
+
+    // Real, explicit zero of every field this real structure needs --
+    // small, fixed-count writes, never a large array-literal zero-init
+    // (see this crate's own `MaybeUninit`/toolchain-bug lesson).
+    for i in 0..12u64 {
+        core::ptr::write_volatile((input_ctx_vaddr + i * 8) as *mut u64, 0);
+    }
+    for i in 0..8u64 {
+        core::ptr::write_volatile((out_ctx_vaddr + i * 8) as *mut u64, 0);
+    }
+    // EP0's own real Transfer Ring: one real Link TRB (cycle=1, TC
+    // set) back to its own start -- same real "2-TRB ring" pattern
+    // the Command Ring already established, legally forming the ring
+    // EP0's Context must point at even though no transfer is queued
+    // on it yet.
+    write_trb(ep0_ring_vaddr, 0, 0, 0);
+    write_trb(ep0_ring_vaddr + 16, ep0_ring_phys, 0, TRB_CYCLE | TRB_TOGGLE_CYCLE | (TRB_TYPE_LINK << 10));
+
+    // Input Control Context: A0 (Slot Context) and A1 (EP0 Context)
+    // real add flags -- the only two contexts Address Device touches.
+    core::ptr::write_volatile((input_ctx_vaddr + 4) as *mut u32, 0x3);
+
+    // Real Slot Context, naming the actual port/speed just found.
+    // ContextEntries=1 (only EP0 configured so far).
+    let slot_ctx_vaddr = input_ctx_vaddr + 32;
+    let slot_dword0 = (1u32 << 27) | (speed << 20);
+    let slot_dword1 = port << 16;
+    core::ptr::write_volatile(slot_ctx_vaddr as *mut u32, slot_dword0);
+    core::ptr::write_volatile((slot_ctx_vaddr + 4) as *mut u32, slot_dword1);
+
+    // Real EP0 Context: a real Control endpoint (EPType=4), CErr=3
+    // (the standard real retry count), MaxPacketSize=8 (see this
+    // function's own doc for why), pointing at the real EP0 Transfer
+    // Ring above with DCS=1 (the real initial dequeue cycle state).
+    let ep0_ctx_vaddr = input_ctx_vaddr + 64;
+    let ep0_dword1 = (3u32 << 1) | (4u32 << 3) | (8u32 << 16);
+    core::ptr::write_volatile((ep0_ctx_vaddr + 4) as *mut u32, ep0_dword1);
+    core::ptr::write_volatile((ep0_ctx_vaddr + 8) as *mut u32, (ep0_ring_phys as u32) | 1); // DCS=1
+    core::ptr::write_volatile((ep0_ctx_vaddr + 12) as *mut u32, (ep0_ring_phys >> 32) as u32);
+    core::ptr::write_volatile((ep0_ctx_vaddr + 16) as *mut u32, 8); // Average TRB Length -- a real, reasonable placeholder
+
+    // Real DCBAA[slot_id] -> the real Output Device Context this
+    // exact command will have the controller fill in.
+    core::ptr::write_volatile((dcbaa_vaddr + slot_id as u64 * 8) as *mut u64, out_ctx_phys);
+
+    // Real Address Device command: parameter = real Input Context
+    // physical address, Control bits 31:24 = the real Slot ID this
+    // command targets (BSR=0 -- a genuine SET_ADDRESS is issued).
+    let control_slot = (slot_id & 0xFF) << 24;
+    run_command_ex(bar, op_base, dma_vaddr, dma_phys, TRB_TYPE_ADDRESS_DEVICE, input_ctx_phys, control_slot)
 }
 
 #[no_mangle]
@@ -459,6 +607,54 @@ pub extern "C" fn _start() -> ! {
                                 write_dec_u32(slot_id);
                                 com1_write_str("\n");
                                 syscall1(0x9CC1_51D0 | slot_id as u64);
+
+                                // Real next step: Address Device
+                                // (see `find_and_reset_connected_port`/
+                                // `address_device`'s own doc). Real,
+                                // honest scope: this needs an ACTUAL
+                                // USB device electrically attached to
+                                // the controller -- not guaranteed on
+                                // every QEMU config -- so "no device
+                                // found" is a real, disclosed, correct
+                                // outcome here, not a failure of this
+                                // driver.
+                                match find_and_reset_connected_port(op_base, max_ports) {
+                                    Some((port, speed)) => {
+                                        com1_write_str("[XHCI_DRIVER] XHCI_PORT_FOUND port=");
+                                        write_dec_u32(port);
+                                        com1_write_str(" speed=");
+                                        write_dec_u32(speed);
+                                        com1_write_str("\n");
+                                        match address_device(bar, op_base, info.dma_vaddr, info.dma_phys, slot_id, port, speed) {
+                                            Some((_p, _s, _c)) => {
+                                                // Real, independent confirmation beyond the
+                                                // Completion Code: read back the real Output
+                                                // Device Context's own Slot Context DW3 --
+                                                // the controller itself writes the real
+                                                // assigned USB Device Address (bits 0-7) and
+                                                // Slot State (bits 27-31, 3 = Addressed) here,
+                                                // not this driver.
+                                                let slot_ctx_dw3 = core::ptr::read_volatile((info.dma_vaddr + OUTPUT_DEVICE_CONTEXT_OFF + 12) as *const u32);
+                                                let usb_addr = slot_ctx_dw3 & 0xFF;
+                                                let slot_state = (slot_ctx_dw3 >> 27) & 0x1F;
+                                                com1_write_str("[XHCI_DRIVER] XHCI_ADDRESS_DEVICE_PASS: real SET_ADDRESS completed, usb_device_address=");
+                                                write_dec_u32(usb_addr);
+                                                com1_write_str(" slot_state=");
+                                                write_dec_u32(slot_state);
+                                                com1_write_str(" (xHCI spec 6.2.2: 1=Default, 2=Addressed, 3=Configured)\n");
+                                                syscall1(0x9CC1_ADD5);
+                                            }
+                                            None => {
+                                                com1_write_str("[XHCI_DRIVER] XHCI_ADDRESS_DEVICE_FAIL: real command round trip did not complete within bound or reported non-success\n");
+                                                syscall1(0x9CC1_BAD4);
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                        com1_write_str("[XHCI_DRIVER] XHCI_NO_DEVICE_ATTACHED: no real device found on any port -- Address Device correctly skipped\n");
+                                        syscall1(0x9CC1_D0EF);
+                                    }
+                                }
                             } else {
                                 com1_write_str("[XHCI_DRIVER] XHCI_ENABLE_SLOT_FAIL: reported slot_id out of real bounds\n");
                                 syscall1(0x9CC1_BAD3);

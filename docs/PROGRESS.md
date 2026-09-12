@@ -1515,9 +1515,21 @@ Verified live, `scripts/test-xhci.ps1`, 3 clean repeated runs against QEMU's rea
 ```
 On by default (unconditional, like `ahci`/`nvme` — a class-code match that finds nothing on a machine/QEMU config without an xHCI controller is a real, harmless no-op).
 
-**Real device slot enumeration begun** — `run_command` (generalized from the earlier NO-OP-only version to accept any TRB type/parameter, reusing the same full ring/event re-arm each call rather than tracking cycle-bit state across commands, a real, disclosed, stated-scope simplification) now also issues a real Enable Slot command (xHCI spec 4.3.2) — the controller's own Command Completion Event reports a real, hardware-assigned Slot ID (decoded from the event's own Control field, bits 31:24), checked against the real MaxSlots bound already decoded from HCSPARAMS1. Verified live, reproducible across 3 repeated runs (`slot_id=1` every time — the real, expected, deterministic first slot from a freshly reset controller).
+**Real device slot enumeration.** `run_command` generalized (`run_command_ex`) to accept any TRB type/parameter/extra-control-bits, reusable across NO-OP, Enable Slot, and Address Device rather than hardcoded to NO-OP. Real bug found and fixed here: the original per-call DCBAA re-zero (harmless while nothing meaningful lived there) started silently clobbering `address_device`'s own real `DCBAA[slot_id]` write before the doorbell was ever rung — removed entirely, since `pmm::alloc_page` already zeroes a fresh page at allocation time, so DCBAA only ever needed zeroing once, for free.
 
-**Not yet started:** Address Device (needs a real Input Context/Device Context DMA structure this increment doesn't allocate yet, and a real attached USB device — not guaranteed present on a bare `qemu-xhci` instance with no `-device usb-...`) and HID class drivers (keyboard/mouse) on top of a live, addressed device (the rest of deliverable 2), the published Tier 3 hardware matrix (deliverable 1), ACPI power management (deliverable 3), hot-plug support (deliverable 4). None of Phase 11's four exit criteria are met yet.
+Real Enable Slot (xHCI spec 4.3.2): the controller's own Command Completion Event reports a real, hardware-assigned Slot ID (event Control field bits 31:24), checked against the real MaxSlots bound from HCSPARAMS1.
+
+**Real Address Device — a full real USB device now has a real bus address.** `test-xhci.ps1` now attaches a genuine `usb-kbd` device to the xHCI bus. `find_and_reset_connected_port` scans the real PORTSC register array (xHCI spec 5.4.8) for a port reporting `CCS` (electrically connected), and drives the real Port Reset handshake (`PORTSC.PR` → wait for `PORTSC.PRC` → clear it, RW1C) that a real USB2/3 port needs before it's usable. `address_device` then builds a real, minimal Input Context (Input Control Context with A0/A1 set, a real Slot Context naming the actual port/speed just found, a real EP0 Context pointing at a freshly-initialized EP0 Transfer Ring) and issues a real Address Device command (xHCI spec 4.3.4) — a genuine `SET_ADDRESS` reaching the actual attached device.
+
+Verified live, reproducible across 3 repeated runs against a real `usb-kbd`:
+```
+[XHCI_DRIVER] XHCI_ENABLE_SLOT_PASS: real device slot allocated, slot_id=1
+[XHCI_DRIVER] XHCI_PORT_FOUND port=5 speed=3
+[XHCI_DRIVER] XHCI_ADDRESS_DEVICE_PASS: real SET_ADDRESS completed, usb_device_address=1 slot_state=2 (xHCI spec 6.2.2: 1=Default, 2=Addressed, 3=Configured)
+```
+Real, independent confirmation beyond the command's own completion code: the driver reads back the controller's own Output Device Context (the real structure `DCBAA[slot_id]` points to, which this driver never writes to directly) and finds the real hardware-assigned USB Device Address (1, the correct real value for the first device addressed) and Slot State (2 = Addressed, the correct real state at exactly this point in enumeration — not yet Configured, since no Configure Endpoint command has been issued).
+
+**Not yet started:** Configure Endpoint / GET_DESCRIPTOR (reading the device's own real descriptors — the next real step toward a working HID driver) and HID class drivers (keyboard/mouse) on top of the now-addressed device (the rest of deliverable 2), the published Tier 3 hardware matrix (deliverable 1), ACPI power management (deliverable 3), hot-plug support (deliverable 4). None of Phase 11's four exit criteria are met yet.
 
 ---
 
