@@ -49,6 +49,13 @@ if ($exitCode -ne 0) {
     exit 1
 }
 
+Write-Output "=== Building window_client_driver ==="
+$exitCode = Invoke-CargoQuiet "user_rs\window_client_driver" @("build", "--release", "--target", "x86_64-unknown-none")
+if ($exitCode -ne 0) {
+    Write-Error "window_client_driver build failed"
+    exit 1
+}
+
 Write-Output "=== Building kernel WITH compositor_demo ==="
 $exitCode = Invoke-CargoQuiet "kernel_rs" @("build", "--release", "--target", "x86_64-unknown-none", "--features", "compositor_demo")
 if ($exitCode -ne 0) {
@@ -91,7 +98,13 @@ $checks = @(
     "COMPOSITOR_SELF_CHECK_DRAWN",
     "COMPOSITOR_READY",
     "COMPOSITOR_READBACK",
-    "COMPOSITOR_SELF_CHECK_PASS"
+    "COMPOSITOR_SELF_CHECK_PASS",
+    "WINDOW_CLIENT_SURFACE_GRANTED label=A",
+    "WINDOW_CLIENT_SURFACE_GRANTED label=B",
+    "SURFACE_FILL_OK",
+    "FOREIGN_CAP_DENIED_OK",
+    "COMPOSITOR_MULTIPROC_READBACK",
+    "COMPOSITOR_MULTIPROC_SELF_CHECK_PASS"
 )
 foreach ($c in $checks) {
     if ($content.Contains($c)) {
@@ -102,9 +115,11 @@ foreach ($c in $checks) {
     }
 }
 
-if ($content.Contains("COMPOSITOR_SELF_CHECK_FAIL")) {
-    Write-Output "  FAIL: COMPOSITOR_SELF_CHECK_FAIL appeared -- readback did not match expected colors/bounds"
-    $allPassed = $false
+foreach ($bad in @("COMPOSITOR_SELF_CHECK_FAIL", "COMPOSITOR_MULTIPROC_SELF_CHECK_FAIL", "SURFACE_FILL_UNEXPECTED_DENIAL", "FOREIGN_CAP_UNEXPECTEDLY_SUCCEEDED")) {
+    if ($content.Contains($bad)) {
+        Write-Output "  FAIL: $bad appeared -- see $SerialLog"
+        $allPassed = $false
+    }
 }
 
 if (-not $allPassed) {
@@ -113,4 +128,4 @@ if (-not $allPassed) {
 }
 
 Write-Output ""
-Write-Output "Compositor foundation verified: two real Surface capabilities minted and granted, a real ELF-loaded process drew a distinct real color into each within its own bounds, and an independent kernel-side pixel readback confirmed both colors landed correctly AND that the real gap between them -- swept by a deliberate adversarial wide-fill attempt -- was left untouched."
+Write-Output "Compositor foundation verified, including Phase 12 exit criterion 1: two real Surface capabilities minted and granted to a single process, drawn correctly with bounds enforced against a deliberate adversarial wide-fill attempt; AND two SEPARATE real processes, each in its own address space with its own capability table and no framebuffer MMIO access at all, each drew only its own real Surface through a kernel-mediated syscall, with a foreign-CapId adversarial probe correctly denied by both -- independently confirmed by a kernel-side pixel readback."

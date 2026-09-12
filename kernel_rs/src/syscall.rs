@@ -465,6 +465,23 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
                 }
             }
         }
+        11 => {
+            // Phase 12 (docs/ROADMAP.md Sec5, deliverable 1, exit
+            // criterion 1): SYS_SURFACE_FILL -- a0 = the CALLER's own
+            // CapId for a Surface capability, a1 = the real color to
+            // fill it with. Real cross-process isolation mechanism:
+            // `compositor::syscall_fill_surface` resolves `a0`
+            // against the CALLING thread's OWN cap_table only (same
+            // `resolve_current_capability` every other per-process
+            // check here uses) -- a process can never name, guess, or
+            // otherwise reach another process's Surface through this
+            // call, because CapIds are table-local indices, not
+            // global handles. The actual pixel write happens here, in
+            // the kernel, bounded to exactly the resolved Surface's
+            // own real x/y/width/height -- the calling process never
+            // receives a framebuffer pointer at all.
+            crate::compositor::syscall_fill_surface(a0 as capability::CapId, a1 as u32)
+        }
         _ => {
             klog_info!("SYSCALL_UNKNOWN num={}", num);
             u64::MAX

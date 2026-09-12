@@ -385,6 +385,28 @@ pub fn deny_port_for_current(port: u16) {
     });
 }
 
+/// Real, direct grant into the CURRENTLY RUNNING thread's OWN
+/// `cap_table` — for kernel-side setup code that runs ON the exact
+/// thread that will enter ring 3 next (the `ahci_driver_thread`/
+/// `compositor_driver_thread`/... pattern every driver in this kernel
+/// uses), rather than spawning a separate new thread the way
+/// `spawn_with_capabilities` grants into. Real bug found and fixed
+/// bringing up Phase 12's multi-process window clients: building a
+/// throwaway LOCAL `CapabilityTable` and granting into THAT never
+/// reaches the real thread struct's own `cap_table` field --
+/// `resolve_current_capability` (right below) reads the real field,
+/// so a capability minted this way was never actually resolvable by
+/// the process holding it, denying every legitimate use, not just
+/// adversarial ones.
+pub fn grant_current_capability(object_id: crate::capability::ObjectId, rights: crate::capability::Rights) -> crate::capability::CapId {
+    crate::critical::without_interrupts(|| unsafe {
+        match current_mut().as_mut() {
+            Some(t) => t.cap_table.grant(object_id, rights),
+            None => 0,
+        }
+    })
+}
+
 pub fn resolve_current_capability(
     cap_id: crate::capability::CapId,
     required: crate::capability::Rights,

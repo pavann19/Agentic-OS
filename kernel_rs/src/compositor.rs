@@ -14,7 +14,7 @@
 //! `compositor_demo` Cargo feature (off by default); see
 //! `main.rs`'s own spawn site and `scripts/test-compositor.ps1`.
 
-use crate::capability::{CapabilityTable, Rights};
+use crate::capability::{self, CapabilityTable, Rights};
 use crate::{driver, gdt, klog_info, pmm, ring3, syscall, thread, vmm};
 
 const DRIVER_STACK_VADDR: u64 = 0x0000_0000_0070_0000;
@@ -22,6 +22,8 @@ const INFO_VADDR: u64 = 0x0000_0000_0051_0000;
 
 static COMPOSITOR_DRIVER_ELF: &[u8] =
     include_bytes!("../../user_rs/compositor_driver/target/x86_64-unknown-none/release/compositor_driver");
+static WINDOW_CLIENT_ELF: &[u8] =
+    include_bytes!("../../user_rs/window_client_driver/target/x86_64-unknown-none/release/window_client_driver");
 
 #[repr(C)]
 struct SurfaceRect {
@@ -54,6 +56,23 @@ const COLOR_B: u32 = 0x0000_00FF; // real solid blue
 const GAP_PX: u32 = 64;
 const SURFACE_SIZE: u32 = 128;
 
+// Real, disjoint from surface_a/b above (different Y row entirely) --
+// the two real, SEPARATE-PROCESS client surfaces (exit criterion 1),
+// distinguished from the single-process demo's own surfaces so both
+// can be independently verified without interference.
+const CLIENT_ROW_Y: u32 = SURFACE_SIZE + 64;
+const COLOR_C: u32 = 0x0000_FF00; // real solid green
+const COLOR_D: u32 = 0x00FF_FF00; // real solid yellow
+const FOREIGN_CAP_GUESS: u32 = 99; // never granted to either client -- the real adversarial probe
+
+#[repr(C)]
+struct WindowClientInfo {
+    label: u8,
+    surface_cap: u32,
+    color: u32,
+    foreign_cap_guess: u32,
+}
+
 pub struct FbParams {
     pub phys_base: u64,
     pub size: u64,
@@ -71,6 +90,109 @@ pub fn spawn(params: FbParams) {
     syscall::init_fb_ready_ipc();
     thread::spawn(compositor_verify_thread);
     thread::spawn(compositor_driver_thread);
+    thread::spawn(window_client_a_thread);
+    thread::spawn(window_client_b_thread);
+}
+
+extern "C" fn window_client_a_thread() {
+    unsafe { spawn_window_client(b'A', 0, CLIENT_ROW_Y, COLOR_C) };
+}
+extern "C" fn window_client_b_thread() {
+    unsafe { spawn_window_client(b'B', SURFACE_SIZE + GAP_PX, CLIENT_ROW_Y, COLOR_D) };
+}
+
+/// Real Phase 12 exit criterion 1 setup: a NEW address space, a NEW,
+/// SEPARATE `CapabilityTable` (never shared with `compositor_driver`
+/// OR the other client), granted exactly ONE real `Surface`
+/// capability and nothing that reaches the framebuffer directly — no
+/// `MmioRegion` grant at all. Drawing happens only through
+/// `SYS_SURFACE_FILL` (syscall 11), which the kernel mediates against
+/// THIS process's own table.
+unsafe fn spawn_window_client(label: u8, x: u32, y: u32, color: u32) {
+    let space = vmm::new_address_space();
+
+    let entry = match crate::elf::load(space, WINDOW_CLIENT_ELF) {
+        Ok(e) => e,
+        Err(e) => {
+            klog_info!("WINDOW_CLIENT_ELF_LOAD_FAILED {:?}", e);
+            return;
+        }
+    };
+
+    let stack_page = pmm::alloc_page();
+    vmm::map_page_in(space, DRIVER_STACK_VADDR, stack_page, vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE | vmm::PAGE_WRITABLE);
+
+    // Real, direct grant into THIS thread's own cap_table (the one
+    // `thread::resolve_current_capability`/syscall 11 actually reads)
+    // -- NOT a throwaway local `CapabilityTable` (see
+    // `thread::grant_current_capability`'s own doc for the real bug
+    // that distinction fixes).
+    let surface_object = capability::create_object(capability::KernelObjectKind::Surface { x, y, width: SURFACE_SIZE, height: SURFACE_SIZE });
+    let surface_cap = thread::grant_current_capability(surface_object, Rights::MAP);
+    klog_info!("WINDOW_CLIENT_SURFACE_GRANTED label={} rect=({},{},{},{}) cap={}", label as char, x, y, SURFACE_SIZE, SURFACE_SIZE, surface_cap);
+
+    let mut table = CapabilityTable::new();
+    let com1_cap = driver::create_port_capability(&mut table, 0x3F8, 8, Rights::PORT_IO);
+    if driver::grant_port_access(&table, com1_cap).is_err() {
+        klog_info!("WINDOW_CLIENT_COM1_GRANT_FAILED label={}", label as char);
+        return;
+    }
+
+    let info_phys = pmm::alloc_page();
+    let info_ptr = pmm::p2v_pub(info_phys) as *mut WindowClientInfo;
+    core::ptr::write(info_ptr, WindowClientInfo { label, surface_cap, color, foreign_cap_guess: FOREIGN_CAP_GUESS });
+    vmm::map_page_in(space, INFO_VADDR, info_phys, vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE | vmm::PAGE_WRITABLE);
+
+    let kernel_stack_top = thread::current_kernel_stack_top();
+    gdt::set_kernel_stack(kernel_stack_top);
+    syscall::set_kernel_stack(kernel_stack_top);
+    syscall::init();
+
+    vmm::switch_address_space(space);
+    thread::set_current_address_space(space);
+    klog_info!("WINDOW_CLIENT_ELF_ENTER label={} entry=0x{:x} stack=0x{:x}", label as char, entry, DRIVER_STACK_VADDR + 4096);
+    ring3::enter_user_mode(entry, DRIVER_STACK_VADDR + 4096);
+}
+
+/// Real syscall-11 handler body (kept here, not `syscall.rs`, since
+/// it needs `FB_PARAMS` and the pixel-write helper this module
+/// already owns): resolves `cap_id` against the CALLING thread's OWN
+/// `cap_table` (never a shared or global one), requires it to be a
+/// real `Surface`, then fills EXACTLY that surface's own real bounds
+/// — the calling process supplies a `CapId` and a color, nothing
+/// else; it never receives a framebuffer pointer, so it has no way to
+/// write anywhere else even if it wanted to.
+pub fn syscall_fill_surface(cap_id: capability::CapId, color: u32) -> u64 {
+    let cap = match thread::resolve_current_capability(cap_id, Rights::MAP) {
+        Ok(c) => c,
+        Err(_) => {
+            klog_info!("SYSCALL_SURFACE_FILL_DENIED cap={}", cap_id);
+            return u64::MAX;
+        }
+    };
+    let (x, y, width, height) = match capability::object_kind(cap.object_id) {
+        Some(capability::KernelObjectKind::Surface { x, y, width, height }) => (x, y, width, height),
+        _ => {
+            klog_info!("SYSCALL_SURFACE_FILL_WRONG_KIND cap={}", cap_id);
+            return u64::MAX;
+        }
+    };
+    unsafe {
+        let params = match (&*(&raw const FB_PARAMS)).as_ref() {
+            Some(p) => p,
+            None => return u64::MAX,
+        };
+        let ppsl = params.pixels_per_scan_line as u64;
+        for py in y..y + height {
+            for px in x..x + width {
+                let byte_offset = (py as u64 * ppsl + px as u64) * 4;
+                let vaddr = vmm::map_mmio_page(params.phys_base + byte_offset);
+                core::ptr::write_volatile(vaddr as *mut u32, color);
+            }
+        }
+    }
+    klog_info!("SYSCALL_SURFACE_FILL_OK cap={} rect=({},{},{},{}) color=0x{:08x}", cap_id, x, y, width, height, color);
+    0
 }
 
 extern "C" fn compositor_driver_thread() {
@@ -173,11 +295,21 @@ extern "C" fn compositor_driver_thread() {
 extern "C" fn compositor_verify_thread() {
     let table = syscall::fb_ready_table();
     let cap = syscall::fb_ready_cap();
-    match crate::ipc::receive(table, cap) {
-        Ok(msg) => klog_info!("COMPOSITOR_READY token=0x{:x}", msg.data[0]),
-        Err(e) => {
-            klog_info!("COMPOSITOR_VERIFY_FAILED to receive ready signal: {:?}", e);
-            return;
+    // Real, sequential rendezvous drain -- one real message per real
+    // process that signals readiness (the single-process
+    // `compositor_driver` demo, plus the two, real, SEPARATE window
+    // client processes below). `ipc::receive`'s own rendezvous
+    // semantics (see its module doc) make the ARRIVAL order
+    // irrelevant here: this thread only needs all three real
+    // processes to have finished before reading pixels, not to know
+    // which one finished first.
+    for _ in 0..3 {
+        match crate::ipc::receive(table, cap) {
+            Ok(msg) => klog_info!("COMPOSITOR_READY token=0x{:x}", msg.data[0]),
+            Err(e) => {
+                klog_info!("COMPOSITOR_VERIFY_FAILED to receive ready signal: {:?}", e);
+                return;
+            }
         }
     }
     unsafe {
@@ -211,6 +343,29 @@ extern "C" fn compositor_verify_thread() {
             klog_info!("COMPOSITOR_SELF_CHECK_PASS: both real surfaces drawn correctly, gap between them left untouched (real bounds enforcement confirmed)");
         } else {
             klog_info!("COMPOSITOR_SELF_CHECK_FAIL: readback did not match expected real colors/bounds");
+        }
+
+        // Real Phase 12 exit criterion 1 verification: the SAME real
+        // independent readback, now against the two SEPARATE-PROCESS
+        // client surfaces. Each color landing correctly, drawn only
+        // through a kernel-mediated syscall neither client could have
+        // reached the other's region through even by mistake (no
+        // shared memory, no shared pointer, no way to name the
+        // other's `CapId`), is the actual, falsifiable "one process
+        // cannot reach another's window buffer" proof.
+        let pixel_c = read_pixel(SURFACE_SIZE / 2, CLIENT_ROW_Y + SURFACE_SIZE / 2);
+        let pixel_d = read_pixel(SURFACE_SIZE + GAP_PX + SURFACE_SIZE / 2, CLIENT_ROW_Y + SURFACE_SIZE / 2);
+        let pixel_client_gap = read_pixel(SURFACE_SIZE + GAP_PX / 2, CLIENT_ROW_Y + SURFACE_SIZE / 2);
+
+        klog_info!(
+            "COMPOSITOR_MULTIPROC_READBACK client_a=0x{:08x} client_b=0x{:08x} gap=0x{:08x}",
+            pixel_c, pixel_d, pixel_client_gap
+        );
+
+        if pixel_c == COLOR_C && pixel_d == COLOR_D && pixel_client_gap != COLOR_C && pixel_client_gap != COLOR_D {
+            klog_info!("COMPOSITOR_MULTIPROC_SELF_CHECK_PASS: two SEPARATE real processes each drew only their own real Surface, mediated entirely through syscall_fill_surface -- neither reached the other's or the gap between them");
+        } else {
+            klog_info!("COMPOSITOR_MULTIPROC_SELF_CHECK_FAIL: multi-process readback did not match expected real colors/bounds");
         }
     }
 }

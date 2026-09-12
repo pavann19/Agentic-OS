@@ -1,0 +1,29 @@
+[package]
+name = "window_client_driver"
+version = "0.1.0"
+edition = "2021"
+
+# Phase 12 (docs/ROADMAP.md Sec5, deliverable 1/exit criterion 1):
+# a real, minimal window CLIENT process -- unlike compositor_driver
+# (which owns the real framebuffer MMIO directly, single-process),
+# this process holds ONLY a real Surface capability and an entry in
+# its OWN, separate capability table. It never sees a framebuffer
+# pointer at all; drawing happens through a real syscall
+# (SYS_SURFACE_FILL) that the kernel mediates, resolving the
+# capability against the CALLING process's own table only. Two
+# instances of this same binary, each in its own address space with
+# its own table, are the real proof that one cannot reach the
+# other's surface -- there is no shared address space, no shared
+# pointer, and no way to even NAME the other process's capability
+# (capability ids are table-local, not global).
+[dependencies]
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true
