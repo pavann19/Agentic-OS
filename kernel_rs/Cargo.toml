@@ -59,6 +59,13 @@ socket_revoke_demo = []
 # for the same real framebuffer's contents. Off by default; see
 # compositor.rs's own module doc and scripts/test-compositor.ps1.
 compositor_demo = []
+# Phase 13 deliverable 1's own exit criterion: real, adversarial proof
+# that an app is granted exactly its manifest's declared capabilities,
+# nothing ambient -- a grant for an undeclared capability kind is
+# refused. Off by default -- same discipline as every other demo
+# feature above; see manifest_demo.rs's own module doc and
+# scripts/test-manifest.ps1.
+manifest_demo = []
 
 [profile.dev]
 panic = "abort"

@@ -61,6 +61,17 @@ pub enum AuditEvent {
     /// real evidence a bounded retry budget was honored, not an
     /// unbounded restart loop.
     ProcessQuarantined { bdf: u32 },
+    /// Phase 13 deliverable 1 (`docs/ROADMAP.md` §5): an app's install
+    /// manifest did not declare the capability KIND a grant at spawn
+    /// time would have minted -- refused before the object ever reached
+    /// the new process's table, same "grant-time, not use-time" shape
+    /// as `PolicyDenied` above, but keyed on a per-app manifest
+    /// (`manifest.rs`) rather than the one global agent policy
+    /// (`policy.rs`). `kind` is `manifest::CapKind`'s own discriminant,
+    /// cast to u8 -- coarse on purpose, matching the manifest's own
+    /// granularity (declares KINDS of capability, never specific
+    /// instances).
+    ManifestDenied { kind: u8 },
 }
 
 #[derive(Clone, Copy)]

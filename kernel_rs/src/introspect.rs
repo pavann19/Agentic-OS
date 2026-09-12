@@ -107,6 +107,7 @@ fn event_discriminant(event: crate::audit::AuditEvent) -> (u32, u32, u32) {
         ProcessCrashed { bdf, fault_vector } => (10, bdf, fault_vector as u32),
         ProcessRestarted { bdf, attempt } => (11, bdf, attempt),
         ProcessQuarantined { bdf } => (12, bdf, 0),
+        ManifestDenied { kind } => (13, kind as u32, 0),
     }
 }
 

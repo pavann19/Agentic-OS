@@ -341,6 +341,45 @@ pub fn spawn_with_capabilities(
     })
 }
 
+/// Phase 13 deliverable 1: same real shape as `spawn_with_capabilities`
+/// above (spawn, then grant each requested capability BEFORE the new
+/// thread can possibly be scheduled, all inside one locked section — see
+/// that function's own doc for exactly why the ordering matters), but
+/// checked against `manifest.rs`'s per-app `Manifest` instead of the one
+/// global `policy::allows`. Kept as its own function rather than adding
+/// a manifest parameter to `spawn_with_capabilities` itself: the two
+/// checks are independent axes (one global agent policy, one per-app
+/// manifest) that a real caller could conceivably want to apply
+/// together one day — better to keep them as two small, composable
+/// functions than to overload one with both.
+pub fn spawn_with_manifest(
+    entry: extern "C" fn(),
+    address_space: u64,
+    grants: &[(crate::capability::ObjectId, crate::capability::Rights)],
+    manifest: crate::manifest::Manifest,
+) -> ThreadId {
+    crate::critical::without_interrupts(|| unsafe {
+        let tid = spawn_in_locked(entry, address_space);
+        if let Some(threads) = threads_mut().as_mut() {
+            if let Some(t) = threads.iter_mut().find(|t| t.id == tid) {
+                for &(object_id, rights) in grants {
+                    let Some(object_kind) = crate::capability::object_kind(object_id) else {
+                        continue; // dead object_id -- a bug elsewhere, nothing to enforce here
+                    };
+                    let kind = crate::manifest::kind_of(&object_kind);
+                    if manifest.declares(kind) {
+                        t.cap_table.grant(object_id, rights);
+                    } else {
+                        crate::klog_info!("MANIFEST_GRANT_DENIED kind={:?} object={}", kind, object_id);
+                        crate::audit::record(crate::audit::AuditEvent::ManifestDenied { kind: kind as u8 });
+                    }
+                }
+            }
+        }
+        tid
+    })
+}
+
 /// Real, typed, capability-gated introspection primitive: resolves
 /// `cap_id` against the CURRENTLY RUNNING thread's OWN `cap_table` — never
 /// a shared global table, so two agent processes calling the same
