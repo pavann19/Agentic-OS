@@ -779,6 +779,16 @@ unsafe fn configure_endpoint(
         let word = core::ptr::read_volatile((out_ctx_vaddr + i * 4) as *const u32);
         core::ptr::write_volatile((input_ctx_vaddr + 32 + i * 4) as *mut u32, word);
     }
+    // Real bug found and fixed: dword3 of the Slot Context carries the
+    // real USB Device Address (bits 0-7) and Slot State (bits 27-31)
+    // -- fields ONLY hardware ever writes (xHCI spec 6.2.2). Copying
+    // them forward from the Output Context into this INPUT Context
+    // put software-supplied "current state" values into fields the
+    // spec requires software leave alone; the controller has been
+    // returning this exact Configure Endpoint with a genuine, bounded
+    // Context State Error, most likely for this reason. Real fix:
+    // zero dword3 in the Input Context copy.
+    core::ptr::write_volatile((input_ctx_vaddr + 32 + 12) as *mut u32, 0);
 
     // Real, minimal Interrupt-IN Transfer Ring for the new endpoint --
     // same real "2-TRB ring, Link with TC" pattern as every other
