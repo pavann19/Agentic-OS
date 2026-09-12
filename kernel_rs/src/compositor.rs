@@ -71,6 +71,13 @@ struct WindowClientInfo {
     surface_cap: u32,
     color: u32,
     foreign_cap_guess: u32,
+    // Phase 12 exit criterion 4: this window's own real IpcEndpoint
+    // CapId for routed keyboard input (`input_routing::
+    // register_window_input`) -- resolved against this SAME process's
+    // own cap_table, same structural guarantee `surface_cap` already
+    // has (a table-local index, never a global handle another process
+    // could guess into).
+    input_cap: u32,
 }
 
 pub struct FbParams {
@@ -155,6 +162,20 @@ unsafe fn spawn_window_client(label: u8, x: u32, y: u32, color: u32) {
     let surface_cap = thread::grant_current_capability(surface_object, Rights::MAP);
     klog_info!("WINDOW_CLIENT_SURFACE_GRANTED label={} rect=({},{},{},{}) cap={}", label as char, x, y, SURFACE_SIZE, SURFACE_SIZE, surface_cap);
 
+    // Phase 12 exit criterion 4: register this window for routed input
+    // BEFORE deciding focus below -- `set_focus` looks up this exact
+    // surface_object, so the registry entry must already exist.
+    let input_cap = crate::input_routing::register_window_input(surface_object);
+    // Real, kernel-side (never process-self-declared) initial focus:
+    // whichever window is labeled the primary one ('A') starts
+    // focused, a fixed, disclosed convention -- there is no window
+    // manager or click-to-focus yet (this module's own doc). The
+    // window process itself has no way to call this -- it isn't
+    // exposed as a syscall at all in this increment.
+    if label == b'A' {
+        crate::input_routing::set_focus(surface_object);
+    }
+
     let mut table = CapabilityTable::new();
     let com1_cap = driver::create_port_capability(&mut table, 0x3F8, 8, Rights::PORT_IO);
     if driver::grant_port_access(&table, com1_cap).is_err() {
@@ -164,7 +185,7 @@ unsafe fn spawn_window_client(label: u8, x: u32, y: u32, color: u32) {
 
     let info_phys = pmm::alloc_page();
     let info_ptr = pmm::p2v_pub(info_phys) as *mut WindowClientInfo;
-    core::ptr::write(info_ptr, WindowClientInfo { label, surface_cap, color, foreign_cap_guess: FOREIGN_CAP_GUESS });
+    core::ptr::write(info_ptr, WindowClientInfo { label, surface_cap, color, foreign_cap_guess: FOREIGN_CAP_GUESS, input_cap });
     vmm::map_page_in(space, INFO_VADDR, info_phys, vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE | vmm::PAGE_WRITABLE);
 
     let kernel_stack_top = thread::current_kernel_stack_top();

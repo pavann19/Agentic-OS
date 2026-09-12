@@ -104,6 +104,23 @@ unsafe fn syscall6_ack_kbd_interrupt() {
     );
 }
 
+/// syscall(num=13, a0=scancode): SYS_ROUTE_KEY_EVENT (`syscall.rs`,
+/// `kernel_rs::input_routing`) -- Phase 12 exit criterion 4. Forwards
+/// the real scancode this driver just read via its own granted
+/// PortIoRange to the kernel's real input-routing table, which
+/// delivers it to whichever window currently holds focus (or drops it,
+/// if none does) -- this driver itself has no idea which window that
+/// is, nor does it need to.
+unsafe fn syscall13_route_key_event(scancode: u64) {
+    core::arch::asm!(
+        "mov rax, 13", "syscall",
+        in("rdi") scancode,
+        lateout("rax") _, lateout("rsi") _, lateout("rdx") _, lateout("rcx") _,
+        lateout("r8") _, lateout("r9") _, lateout("r10") _, lateout("r11") _,
+        options(nostack)
+    );
+}
+
 const PS2_DATA_PORT: u16 = 0x60;
 const PS2_STATUS_PORT: u16 = 0x64;
 const PS2_CMD_PORT: u16 = 0x64;
@@ -184,6 +201,7 @@ pub extern "C" fn _start() -> ! {
             syscall5_wait_kbd_interrupt(); // blocks (capability-gated) until a real IRQ1 fires
             let scancode = inb(PS2_DATA_PORT); // real, unmediated port read -- this process's own PortIoRange grant
             syscall1(0xB0_0000 | scancode as u64); // logs the real scancode via the kernel's own klog path
+            syscall13_route_key_event(scancode as u64); // Phase 12 exit criterion 4: route to whichever window holds focus
             syscall6_ack_kbd_interrupt();
         }
     }

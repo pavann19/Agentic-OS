@@ -86,6 +86,26 @@ unsafe fn syscall_surface_fill(cap_id: u64, color: u64) -> u64 {
     ret
 }
 
+/// syscall(num=12, a0=CapId): SYS_IPC_TRY_RECEIVE (`syscall.rs`).
+/// Non-blocking -- returns u64::MAX immediately if nothing has been
+/// routed to this process's own input endpoint yet, real evidence a
+/// window that never holds focus can poll this forever without ever
+/// hanging (Phase 12 exit criterion 4's own adversarial check: the
+/// UNFOCUSED window must genuinely never receive anything, not just
+/// "hasn't yet").
+unsafe fn syscall_try_receive(cap_id: u64) -> u64 {
+    let ret: u64;
+    core::arch::asm!(
+        "mov rax, 12", "syscall",
+        in("rdi") cap_id,
+        lateout("rax") ret,
+        lateout("rsi") _, lateout("rdx") _, lateout("rcx") _,
+        lateout("r8") _, lateout("r9") _, lateout("r10") _, lateout("r11") _,
+        options(nostack)
+    );
+    ret
+}
+
 fn write_dec_u64(v: u64) {
     if v == 0 {
         com1_write_str("0");
@@ -114,6 +134,7 @@ struct WindowClientInfo {
     surface_cap: u32,
     color: u32,
     foreign_cap_guess: u32, // a real CapId this process was NEVER granted -- the adversarial self-check
+    input_cap: u32, // this process's own real IpcEndpoint CapId for routed keyboard input
 }
 
 #[no_mangle]
@@ -162,7 +183,35 @@ pub extern "C" fn _start() -> ! {
 
         syscall4(0xC1E0_0000 | info.label as u64);
 
+        // Phase 12 exit criterion 4: real, UNBOUNDED poll for routed
+        // keyboard input on this process's OWN endpoint, for the rest
+        // of this process's life. Real, disclosed reason it's
+        // unbounded rather than a fixed retry count: a real human (or
+        // this project's own HMP-injected synthetic keystroke) can
+        // press a key at any real wall-clock time after boot, not
+        // within some fixed early window -- a window that gave up
+        // polling too early would silently miss it. This is safe to
+        // leave unbounded specifically BECAUSE the sender
+        // (`input_routing::deliver_key_event`) uses `ipc::try_send`
+        // (fire-and-forget, never blocks) rather than the blocking
+        // `ipc::send` -- an earlier real bug, found and fixed, where a
+        // bounded poll racing a late keystroke deadlocked the ENTIRE
+        // keyboard driver (see `ipc::try_send`'s own doc for the full
+        // story). A window that never holds focus (this run's B) polls
+        // forever and simply never receives anything -- real, expected,
+        // harmless (this thread's own spin never blocks any other
+        // thread), and the actual adversarial evidence this exit
+        // criterion exists to demonstrate.
         loop {
+            let r = syscall_try_receive(info.input_cap as u64);
+            if r != u64::MAX {
+                com1_write_str("[WINDOW_CLIENT_");
+                com1_write_str(core::str::from_utf8(core::slice::from_ref(&info.label)).unwrap_or("?"));
+                com1_write_str("] INPUT_EVENT_RECEIVED scancode=0x");
+                write_dec_u64(r);
+                com1_write_str("\n");
+                syscall1(0x1E9E_0000 | info.label as u64);
+            }
             core::hint::spin_loop();
         }
     }

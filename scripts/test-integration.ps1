@@ -27,6 +27,7 @@ $suite = @(
     @{ Name = "test-xhci";                     Script = "scripts\test-xhci.ps1" },
     @{ Name = "test-compositor";               Script = "scripts\test-compositor.ps1" },
     @{ Name = "test-compositor-crash";         Script = "scripts\test-compositor-crash.ps1" },
+    @{ Name = "test-input-routing";            Script = "scripts\test-input-routing.ps1" },
     @{ Name = "test-manifest";                 Script = "scripts\test-manifest.ps1" },
     @{ Name = "test-installer";                Script = "scripts\test-installer.ps1" },
     @{ Name = "test-tcp-two-instance";         Script = "scripts\test-tcp-two-instance.ps1" },

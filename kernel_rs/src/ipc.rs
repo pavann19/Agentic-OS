@@ -15,7 +15,7 @@
 //! is a stated future improvement once `thread.rs` grows a Blocked state,
 //! not a correctness gap in what Phase 2 claims.
 
-use crate::capability::{CapError, CapId, CapabilityTable, KernelObjectKind, Rights};
+use crate::capability::{CapError, CapId, CapabilityTable, KernelObjectKind, ObjectId, Rights};
 use crate::{audit, capability};
 
 #[derive(Clone, Copy, Default)]
@@ -45,11 +45,42 @@ struct Endpoint {
     message: Message,
 }
 
+// Real bug found and fixed bringing up Phase 12 input routing:
+// `send()`/`receive()` each hold a `&mut Endpoint` reference across a
+// busy-wait spin loop that can last an arbitrary amount of real time
+// (the scheduler keeps running other threads while it spins). Until
+// this session, nothing else ever grew `ENDPOINTS` WHILE one of those
+// spins was live -- `create_endpoint` was only ever called during
+// early, sequential boot setup. `input_routing::register_window_input`
+// is the first code path to call it from a genuinely concurrent
+// thread (a window client's own spawn code) while another thread could
+// simultaneously be mid-spin inside `send`/`receive` on a DIFFERENT,
+// already-existing endpoint (`compositor.rs`'s shared `FB_READY`
+// endpoint, in this exact reproduction). `Vec<Endpoint>` reallocates
+// its backing buffer on `push` once capacity is exceeded -- any
+// `&mut Endpoint` obtained before that reallocation, from a DIFFERENT
+// thread that never re-derives it, becomes a dangling reference into
+// freed memory the instant that happens. Observed real, reproduced
+// symptom: `compositor_verify_thread`'s receive loop read the SAME
+// stale message content twice in a row for what should have been two
+// genuinely different senders' messages -- classic use-after-free-style
+// corruption, not a logic bug in the rendezvous protocol itself.
+//
+// Fixed at the root by reserving real, fixed capacity up front so
+// `push` never reallocates for any object_id this kernel actually
+// reaches in practice -- every held `&mut Endpoint` reference stays
+// valid across any later registration, regardless of which thread does
+// it or when. `MAX_ENDPOINTS` is a real, generous bound (this kernel's
+// entire object-id space across a full boot, every demo included,
+// stays well under it), not a magic number: if it's ever exceeded,
+// `create_endpoint` panics loudly instead of silently reallocating out
+// from under a live reference again.
+const MAX_ENDPOINTS: usize = 256;
 static mut ENDPOINTS: Option<alloc::vec::Vec<Endpoint>> = None;
 #[allow(static_mut_refs)]
 unsafe fn endpoints_mut() -> &'static mut alloc::vec::Vec<Endpoint> {
     if ENDPOINTS.is_none() {
-        ENDPOINTS = Some(alloc::vec::Vec::new());
+        ENDPOINTS = Some(alloc::vec::Vec::with_capacity(MAX_ENDPOINTS));
     }
     (&mut *&raw mut ENDPOINTS).as_mut().unwrap()
 }
@@ -69,6 +100,7 @@ pub fn create_endpoint(table: &mut CapabilityTable, rights: Rights) -> CapId {
     // preemptible thread context by multiple driver setup threads.
     crate::critical::without_interrupts(|| unsafe {
         let eps = endpoints_mut();
+        assert!((object_id as usize) < MAX_ENDPOINTS, "MAX_ENDPOINTS exceeded -- real, disclosed bound, see this module's own doc");
         while eps.len() <= object_id as usize {
             eps.push(Endpoint {
                 state: core::sync::atomic::AtomicU8::new(STATE_IDLE),
@@ -134,4 +166,69 @@ pub fn receive(table: &CapabilityTable, cap_id: CapId) -> Result<Message, IpcErr
         object_id: cap.object_id,
     });
     Ok(msg)
+}
+
+/// Phase 12 exit criterion 4's own real routing primitives
+/// (`try_send`/`try_receive`/`try_receive_on_object` below): a
+/// deliberately SEPARATE, non-rendezvous mailbox protocol from
+/// `send`/`receive` above, real one-shot single-slot semantics (`IDLE`
+/// -> `MESSAGE_PENDING` -> `IDLE`, no `MESSAGE_TAKEN` confirmation
+/// phase) rather than reusing their blocking handshake. This is a real
+/// bug found and fixed bringing up input routing, not a stylistic
+/// choice: `deliver_key_event` originally called the blocking `send`
+/// above, which waits for the RECEIVER to confirm consumption before
+/// returning — but a window's own input poll is deliberately bounded
+/// (a window that never holds focus must not block forever), so if
+/// that bounded poll window closed before the real event arrived, the
+/// message would sit PENDING forever with no one left to consume it,
+/// and `send`'s second wait loop would spin forever too — a real,
+/// reproduced deadlock that permanently wedged the keyboard driver's
+/// OWN thread (every future keystroke silently lost, not just the one
+/// that raced). Fire-and-forget mailbox semantics make that scenario
+/// impossible by construction: a routed event that arrives after the
+/// target window stopped polling is a real, disclosed drop (the exact
+/// same "not guaranteed to be delivered, dropping is not a bug" case
+/// `deliver_key_event`'s own doc already names for "no focused
+/// window"), never a hang.
+pub fn try_send(table: &CapabilityTable, cap_id: CapId, msg: Message) -> Result<bool, IpcError> {
+    use core::sync::atomic::Ordering;
+    let cap = table.resolve(cap_id, Rights::SEND).map_err(IpcError::Cap)?;
+    unsafe {
+        let ep = &mut endpoints_mut()[cap.object_id as usize];
+        if ep.state.load(Ordering::Acquire) != STATE_IDLE {
+            return Ok(false); // endpoint busy (a still-unconsumed prior message) -- real, deliberate drop, never blocks
+        }
+        ep.message = msg;
+        ep.state.store(STATE_MESSAGE_PENDING, Ordering::Release);
+    }
+    audit::record(audit::AuditEvent::IpcSend { object_id: cap.object_id });
+    Ok(true)
+}
+
+pub fn try_receive(table: &CapabilityTable, cap_id: CapId) -> Result<Option<Message>, IpcError> {
+    let cap = table.resolve(cap_id, Rights::RECEIVE).map_err(IpcError::Cap)?;
+    Ok(try_receive_on_object(cap.object_id))
+}
+
+/// Same non-blocking check as `try_receive` above, for a caller that
+/// has ALREADY resolved the capability itself (e.g. `syscall.rs`'s
+/// syscall 12, via `thread::resolve_current_capability` — the per-
+/// process check that syscall path needs regardless) and just needs
+/// the raw object-level operation, without resolving twice against the
+/// same table. Resets straight to `STATE_IDLE` (never `MESSAGE_TAKEN`)
+/// — this mailbox's sender (`try_send`) never waits for a consumption
+/// confirmation, so there is nothing for an intermediate "taken but not
+/// yet reset" state to communicate.
+pub fn try_receive_on_object(object_id: ObjectId) -> Option<Message> {
+    use core::sync::atomic::Ordering;
+    unsafe {
+        let ep = &mut endpoints_mut()[object_id as usize];
+        if ep.state.load(Ordering::Acquire) != STATE_MESSAGE_PENDING {
+            return None;
+        }
+        let m = ep.message; // see send()'s comment: safe post-Acquire
+        ep.state.store(STATE_IDLE, Ordering::Release);
+        audit::record(audit::AuditEvent::IpcReceive { object_id });
+        Some(m)
+    }
 }

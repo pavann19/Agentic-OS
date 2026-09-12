@@ -482,6 +482,46 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
             // receives a framebuffer pointer at all.
             crate::compositor::syscall_fill_surface(a0 as capability::CapId, a1 as u32)
         }
+        12 => {
+            // Phase 12 exit criterion 4: SYS_IPC_TRY_RECEIVE -- a0 = the
+            // CALLER's own CapId for an IpcEndpoint capability (e.g. the
+            // one `input_routing::register_window_input` granted it).
+            // Same per-process resolve discipline as syscall 11: this
+            // can only ever check the CALLING thread's own cap_table,
+            // never another process's. Non-blocking by design (`ipc::
+            // try_receive`'s own doc) -- "nothing has arrived yet" is a
+            // real, expected outcome for a window that doesn't
+            // currently hold input focus, not an error. Returns the
+            // real message payload's low 64 bits on success, u64::MAX
+            // for both "no message pending" and "capability denied" --
+            // this syscall never carries data that could collide with
+            // u64::MAX (a scancode is a single real byte).
+            match thread::resolve_current_capability(a0 as capability::CapId, capability::Rights::RECEIVE) {
+                Ok(cap) => match ipc::try_receive_on_object(cap.object_id) {
+                    Some(msg) => msg.data[0],
+                    None => u64::MAX,
+                },
+                Err(_) => {
+                    klog_info!("SYSCALL_IPC_TRY_RECEIVE_DENIED cap={}", a0);
+                    u64::MAX
+                }
+            }
+        }
+        13 => {
+            // Phase 12 exit criterion 4: SYS_ROUTE_KEY_EVENT -- a0 = a
+            // real PS/2 scancode this process itself just read via its
+            // own granted PortIoRange (`keyboard_driver`, unmodified
+            // otherwise). Real, disclosed scope: NOT yet gated by a
+            // dedicated capability restricting which process may call
+            // this -- the same real, disclosed simplification syscalls
+            // 2-6 already carry (a single, fixed, shared mechanism, not
+            // yet a per-caller capability check); minting a real
+            // RouteKeyEvent-only capability for the genuine keyboard
+            // driver process specifically is real, separate follow-up
+            // work, not silently assumed done here.
+            crate::input_routing::deliver_key_event(a0 as u8);
+            0
+        }
         _ => {
             klog_info!("SYSCALL_UNKNOWN num={}", num);
             u64::MAX
