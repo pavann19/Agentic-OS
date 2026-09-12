@@ -66,6 +66,13 @@ compositor_demo = []
 # feature above; see manifest_demo.rs's own module doc and
 # scripts/test-manifest.ps1.
 manifest_demo = []
+# Phase 13 deliverable 2's own real, adversarial proof: a genuine,
+# previously-unmodified ELF app (serial_driver) installed through
+# installer.rs's manifest-gated core rather than user_driver.rs's own
+# hand-written setup. Off by default -- same discipline as every other
+# demo feature above; see installer_demo.rs's own module doc and
+# scripts/test-installer.ps1.
+installer_demo = []
 
 [profile.dev]
 panic = "abort"

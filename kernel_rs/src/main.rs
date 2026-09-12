@@ -34,6 +34,8 @@ pub mod init;
 pub mod events;
 pub mod interrupt_forward;
 pub mod introspect;
+pub mod installer; // Phase 13 deliverable 2 -- real manifest-gated app install core, see its own module doc
+pub mod installer_demo; // Phase 13 -- real adversarial installer demo against a genuine ELF app, off by default (see Cargo.toml)
 pub mod ipc;
 pub mod manifest; // Phase 13 deliverable 1 -- per-app capability manifest, see its own module doc
 pub mod manifest_demo; // Phase 13 -- real adversarial manifest-enforcement demo, off by default (see Cargo.toml)
@@ -658,6 +660,9 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
 
     #[cfg(feature = "manifest_demo")]
     manifest_demo::start();
+
+    #[cfg(feature = "installer_demo")]
+    installer_demo::start();
 
     // Phase 2: capability substrate. Real proof of every exit criterion
     // from docs/ROADMAP.md's Phase 2 section, not just "it compiles":

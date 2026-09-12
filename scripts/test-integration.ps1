@@ -28,6 +28,7 @@ $suite = @(
     @{ Name = "test-compositor";               Script = "scripts\test-compositor.ps1" },
     @{ Name = "test-compositor-crash";         Script = "scripts\test-compositor-crash.ps1" },
     @{ Name = "test-manifest";                 Script = "scripts\test-manifest.ps1" },
+    @{ Name = "test-installer";                Script = "scripts\test-installer.ps1" },
     @{ Name = "test-tcp-two-instance";         Script = "scripts\test-tcp-two-instance.ps1" },
     @{ Name = "test-e1000";                    Script = "scripts\test-e1000.ps1" },
     @{ Name = "test-shell";                    Script = "scripts\test-shell.ps1" },
