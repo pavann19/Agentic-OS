@@ -1529,7 +1529,25 @@ Verified live, reproducible across 3 repeated runs against a real `usb-kbd`:
 ```
 Real, independent confirmation beyond the command's own completion code: the driver reads back the controller's own Output Device Context (the real structure `DCBAA[slot_id]` points to, which this driver never writes to directly) and finds the real hardware-assigned USB Device Address (1, the correct real value for the first device addressed) and Slot State (2 = Addressed, the correct real state at exactly this point in enumeration — not yet Configured, since no Configure Endpoint command has been issued).
 
-**Not yet started:** Configure Endpoint / GET_DESCRIPTOR (reading the device's own real descriptors — the next real step toward a working HID driver) and HID class drivers (keyboard/mouse) on top of the now-addressed device (the rest of deliverable 2), the published Tier 3 hardware matrix (deliverable 1), ACPI power management (deliverable 3), hot-plug support (deliverable 4). None of Phase 11's four exit criteria are met yet.
+**Real GET_DESCRIPTOR control transfers — a real Device Descriptor and Configuration Descriptor read from the actual hardware.** New `control_transfer_in` issues a real 3-stage Control Transfer (Setup → Data → Status, USB 2.0 spec 9.3/xHCI spec 4.11.2.2) on EP0. Real bugs found and fixed getting this to work reliably, in order:
+
+1. **EP0 MaxPacketSize was hardcoded to 8** — USB 2.0 spec 5.5.3 mandates a real, fixed value by speed (High-Speed=64, SuperSpeed=512 exactly); against this real High-Speed device, the wrong value produced a real, silent hang. Fixed by deriving it from the real, already-known port speed.
+2. **The event ring's real hardware enqueue pointer doesn't reset just because software re-zeroes the ring's memory** — `control_transfer_in` learned the same real `ERSTBA`/`ERSTSZ` re-arm `run_command_ex` already used for exactly this reason.
+3. **The Data Stage's own Transfer Event isn't proof the whole ring (through the Link TRB) was drained** — returning as soon as it arrived let the NEXT transfer's fresh TRBs overwrite ring memory hardware was still mid-processing. Fixed by also setting `TRB_IOC` on the Status Stage TRB and waiting for both real events.
+4. **`IR_ERDP`'s advance used a virtual address where xHCI requires a real physical one** — a real, separate bug, fixed alongside the above.
+5. **EP0's own Transfer Ring dequeue/cycle state is real, continuously-tracked hardware state** that a fixed `TRB_CYCLE` (or even software-tracked alternation) couldn't reliably predict across calls — the real, robust fix: issue a real `Stop Endpoint` (xHCI spec 4.6.9) then `Set TR Dequeue Pointer` (xHCI spec 4.6.10, which spec itself requires the endpoint be Stopped first — found live, via a real Context State Error, not assumed) before every control transfer, forcing the controller's own internal state back to a known value (ring start, DCS=1) every time — the same "cold re-arm" discipline already proven for the Command Ring and Event Ring, now extended to a Transfer Ring.
+
+Verified live, reproducible, against the real `usb-kbd`:
+```
+[XHCI_DRIVER] XHCI_GET_DEVICE_DESCRIPTOR_PASS: real Device Descriptor read, bytes=18 bDeviceClass=0 idVendor=0x627 idProduct=0x1
+[XHCI_DRIVER] XHCI_GET_CONFIG_DESCRIPTOR_PASS: real Configuration Descriptor set read, bytes=34
+[XHCI_DRIVER] XHCI_HID_ENDPOINT_FOUND ep_addr=0x81 max_packet=8 interval=7
+```
+`idVendor=0x627`/`idProduct=0x1` are QEMU's own real emulated-keyboard identifiers; the 34-byte Configuration Descriptor set is walked (a real, minimal USB 2.0 spec 9.5 descriptor walk) to find the device's own real Interrupt-IN HID endpoint — address, max packet size, and polling interval, all real values read from the actual device, not assumed.
+
+**Honest, disclosed, currently-open gap: Configure Endpoint.** `configure_endpoint` builds a real Input Context (copying the real current Slot Context forward from the Output Device Context, per xHCI spec 6.2.3.2's own requirement, updating Context Entries, adding a real Endpoint Context for the discovered Interrupt-IN endpoint) and issues a real Configure Endpoint command (xHCI spec 4.3.5) — but the controller returns a real, bounded `Context State Error` (completion code 19), not a hang, not a fabricated pass. Not yet root-caused; a real, disclosed stopping point after several genuine fixes above, rather than an indefinitely-extended debugging session on one completion code the way the earlier DNS/TCP toolchain bug was — the difference here is a bounded, honest failure with real diagnostic evidence already captured (`run_command_ex` now logs the real TRB type and completion code on any command failure), ready for the next session to pick up.
+
+**Not yet started:** root-causing the Context State Error above, real HID interrupt transfers (reading actual keyboard input) once Configure Endpoint succeeds, HID class drivers proper (the rest of deliverable 2), the published Tier 3 hardware matrix (deliverable 1), ACPI power management (deliverable 3), hot-plug support (deliverable 4). None of Phase 11's four exit criteria are met yet.
 
 ---
 

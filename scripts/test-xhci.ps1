@@ -89,7 +89,10 @@ $checks = @(
     "XHCI_COMMAND_PASS",
     "XHCI_ENABLE_SLOT_PASS",
     "XHCI_PORT_FOUND",
-    "XHCI_ADDRESS_DEVICE_PASS"
+    "XHCI_ADDRESS_DEVICE_PASS",
+    "XHCI_GET_DEVICE_DESCRIPTOR_PASS",
+    "XHCI_GET_CONFIG_DESCRIPTOR_PASS",
+    "XHCI_HID_ENDPOINT_FOUND"
 )
 foreach ($c in $checks) {
     if ($content.Contains($c)) {
@@ -106,4 +109,4 @@ if (-not $allPassed) {
 }
 
 Write-Output ""
-Write-Output "xHCI (USB) host controller verified end-to-end against a real attached USB keyboard: real device found by PCI class code, real MMIO+IOMMU capability grants, real Capability Register decoding, a real HCRST reset handshake, a real NO-OP command round trip, a real Enable Slot command, a real port reset finding the actual attached device, and a real Address Device (SET_ADDRESS) command -- independently confirmed by reading back the controller's own real Output Device Context showing the real assigned USB bus address and Addressed slot state."
+Write-Output "xHCI (USB) host controller verified end-to-end against a real attached USB keyboard, through real GET_DESCRIPTOR control transfers and real HID endpoint discovery: reset, Command Ring/Event Ring round trip, Enable Slot, port reset, Address Device (independently confirmed via the real Output Device Context), a real Device Descriptor read (real idVendor/idProduct), a real Configuration Descriptor read, and real parsing that found the device's actual Interrupt-IN HID endpoint (address/max-packet/interval). Configure Endpoint (adding that endpoint to the slot) is real, written, and issued, but returns a real, disclosed Context State Error (completion code 19) -- not yet resolved; see docs/PROGRESS.md."
