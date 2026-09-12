@@ -1511,10 +1511,13 @@ Verified live, `scripts/test-xhci.ps1`, 3 clean repeated runs against QEMU's rea
 [XHCI_DRIVER] XHCI_RESET_PASS: real HCRST handshake completed, USBCMD.HCRST and USBSTS.CNR both cleared
 [XHCI_DRIVER] DBOFF=0x00002000 RTSOFF=0x00001000
 [XHCI_DRIVER] XHCI_COMMAND_PASS: real NO-OP command completed via real Command Ring + Event Ring round trip
+[XHCI_DRIVER] XHCI_ENABLE_SLOT_PASS: real device slot allocated, slot_id=1
 ```
 On by default (unconditional, like `ahci`/`nvme` — a class-code match that finds nothing on a machine/QEMU config without an xHCI controller is a real, harmless no-op).
 
-**Not yet started:** real device slot enumeration (Enable Slot / Address Device commands against an actual attached USB device) and HID class drivers (keyboard/mouse) on top of a live controller (the rest of deliverable 2), the published Tier 3 hardware matrix (deliverable 1), ACPI power management (deliverable 3), hot-plug support (deliverable 4). None of Phase 11's four exit criteria are met yet.
+**Real device slot enumeration begun** — `run_command` (generalized from the earlier NO-OP-only version to accept any TRB type/parameter, reusing the same full ring/event re-arm each call rather than tracking cycle-bit state across commands, a real, disclosed, stated-scope simplification) now also issues a real Enable Slot command (xHCI spec 4.3.2) — the controller's own Command Completion Event reports a real, hardware-assigned Slot ID (decoded from the event's own Control field, bits 31:24), checked against the real MaxSlots bound already decoded from HCSPARAMS1. Verified live, reproducible across 3 repeated runs (`slot_id=1` every time — the real, expected, deterministic first slot from a freshly reset controller).
+
+**Not yet started:** Address Device (needs a real Input Context/Device Context DMA structure this increment doesn't allocate yet, and a real attached USB device — not guaranteed present on a bare `qemu-xhci` instance with no `-device usb-...`) and HID class drivers (keyboard/mouse) on top of a live, addressed device (the rest of deliverable 2), the published Tier 3 hardware matrix (deliverable 1), ACPI power management (deliverable 3), hot-plug support (deliverable 4). None of Phase 11's four exit criteria are met yet.
 
 ---
 

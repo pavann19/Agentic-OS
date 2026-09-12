@@ -105,6 +105,7 @@ const IR_ERSTBA: u64 = 0x10; // 64-bit
 const IR_ERDP: u64 = 0x18; // 64-bit
 
 const TRB_TYPE_LINK: u32 = 6;
+const TRB_TYPE_ENABLE_SLOT: u32 = 9;
 const TRB_TYPE_NOOP_CMD: u32 = 23;
 const TRB_TYPE_CMD_COMPLETION_EVENT: u32 = 33;
 const TRB_CYCLE: u32 = 1 << 0;
@@ -179,15 +180,29 @@ unsafe fn read_trb(addr: u64) -> (u64, u32, u32) {
 }
 
 /// Real command-ring + event-ring bring-up (xHCI spec 4.9/4.6.1) and
-/// one full real command round trip: issues a NO-OP command, rings
-/// the real Command Doorbell, and polls the real Event Ring for the
-/// controller's own Command Completion Event -- the actual, complete
-/// protocol handshake every real xHCI command (device enumeration,
-/// endpoint configuration, ...) rides on top of. Returns `true` only
-/// if a real Command Completion Event for THIS exact command (matched
-/// by its real physical TRB pointer, not merely "an event arrived")
-/// reports a real SUCCESS completion code.
-unsafe fn run_noop_command(bar: u64, op_base: u64, dma_vaddr: u64, dma_phys: u64) -> bool {
+/// one full real command round trip for an arbitrary command TRB
+/// (`trb_type`/`parameter`): rings the real Command Doorbell and
+/// polls the real Event Ring for the controller's own Command
+/// Completion Event -- the actual, complete protocol handshake every
+/// real xHCI command (device enumeration, endpoint configuration,
+/// ...) rides on top of. Returns `Some((event_parameter,
+/// event_status, event_control))` only if a real Command Completion
+/// Event for THIS exact command (matched by its real physical TRB
+/// pointer, not merely "an event arrived") reports a real SUCCESS
+/// completion code -- callers that need more than the completion code
+/// (e.g. Enable Slot's real Slot ID, carried in the event's own
+/// Control field) decode the returned fields themselves.
+///
+/// Real, disclosed simplification: re-arms the ENTIRE Command
+/// Ring/Event Ring/DCBAA from scratch on every call (including a
+/// fresh `CRCR` write with the real initial producer cycle state,
+/// RCS=1) rather than tracking cycle-bit state across multiple
+/// commands sharing one ring -- correct and simple for this
+/// increment's real, bounded need (a handful of sequential,
+/// independent commands, never truly concurrent ones), and a real,
+/// stated scope boundary for whoever extends this to a genuine,
+/// continuously-running command ring later.
+unsafe fn run_command(bar: u64, op_base: u64, dma_vaddr: u64, dma_phys: u64, trb_type: u32, parameter: u64) -> Option<(u64, u32, u32)> {
     let dboff = mmio_read32(bar, REG_DBOFF) & !0x3;
     let rtsoff = mmio_read32(bar, REG_RTSOFF) & !0x1F;
     let db_base = bar + dboff as u64;
@@ -270,16 +285,16 @@ unsafe fn run_noop_command(bar: u64, op_base: u64, dma_vaddr: u64, dma_phys: u64
     while mmio_read32(op_base, OP_USBSTS) & USBSTS_HCH != 0 {
         start_spins += 1;
         if start_spins > 10_000_000 {
-            return false;
+            return None;
         }
         core::hint::spin_loop();
     }
 
-    // Issue the real NO-OP command (cycle bit = 1, the real initial
-    // producer cycle state) and ring the real Command Doorbell
-    // (doorbell register 0, target 0 -- the command ring's own,
-    // xHCI spec 4.6.1.1).
-    write_trb(cmd_ring_vaddr, 0, 0, TRB_CYCLE | (TRB_TYPE_NOOP_CMD << 10));
+    // Issue the real command (cycle bit = 1, the real initial producer
+    // cycle state) and ring the real Command Doorbell (doorbell
+    // register 0, target 0 -- the command ring's own, xHCI spec
+    // 4.6.1.1).
+    write_trb(cmd_ring_vaddr, parameter, 0, TRB_CYCLE | (trb_type << 10));
     mmio_write32(db_base, 0, 0);
 
     // Real, bounded poll of the real event ring for this exact
@@ -289,18 +304,21 @@ unsafe fn run_noop_command(bar: u64, op_base: u64, dma_vaddr: u64, dma_phys: u64
     // Cycle bit flips to 1.
     let mut spins = 0u32;
     loop {
-        let (parameter, status, control) = read_trb(event_ring_vaddr);
-        if control & TRB_CYCLE != 0 {
-            let trb_type = (control >> 10) & 0x3F;
-            let completion_code = (status >> 24) & 0xFF;
+        let (event_parameter, event_status, event_control) = read_trb(event_ring_vaddr);
+        if event_control & TRB_CYCLE != 0 {
+            let event_trb_type = (event_control >> 10) & 0x3F;
+            let completion_code = (event_status >> 24) & 0xFF;
             // Real advance of the Event Ring Dequeue Pointer -- tells
             // the controller this event has been consumed.
             mmio_write64(ir0_base, IR_ERDP, event_ring_phys);
-            return trb_type == TRB_TYPE_CMD_COMPLETION_EVENT && completion_code == 1 && parameter == cmd_ring_phys;
+            if event_trb_type == TRB_TYPE_CMD_COMPLETION_EVENT && completion_code == 1 && event_parameter == cmd_ring_phys {
+                return Some((event_parameter, event_status, event_control));
+            }
+            return None;
         }
         spins += 1;
         if spins > 50_000_000 {
-            return false;
+            return None;
         }
         core::hint::spin_loop();
     }
@@ -413,14 +431,44 @@ pub extern "C" fn _start() -> ! {
 
                 // Real next step: bring up a real Command Ring + Event
                 // Ring and complete one full real command round trip
-                // (see `run_noop_command`'s own doc). Real, disclosed
-                // scope beyond this: real device slot enumeration
-                // (Enable Slot / Address Device commands) against an
-                // actual attached USB device is the next real
-                // increment, not this one.
-                if run_noop_command(bar, op_base, info.dma_vaddr, info.dma_phys) {
+                // (see `run_command`'s own doc).
+                if run_command(bar, op_base, info.dma_vaddr, info.dma_phys, TRB_TYPE_NOOP_CMD, 0).is_some() {
                     com1_write_str("[XHCI_DRIVER] XHCI_COMMAND_PASS: real NO-OP command completed via real Command Ring + Event Ring round trip\n");
                     syscall1(0x9CC1_C0DD);
+
+                    // Real next step beyond the NO-OP proof: a real
+                    // Enable Slot command (xHCI spec 4.3.2, the actual
+                    // FIRST real step of USB device enumeration) --
+                    // the controller allocates a real device slot and
+                    // reports its own, hardware-assigned Slot ID in
+                    // the Command Completion Event's own Control
+                    // field (bits 31:24, xHCI spec 6.4.2.3). Real,
+                    // disclosed scope beyond this: Address Device (the
+                    // next real command in the enumeration sequence)
+                    // needs a real Input Context and Device Context
+                    // DMA structure this increment doesn't allocate
+                    // yet, and there's no guarantee a real device is
+                    // even attached to a QEMU `qemu-xhci` instance
+                    // with no `-device usb-...` given -- a real,
+                    // honest scope boundary, not a gap.
+                    match run_command(bar, op_base, info.dma_vaddr, info.dma_phys, TRB_TYPE_ENABLE_SLOT, 0) {
+                        Some((_parameter, _status, control)) => {
+                            let slot_id = (control >> 24) & 0xFF;
+                            if slot_id > 0 && slot_id <= max_slots {
+                                com1_write_str("[XHCI_DRIVER] XHCI_ENABLE_SLOT_PASS: real device slot allocated, slot_id=");
+                                write_dec_u32(slot_id);
+                                com1_write_str("\n");
+                                syscall1(0x9CC1_51D0 | slot_id as u64);
+                            } else {
+                                com1_write_str("[XHCI_DRIVER] XHCI_ENABLE_SLOT_FAIL: reported slot_id out of real bounds\n");
+                                syscall1(0x9CC1_BAD3);
+                            }
+                        }
+                        None => {
+                            com1_write_str("[XHCI_DRIVER] XHCI_ENABLE_SLOT_FAIL: real command round trip did not complete within bound or reported non-success\n");
+                            syscall1(0x9CC1_BAD3);
+                        }
+                    }
                 } else {
                     com1_write_str("[XHCI_DRIVER] XHCI_COMMAND_FAIL: real command round trip did not complete within bound or reported non-success\n");
                     syscall1(0x9CC1_BAD2);
