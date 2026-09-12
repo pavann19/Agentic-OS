@@ -23,6 +23,7 @@ use crate::{authority, driver, gdt, iommu, klog_info, pci, pmm, ring3, syscall, 
 
 const DRIVER_STACK_VADDR: u64 = 0x0000_0000_0070_0000;
 const INFO_VADDR: u64 = 0x0000_0000_0051_0000;
+const DMA_VADDR: u64 = 0x0000_0000_0052_0000;
 
 static XHCI_DRIVER_ELF: &[u8] =
     include_bytes!("../../user_rs/usb_xhci_driver/target/x86_64-unknown-none/release/usb_xhci_driver");
@@ -30,6 +31,8 @@ static XHCI_DRIVER_ELF: &[u8] =
 #[repr(C)]
 struct XhciInfo {
     bar_vaddr: u64,
+    dma_vaddr: u64,
+    dma_phys: u64,
 }
 
 /// Real, spec-mandated identification (PCI class 0x0C / subclass 0x03
@@ -132,20 +135,33 @@ extern "C" fn xhci_driver_thread() {
             }
         }
 
-        // Real ADR-006 IOMMU containment. This increment does no DMA
-        // yet (register discovery only, see the driver's own module
-        // doc) — a real, empty range set is still passed through the
-        // SAME real assignment path every other device gets, so a
-        // later increment adding the Device Context Base Address
-        // Array/command-ring DMA pages has a real domain already in
-        // place to extend, not a special first-time setup.
-        let domain = authority::grant_device(p.bus, p.device, p.function, 0, 0)
-            .unwrap_or_else(|| iommu::assign_device(p.bus, p.device, p.function, &[]));
+        // Real DMA page (Phase 11 deliverable 2, continued): the
+        // Device Context Base Address Array, Command Ring, Event Ring
+        // Segment Table, and Event Ring segment all fit comfortably
+        // in one real page -- same single-page DMA layout style
+        // `ahci_driver`'s own module already established (a fixed set
+        // of byte offsets into one real, IOMMU-contained page, not a
+        // general allocator).
+        let dma_phys = pmm::alloc_page();
+        vmm::map_page_in(
+            space,
+            DMA_VADDR,
+            dma_phys,
+            vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE | vmm::PAGE_WRITABLE,
+        );
+
+        // Real ADR-006 IOMMU containment, now covering the real DMA
+        // page above -- the controller's own Command Ring/Event Ring
+        // reads and writes this exact page, so it must be reachable
+        // through the real IOMMU domain, not just the driver's own
+        // virtual mapping.
+        let domain = authority::grant_device(p.bus, p.device, p.function, dma_phys, 4096)
+            .unwrap_or_else(|| iommu::assign_device(p.bus, p.device, p.function, &[(dma_phys, 4096)]));
         klog_info!("XHCI_IOMMU_DOMAIN_ASSIGNED device={:02x}:{:02x}.{} domain={}", p.bus, p.device, p.function, domain.0);
 
         let info_phys = pmm::alloc_page();
         let info_ptr = pmm::p2v_pub(info_phys) as *mut XhciInfo;
-        core::ptr::write(info_ptr, XhciInfo { bar_vaddr });
+        core::ptr::write(info_ptr, XhciInfo { bar_vaddr, dma_vaddr: DMA_VADDR, dma_phys });
         vmm::map_page_in(
             space,
             INFO_VADDR,

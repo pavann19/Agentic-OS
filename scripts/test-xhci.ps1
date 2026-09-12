@@ -83,7 +83,9 @@ $checks = @(
     "XHCI_MAPPED",
     "XHCI_IOMMU_DOMAIN_ASSIGNED",
     "CAPLENGTH=0x",
-    "XHCI_SELF_CHECK_PASS"
+    "XHCI_SELF_CHECK_PASS",
+    "XHCI_RESET_PASS",
+    "XHCI_COMMAND_PASS"
 )
 foreach ($c in $checks) {
     if ($content.Contains($c)) {
@@ -100,4 +102,4 @@ if (-not $allPassed) {
 }
 
 Write-Output ""
-Write-Output "xHCI (USB) host controller verified: real device found by PCI class code, real MMIO+IOMMU capability grants, real Capability Register set decoded from actual hardware."
+Write-Output "xHCI (USB) host controller verified: real device found by PCI class code, real MMIO+IOMMU capability grants, real Capability Register set decoded from actual hardware, a real HCRST reset handshake, and one full real command round trip (a NO-OP command through a real Command Ring, completed via a real Event Ring Command Completion Event)."
