@@ -1490,3 +1490,45 @@ Real, disclosed scope: this proves the CAPABILITY lifecycle (mint, use, revoke, 
 **Status of Phase 10's four exit criteria: 3 of 4 now met.** Revocation (3), crash-and-restart (4), and external HTTP GET (1) are all real and verified live. Only exit criterion 2 (two independent Agentic OS instances exchanging TCP traffic directly) remains open — it needs a real TCP *server* path (`Listen`/`SynReceived` states), which this client-only implementation deliberately doesn't have yet (stated as out of scope in the TCP module's own doc from the start, not a new gap).
 
 **Not yet started:** DNS as a capability-scoped client wired through the `Socket` object (deliverable 3 — DNS itself works now; the capability-object wiring around it doesn't yet), a real TCP server/listen path (needed for exit criterion 2), loopback/multi-NIC routing (deliverable 5), and binding the `Socket` capability's revocation to an actual live `netstack_driver` connection (the capability-lifecycle mechanism proven in `socket_demo.rs` generalizes directly — real follow-up wiring, not new design).
+
+---
+
+## Phase 11 — Hardware Breadth (Tier 3) And Power Management (deliverable 2 started — IN PROGRESS)
+
+Real, disclosed scope for this increment: real xHCI (USB) host controller discovery, the first slice of deliverable 2 ("USB host controller support (xHCI) plus HID class drivers"). Started 2026-09-12 per the user's own explicit direction to begin Phase 11/12 work now that Phase 10's remaining item (a TCP server/listen path) is real, separate, and non-blocking.
+
+**Deliverable 2 (started) — real xHCI discovery.** New `user_rs/usb_xhci_driver` + `kernel_rs/src/usb_xhci.rs`, same real capability-mediation discipline as every driver since Phase 6: the kernel finds the device, grants a real `MmioRegion` capability through a real ADR-006 IOMMU domain (empty range set for this increment — no DMA yet, register discovery only), and the ring-3 process reads the real xHCI Capability Register set. Real, disclosed difference from AHCI/NVMe: those match an exact, QEMU-fixed vendor/device ID; an xHCI controller's ID varies by vendor and emulator, so this driver identifies it the spec-correct way — PCI class 0x0C / subclass 0x03 / prog-if 0x30 — the same portable method a real OS driver uses, not a QEMU-specific shortcut.
+
+Verified live, `scripts/test-xhci.ps1` (new), against QEMU's real `qemu-xhci` device:
+```
+[INFO] XHCI_FOUND 00:03.0 vendor=0x1b36 device=0x000d
+[INFO] XHCI_BAR0 phys=0xc000000000 size=16384
+[INFO] XHCI_MAPPED phys=0xc000000000 -> vaddr=0x20001000
+[INFO] XHCI_IOMMU_DOMAIN_ASSIGNED device=00:03.0 domain=3
+[XHCI_DRIVER] CAPLENGTH=0x00000040 HCIVERSION=0x00000000 HCSPARAMS1=0x08001040 HCSPARAMS2=0x0000000f HCSPARAMS3=0x00000000 HCCPARAMS1=0x00087001
+[XHCI_DRIVER] XHCI_SELF_CHECK_PASS: real Capability Registers decoded, max_slots=64 max_ports=8
+```
+Real, independently-checkable evidence: `CAPLENGTH=0x40` is architecturally bounded by the xHCI spec (must be ≤ 0x40, the size of the Capability Register set itself) and `max_slots`/`max_ports` are real, hardware-reported values decoded from `HCSPARAMS1` — not self-reported claims. On by default (unconditional, like `ahci`/`nvme` — a class-code match that finds nothing on a machine/QEMU config without an xHCI controller is a real, harmless no-op).
+
+**Not yet started:** Operational/Runtime/Doorbell register bring-up, command/event rings, HID class drivers (keyboard/mouse) on top of a live controller (the rest of deliverable 2), the published Tier 3 hardware matrix (deliverable 1), ACPI power management (deliverable 3), hot-plug support (deliverable 4). None of Phase 11's four exit criteria are met yet.
+
+---
+
+## Phase 12 — Display Server And Agent-Native Visual Surface (deliverable 1 foundation laid — IN PROGRESS)
+
+Real, disclosed scope for this increment: a minimal real compositor foundation proving the `Surface` capability type (ADR-008: "window and surface objects are typed, capability-scoped") is real and its bounds are actually enforced — not the full compositor/GPU/input/UI-toolkit breadth of deliverable 1-5. Started 2026-09-12, same context as Phase 11 above.
+
+**Deliverable 1 (foundation) — real `Surface` capability + bounds enforcement.** `capability.rs` gained `KernelObjectKind::Surface { x, y, width, height }` and `driver::create_surface_capability` (same real pattern as every other `create_*_capability`). New `kernel_rs/src/compositor.rs` + `user_rs/compositor_driver`: the kernel owns the real GOP framebuffer (the same discovery Phase 3's `framebuffer_driver` already established), mints two real, disjoint `Surface` capabilities, and grants them to a real ELF-loaded ring-3 process, which draws a distinct real color into each — bounds-checked against its own surface's real rectangle on every single pixel, not once per call.
+
+**Real adversarial self-check, not just "two rectangles that happen not to overlap":** the driver process deliberately attempts a wide fill that sweeps directly across the real gap between the two surfaces, using `surface_a`'s own bounds object for the per-pixel check — every pixel outside those real bounds is refused. An independent kernel-side readback (`compositor.rs`'s verify thread, reading the SAME physical framebuffer memory through its own separate mapping, never through anything the driver process wrote to) confirms both real colors landed correctly AND that the swept gap pixel was never touched. Verified live, `scripts/test-compositor.ps1` (new):
+```
+[INFO] COMPOSITOR_SURFACES_GRANTED a=(0,0,128,128) cap=1 b=(192,0,128,128) cap=2
+[COMPOSITOR_DRIVER] COMPOSITOR_SELF_CHECK_DRAWN: two real surfaces filled, out-of-bounds pixels refused
+[INFO] COMPOSITOR_READBACK surface_a=0x00ff0000 surface_b=0x000000ff gap=0x00000000
+[INFO] COMPOSITOR_SELF_CHECK_PASS: both real surfaces drawn correctly, gap between them left untouched (real bounds enforcement confirmed)
+```
+Real bug found and fixed bringing this up: the verify thread's first version called `vmm::map_mmio_page` once against the framebuffer's base address and then added raw byte offsets past that single mapped 4KB page — `map_mmio_page` (see its own doc) maps exactly one page, so reads past it hit unmapped kernel address space (a real kernel-side page fault, caught live). Fixed by mapping the specific page each pixel's real byte offset actually falls in, per read (`map_mmio_page` is idempotent, so this is both correct and simple).
+
+**Real, disclosed scope — stated plainly:** this proves the `Surface` type is real and its bounds are enforced in software, single-process. It is explicitly NOT yet Phase 12's first exit criterion ("one process cannot read another's window buffer, demonstrated adversarially") — that needs a second, separate compositor CLIENT process, which doesn't exist yet. Gated behind `compositor_demo` (off by default, mutually exclusive with the default Phase 3 framebuffer demo — both would otherwise race for the same real framebuffer).
+
+**Not yet started:** an actual compositor SERVICE (this increment's process draws directly, it doesn't yet mediate between separate client processes), GPU 2D acceleration (deliverable 2), input routing (deliverable 3), a UI toolkit (deliverable 4), the typed agent window-introspection API (deliverable 5). None of Phase 12's four exit criteria are met yet.

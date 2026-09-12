@@ -1,0 +1,29 @@
+[package]
+name = "usb_xhci_driver"
+version = "0.1.0"
+edition = "2021"
+
+# Phase 11 (docs/ROADMAP.md Sec5, deliverable 2): the first real step
+# toward USB host controller support -- xHCI (Extensible Host
+# Controller Interface), the real spec every USB 3.x controller on
+# real hardware speaks, targeting QEMU's own `qemu-xhci` device
+# emulation. Real, disclosed scope for this increment: device
+# discovery + a real MMIO+IOMMU capability grant + reading the real
+# xHCI Capability Register set (CAPLENGTH, HCIVERSION, HCSPARAMS1/2/3,
+# HCCPARAMS1) and decoding real port/slot counts from it -- the same
+# "spec plus config space, contained by IOMMU" discipline this
+# project has used since Phase 6, now applied to a new device class.
+# HID class drivers (keyboard/mouse) on top of this are real,
+# deliberately separate follow-up work (Phase 11 deliverable 2's own
+# second half), not folded in here.
+[dependencies]
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

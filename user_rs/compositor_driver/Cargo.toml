@@ -1,0 +1,27 @@
+[package]
+name = "compositor_driver"
+version = "0.1.0"
+edition = "2021"
+
+# Phase 12 (docs/ROADMAP.md Sec5, deliverable 1): a minimal real
+# compositor foundation -- a real capability-holding user-space
+# process that owns the real GOP framebuffer (the same MmioRegion
+# grant mechanism every driver since Phase 3 has used) and draws into
+# two distinct real Surface capabilities (kernel_rs::compositor,
+# new), each bounds-checked against its own real, kernel-granted
+# rectangle before any write -- real, disclosed scope: single-process
+# proof that Surface bounds are enforced in software; the full
+# multi-PROCESS adversarial isolation exit criterion (one process
+# provably cannot reach another's surface) is real, separate follow-up
+# work, not claimed here.
+[dependencies]
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

@@ -23,6 +23,7 @@ pub mod apic;
 pub mod audit;
 pub mod bootinfo;
 pub mod capability;
+pub mod compositor; // Phase 12 -- minimal real compositor foundation, see its own module doc
 pub mod critical;
 pub mod device_manager;
 pub mod driver;
@@ -65,6 +66,7 @@ pub mod syscall;
 pub mod thread;
 pub mod tools;
 pub mod user_driver;
+pub mod usb_xhci; // Phase 11 -- real xHCI (USB) host controller discovery, see its own module doc
 pub mod virtio_blk;
 pub mod virtio_net;
 pub mod vmm;
@@ -237,6 +239,13 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     virtio_net::spawn_if_present(&pci_devices);
     ahci::spawn_if_present(&pci_devices);
     nvme::spawn_if_present(&pci_devices);
+    // Phase 11 (docs/ROADMAP.md Sec5, deliverable 2): real xHCI (USB)
+    // host controller discovery. Real class-code matching, not an
+    // exact vendor/device ID -- absent on a machine/QEMU config with
+    // no xHCI controller, this is a real, harmless no-op (see
+    // usb_xhci.rs's own module doc for why class-code matching is the
+    // spec-correct approach here).
+    usb_xhci::spawn_if_present(&pci_devices);
     // Phase 10: netstack.rs REPLACES e1000.rs's own device ownership
     // when the network_stack feature is on -- both would otherwise
     // race for the same PCI device's BAR/DMA (see netstack.rs's own
@@ -313,6 +322,21 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             fb.base_address as u64, fb.buffer_size, fb.width, fb.height, fb.pixels_per_scan_line
         );
         klog_info!("USER_DRIVER_FB_SPAWN_START");
+        // Phase 12: `compositor.rs`'s own minimal real compositor
+        // foundation REPLACES this Phase 3 demo when the
+        // `compositor_demo` feature is on -- both would otherwise race
+        // for the same real framebuffer's contents (same mutual-
+        // exclusion discipline `netstack.rs`/`e1000.rs` already use).
+        // Default boot (feature off) is completely unaffected.
+        #[cfg(feature = "compositor_demo")]
+        compositor::spawn(compositor::FbParams {
+            phys_base: fb.base_address as u64,
+            size: fb.buffer_size,
+            width: fb.width,
+            height: fb.height,
+            pixels_per_scan_line: fb.pixels_per_scan_line,
+        });
+        #[cfg(not(feature = "compositor_demo"))]
         user_driver::spawn_framebuffer_driver(
             fb.base_address as u64,
             fb.buffer_size,

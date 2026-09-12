@@ -68,6 +68,17 @@ pub fn create_socket_capability(
     table.grant(object_id, rights)
 }
 
+/// Phase 12 deliverable 1: mints a real `Surface` capability object
+/// and grants it into `table` — same real pattern as every other
+/// `create_*_capability` here. Only `compositor.rs` calls this (the
+/// kernel decides what real screen region exists; a window process
+/// only ever receives the bounds it was granted, never picks its
+/// own).
+pub fn create_surface_capability(table: &mut CapabilityTable, x: u32, y: u32, width: u32, height: u32, rights: Rights) -> CapId {
+    let object_id = crate::capability::create_object(KernelObjectKind::Surface { x, y, width, height });
+    table.grant(object_id, rights)
+}
+
 #[derive(Debug)]
 pub enum DriverError {
     Cap(CapError),

@@ -141,6 +141,19 @@ pub enum KernelObjectKind {
     /// `docs/PROGRESS.md`'s Phase 10 section for exactly what's done vs
     /// open).
     Socket { protocol: SocketProtocol, local_port: u16, remote_ip: [u8; 4], remote_port: u16 },
+    /// Phase 12 (`docs/ROADMAP.md` §5 deliverable 1 — "window and
+    /// surface objects are typed, capability-scoped, and enumerable
+    /// through the same introspection model Phase 5 built for
+    /// everything else"): one real rectangular region of the real
+    /// framebuffer, named by its own bounds — not a bare pixel-buffer
+    /// pointer a process could offset past. `compositor.rs` is the
+    /// only place a `Surface` is created (mirroring `driver.rs`'s own
+    /// "the kernel decides what hardware exists, a process only
+    /// receives what it's granted" discipline); `x`/`y`/`width`/
+    /// `height` are the real, fixed bounds the holder's writes are
+    /// checked against — a write outside them is refused by the
+    /// compositor, not merely discouraged by convention.
+    Surface { x: u32, y: u32, width: u32, height: u32 },
 }
 
 /// Real, small, closed set — matches this stack's own real, from-spec

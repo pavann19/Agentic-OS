@@ -53,6 +53,12 @@ network_stack = []
 # default -- same discipline as every other demo feature above; see
 # socket_demo.rs's own module doc and scripts/test-socket-revoke.ps1.
 socket_revoke_demo = []
+# Phase 12 deliverable 1: the minimal real compositor foundation
+# (compositor.rs/user_rs/compositor_driver) REPLACES the default
+# Phase 3 framebuffer_driver demo when on -- both would otherwise race
+# for the same real framebuffer's contents. Off by default; see
+# compositor.rs's own module doc and scripts/test-compositor.ps1.
+compositor_demo = []
 
 [profile.dev]
 panic = "abort"
