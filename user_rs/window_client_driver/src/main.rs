@@ -226,6 +226,18 @@ pub extern "C" fn _start() -> ! {
         com1_write_str(core::str::from_utf8(core::slice::from_ref(&info.label)).unwrap_or("?"));
         com1_write_str("] TEXT_DRAWN via SYS_SURFACE_DRAW_TEXT\n");
 
+        // UI icon exercise: draw a real 16x16 1-bit monochrome icon via
+        // agentic_sdk::icon (SYS_SURFACE_DRAW_BITMAP, syscall 23)
+        let icon = if info.label == b'A' {
+            &agentic_sdk::icon::APP_ICON
+        } else {
+            &agentic_sdk::icon::TERMINAL_ICON
+        };
+        icon.draw(info.surface_cap, 32, 16, 0x00FFFFFF, 0);
+        com1_write_str("[WINDOW_CLIENT_");
+        com1_write_str(core::str::from_utf8(core::slice::from_ref(&info.label)).unwrap_or("?"));
+        com1_write_str("] BITMAP_DRAWN via SYS_SURFACE_DRAW_BITMAP\n");
+
         // Real, disclosed latency fix shared with terminal_emulator:
         // the fill above plus both push_line/render draw_text calls
         // only touched this window's own in-memory buffer -- present

@@ -160,6 +160,50 @@ pub fn draw_text(surface_object: ObjectId, x: u32, y: u32, text: &[u8], fg: u32,
     }
 }
 
+/// Real, bounds-checked 1-bit monochrome bitmap/icon blit into a window's
+/// OWN backing buffer at LOCAL (window-relative) coordinates.
+/// 1-bit = fg color. 0-bit = bg color (or skipped/transparent if bg == 0).
+pub fn draw_bitmap(
+    surface_object: ObjectId,
+    x: u32,
+    y: u32,
+    bm_width: u32,
+    bm_height: u32,
+    bitmap_data: &[u8],
+    fg: u32,
+    bg: u32,
+) -> bool {
+    match find_mut(surface_object) {
+        Some(w) => {
+            let pitch = ((bm_width + 7) / 8) as usize;
+            for row in 0..bm_height {
+                let py = y + row;
+                if py >= w.height {
+                    break;
+                }
+                for col in 0..bm_width {
+                    let px = x + col;
+                    if px >= w.width {
+                        break;
+                    }
+                    let byte_idx = (row as usize) * pitch + (col as usize / 8);
+                    if byte_idx >= bitmap_data.len() {
+                        break;
+                    }
+                    let bit_set = (bitmap_data[byte_idx] & (0x80 >> (col % 8))) != 0;
+                    if bit_set {
+                        w.buffer[(py * w.width + px) as usize] = fg;
+                    } else if bg != 0 {
+                        w.buffer[(py * w.width + px) as usize] = bg;
+                    }
+                }
+            }
+            true
+        }
+        None => false,
+    }
+}
+
 /// Real window movement: updates this window's own on-screen position
 /// (clamped so the title bar always stays on screen) — its content
 /// buffer is untouched, so the NEXT `present()` simply blits the exact

@@ -31,6 +31,7 @@
 // `serial_com1` instead; the module's own public API (`write_str`,
 // `write_dec_u64`) is unaffected, only the file/module name changed.
 pub mod file_service; // real block/file-I/O-for-apps path (IPC-mediated), see its own module doc
+pub mod icon; // minimal 16x16 1-bit icons for apps & launcher
 pub mod serial_com1;
 pub mod surface; // Phase 12 deliverable 4 -- real PSF1 text rendering via SYS_SURFACE_DRAW_TEXT
 pub mod syscall;

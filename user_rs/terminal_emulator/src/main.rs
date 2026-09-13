@@ -111,7 +111,7 @@ const GLYPH_WIDTH: u32 = 8;
 /// the reported "needs more visual enhancement": before this, there
 /// was no on-screen indication of where a keystroke would land at all.
 unsafe fn redraw_current_line(surface_cap: u32, y: u32, current: &[u8; COLS], current_len: usize, cursor: usize) {
-    surface::draw_text(surface_cap, 0, y, current, FG, BG);
+    surface::draw_line_padded(surface_cap, 0, y, &current[..current_len], COLS, FG, BG);
     let under = if cursor < current_len { current[cursor] } else { b' ' };
     let cell = [under];
     surface::draw_text(surface_cap, (cursor as u32) * GLYPH_WIDTH, y, &cell, BG, FG);
@@ -128,7 +128,15 @@ pub extern "C" fn _start() -> ! {
         let mut history_mu = core::mem::MaybeUninit::<TextRegion<LINES, COLS>>::uninit();
         let history_ptr = history_mu.as_mut_ptr();
         TextRegion::init_in_place(history_ptr);
-        let mut current: [u8; COLS] = [0u8; COLS];
+        // Real bug found and fixed: unused trailing cells used to be
+        // zero-filled (0x00), but this font's glyph 0 is NOT blank --
+        // draw_text always renders the FULL COLS-width `current` array
+        // every redraw (by design, so a shrinking line's old trailing
+        // glyphs get overwritten rather than left stale), so every
+        // never-yet-typed cell was visibly rendering as glyph 0's real
+        // symbol instead of blank space. Space (0x20) is what a real
+        // "nothing typed here" cell should render as.
+        let mut current: [u8; COLS] = [b' '; COLS];
         let mut current_len: usize = 0;
 
         surface::draw_text(info.surface_cap, 0, 0, b"TERMINAL_EMULATOR_READY", FG, BG);
@@ -173,7 +181,7 @@ pub extern "C" fn _start() -> ! {
             match key {
                 Key::Enter => {
                     (*history_ptr).push_line(&current[..current_len]);
-                    current = [0u8; COLS];
+                    current = [b' '; COLS]; // see the initial declaration's own doc comment for why space, not 0
                     current_len = 0;
                     cursor = 0;
                     (*history_ptr).render(info.surface_cap, 16, FG, BG);
@@ -191,7 +199,7 @@ pub extern "C" fn _start() -> ! {
                             current[i] = current[i + 1];
                         }
                         current_len -= 1;
-                        current[current_len] = 0;
+                        current[current_len] = b' '; // see the initial declaration's own doc comment for why space, not 0
                         cursor -= 1;
                     }
                     redraw_current_line(info.surface_cap, current_line_y, &current, current_len, cursor);

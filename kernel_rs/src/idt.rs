@@ -111,8 +111,7 @@ fn halt_forever() -> ! {
 /// process's own mistake, and there is no safe "just kill it" recovery
 /// for that.
 fn recover_or_halt(vector: u8, frame: &InterruptStackFrame) -> ! {
-    // Real, temporary diagnostic for the WHPX-specific ring0 #GP
-    // investigation: an unambiguous marker naming the real vector/CS/
+    // Real, permanent diagnostic: an unambiguous marker naming the real vector/CS/
     // RIP at the exact moment this function is entered, so a fault
     // occurring anywhere in its own body (including inlined callees)
     // is traceable to a specific real invocation from fresh serial
@@ -120,16 +119,13 @@ fn recover_or_halt(vector: u8, frame: &InterruptStackFrame) -> ! {
     // showed is unreliable here -- LTO can merge/inline small
     // functions in ways that make symbol-based attribution mislead).
     klog_error!("RECOVER_OR_HALT_ENTER vector={} cs=0x{:x} rip=0x{:x}", vector, frame.code_segment, frame.instruction_pointer);
-    // Real, temporary diagnostic for the second WHPX ring-0 #GP (distinct
-    // from the switch_to/thread_trampoline sti bug already fixed): when a
-    // #GP fires at CPL0 with no privilege change, hardware delivers it on
-    // the SAME stack with no RSP adjustment beyond its own new frame --
-    // meaning frame.stack_pointer here is exactly the RSP the FAULTING
-    // instruction was using at the moment it faulted. For an iretq fault
-    // that is the address of the un-popped hardware frame iretq was
-    // reading -- dumping the raw words there shows its actual (possibly
-    // corrupted) CS/SS content directly, instead of inferring it from the
-    // error code alone.
+    // Real, permanent diagnostic: when a #GP fires at CPL0 with no privilege change,
+    // hardware delivers it on the SAME stack with no RSP adjustment beyond its own
+    // new frame -- meaning frame.stack_pointer here is exactly the RSP the FAULTING
+    // instruction was using at the moment it faulted. For an iretq fault that is the
+    // address of the un-popped hardware frame iretq was reading -- dumping the raw words
+    // there shows its actual (possibly corrupted) CS/SS content directly, instead of
+    // inferring it from the error code alone.
     if vector == 13 && frame.code_segment & 0x3 == 0 {
         let base = frame.stack_pointer;
         unsafe {

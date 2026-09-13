@@ -73,6 +73,7 @@ $fs.Close()
 
 $qemuArgs = @(
     "-machine", "q35,kernel-irqchip=split",
+    "-accel", "tcg,tb-size=128",
     "-m", "256M",
     "-device", "intel-iommu,intremap=on",
     "-drive", "if=pflash,format=raw,readonly=on,file=`"$OvmfCode`"",

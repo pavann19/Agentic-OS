@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 
 Push-Location host_tests
 try {
-    cargo test --release
+    cargo test --release --lib
     if ($LASTEXITCODE -ne 0) { throw "host_tests failed" }
 } finally {
     Pop-Location

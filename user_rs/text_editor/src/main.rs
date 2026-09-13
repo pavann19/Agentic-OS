@@ -122,23 +122,16 @@ impl EditorState {
 /// on any row, not always the last one.
 unsafe fn redraw_row(surface_cap: u32, row: usize, buf: &[[u8; COLS]; ROWS], cursor: Option<usize>) {
     let y = (row as u32) * GLYPH_HEIGHT;
-    // Real, disclosed visual bug found and fixed: an empty cell stores
-    // a real `0` byte (never written to yet), but PSF1 glyph index 0
-    // is NOT a blank glyph in this font -- drawing the row's raw bytes
-    // directly rendered every untyped cell as a real, visible (wrong)
-    // glyph. A small on-stack copy with `0` mapped to a real space
-    // character before drawing is what actually shows blank cells as
-    // blank.
-    let mut line = [b' '; COLS];
-    for i in 0..COLS {
-        let b = buf[row][i];
-        if b != 0 {
-            line[i] = b;
-        }
-    }
-    surface::draw_text(surface_cap, 0, y, &line, FG, BG);
+    // Uses agentic_sdk's shared `surface::draw_line_padded` which pads up to COLS
+    // with spaces (0x20) and converts any null bytes (0) to spaces, avoiding glyph 0 rendering.
+    surface::draw_line_padded(surface_cap, 0, y, &buf[row], COLS, FG, BG);
     if let Some(col) = cursor {
-        let under = if col < COLS { line[col] } else { b' ' };
+        let under = if col < COLS {
+            let b = buf[row][col];
+            if b == 0 { b' ' } else { b }
+        } else {
+            b' '
+        };
         let cell = [under];
         surface::draw_text(surface_cap, (col as u32) * GLYPH_WIDTH, y, &cell, BG, FG);
     }

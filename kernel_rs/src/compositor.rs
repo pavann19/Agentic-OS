@@ -391,6 +391,74 @@ pub fn syscall_draw_text(cap_id: capability::CapId, request_vaddr: u64) -> u64 {
     0
 }
 
+#[repr(C)]
+struct SurfaceBitmapRequest {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    fg: u32,
+    bg: u32,
+    data_vaddr: u64,
+    data_len: u32,
+}
+
+const MAX_BITMAP_BYTES: usize = 1024;
+
+/// Real SYS_SURFACE_DRAW_BITMAP (syscall 23): draws a 1-bit monochrome
+/// bitmap/icon into the Surface named by `cap_id`.
+/// `a0` = Surface `CapId`, `a1` = vaddr of `SurfaceBitmapRequest`.
+pub fn syscall_draw_bitmap(cap_id: capability::CapId, request_vaddr: u64) -> u64 {
+    let cap = match thread::resolve_current_capability(cap_id, Rights::MAP) {
+        Ok(c) => c,
+        Err(_) => {
+            klog_info!("SYSCALL_SURFACE_DRAW_BITMAP_DENIED cap={}", cap_id);
+            return u64::MAX;
+        }
+    };
+    let (sx, sy, swidth, sheight) = match capability::object_kind(cap.object_id) {
+        Some(capability::KernelObjectKind::Surface { x, y, width, height }) => (x, y, width, height),
+        _ => {
+            klog_info!("SYSCALL_SURFACE_DRAW_BITMAP_WRONG_KIND cap={}", cap_id);
+            return u64::MAX;
+        }
+    };
+    unsafe {
+        let pml4 = vmm::current_cr3();
+        let req_size = core::mem::size_of::<SurfaceBitmapRequest>() as u64;
+        if !vmm::validate_user_buffer_readable(pml4, request_vaddr, req_size) {
+            klog_info!("SYSCALL_SURFACE_DRAW_BITMAP_BAD_REQUEST_PTR cap={}", cap_id);
+            return u64::MAX;
+        }
+        let mut req_bytes = [0u8; core::mem::size_of::<SurfaceBitmapRequest>()];
+        vmm::read_user_bytes(pml4, request_vaddr, &mut req_bytes);
+        let req: SurfaceBitmapRequest = core::ptr::read_unaligned(req_bytes.as_ptr() as *const SurfaceBitmapRequest);
+
+        let data_len = req.data_len.min(MAX_BITMAP_BYTES as u32) as usize;
+        if data_len == 0 || !vmm::validate_user_buffer_readable(pml4, req.data_vaddr, data_len as u64) {
+            klog_info!("SYSCALL_SURFACE_DRAW_BITMAP_BAD_DATA_PTR cap={}", cap_id);
+            return u64::MAX;
+        }
+        let mut data_buf_mu = core::mem::MaybeUninit::<[u8; MAX_BITMAP_BYTES]>::uninit();
+        let data_buf_ptr = data_buf_mu.as_mut_ptr() as *mut u8;
+        let slice = core::slice::from_raw_parts_mut(data_buf_ptr, data_len);
+        vmm::read_user_bytes(pml4, req.data_vaddr, slice);
+
+        window_manager::draw_bitmap(
+            cap.object_id,
+            req.x,
+            req.y,
+            req.width,
+            req.height,
+            slice,
+            req.fg,
+            req.bg,
+        );
+    }
+    klog_info!("SYSCALL_SURFACE_DRAW_BITMAP_OK cap={} rect=({},{},{},{})", cap_id, sx, sy, swidth, sheight);
+    0
+}
+
 /// Real SYS_WINDOW_MOVE handler: `cap_id` = the CALLER's own CapId for
 /// its Surface, `new_x`/`new_y` = the real requested screen position.
 /// Same per-process isolation as every other syscall here -- the
@@ -701,6 +769,34 @@ extern "C" fn compositor_verify_thread() {
             klog_info!("COMPOSITOR_TEXT_SELF_CHECK_PASS: both windows' real PSF1 text produced a genuine glyph pattern (neither blank nor solid), independently read back");
         } else {
             klog_info!("COMPOSITOR_TEXT_SELF_CHECK_FAIL: text readback did not show a real glyph pattern");
+        }
+
+        // Real 1-bit monochrome icon readback (SYS_SURFACE_DRAW_BITMAP, syscall 23):
+        // both window clients drew a 16x16 icon at local (32, 16). Verify both
+        // produced a genuine 1-bit pattern (neither blank nor solid fill).
+        let count_bitmap_fg = |base_x: u32, base_y: u32| -> (u32, u32) {
+            let mut matches = 0u32;
+            let mut total = 0u32;
+            for dy in 0..16u32 {
+                for dx in 0..16u32 {
+                    if read_pixel(base_x + dx, base_y + dy) == TEXT_FG {
+                        matches += 1;
+                    }
+                    total += 1;
+                }
+            }
+            (matches, total)
+        };
+        let (bm_a_fg, bm_a_total) = count_bitmap_fg(32, CLIENT_ROW_Y + 16);
+        let (bm_b_fg, bm_b_total) = count_bitmap_fg(SURFACE_SIZE + GAP_PX + 32, CLIENT_ROW_Y + 16);
+        klog_info!(
+            "COMPOSITOR_BITMAP_READBACK client_a_fg={}/{} client_b_fg={}/{}",
+            bm_a_fg, bm_a_total, bm_b_fg, bm_b_total
+        );
+        if real_glyph_pattern(bm_a_fg, bm_a_total) && real_glyph_pattern(bm_b_fg, bm_b_total) {
+            klog_info!("COMPOSITOR_BITMAP_SELF_CHECK_PASS: both windows' 1-bit icons rendered via SYS_SURFACE_DRAW_BITMAP, independently read back");
+        } else {
+            klog_info!("COMPOSITOR_BITMAP_SELF_CHECK_FAIL: bitmap readback did not show a real 1-bit pattern");
         }
     }
 }

@@ -200,9 +200,8 @@ pub fn spawn(entry: extern "C" fn()) -> ThreadId {
     spawn_in(entry, crate::vmm::kernel_pml4_phys())
 }
 
-// Real, temporary diagnostic for the WHPX ring-0 #GP investigation: a
-// fixed-size ring buffer of the last N scheduler switches (outgoing id,
-// incoming id, TSS.RSP0 programmed for the incoming thread), so a fault
+// Real, permanent diagnostic: a fixed-size ring buffer of the last N scheduler switches
+// (outgoing id, incoming id, TSS.RSP0 programmed for the incoming thread), so a fault
 // handler can dump the exact scheduling history leading up to a real
 // crash instead of it being inferred after the fact.
 const SWITCH_LOG_LEN: usize = 24;
@@ -833,9 +832,7 @@ unsafe fn schedule_locked(caller_flags: u64) {
         // and thread 0 is always already ring 0, so this value is simply
         // never read while thread 0 is the one running.
         let new_kernel_stack_top = next._stack.as_ptr() as u64 + next._stack.len() as u64;
-        // Real, temporary diagnostic for the WHPX ring-0 #GP investigation
-        // (a stale/wrong TSS.RSP0 at the moment a ring-3 thread is
-        // interrupted): a small ring buffer of the last switches, so
+        // Real, permanent diagnostic: a small ring buffer of the last switches, so
         // idt.rs's recover_or_halt can dump exactly which thread was
         // selected as `next`, what stack top was programmed for it, and
         // in what order, leading up to any real fault -- direct evidence

@@ -662,6 +662,10 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
             crate::window_manager::report_mouse(dx as i32, dy as i32, buttons != 0);
             0
         }
+        23 => {
+            // SYS_SURFACE_DRAW_BITMAP -- a0 = Surface CapId, a1 = SurfaceBitmapRequest vaddr
+            crate::compositor::syscall_draw_bitmap(a0 as capability::CapId, a1)
+        }
         _ => {
             klog_info!("SYSCALL_UNKNOWN num={}", num);
             u64::MAX

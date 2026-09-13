@@ -52,6 +52,13 @@ impl<const LINES: usize, const COLS: usize> TextRegion<LINES, COLS> {
         for i in 0..core::mem::size_of::<Self>() {
             core::ptr::write_volatile(bytes.add(i), 0);
         }
+        // Real bug prevention (discovered in terminal_emulator and text_editor):
+        // PSF1 font glyph 0 is NOT blank in standard PSF fonts. Unused cells
+        // must be space-padded (0x20) so they render as blank spaces.
+        let lines_ptr = &raw mut (*place).lines as *mut u8;
+        for i in 0..(LINES * COLS) {
+            core::ptr::write_volatile(lines_ptr.add(i), b' ');
+        }
     }
 
     /// Real, explicit per-byte copy -- NOT `copy_from_slice`/array
@@ -93,10 +100,11 @@ impl<const LINES: usize, const COLS: usize> TextRegion<LINES, COLS> {
         if self.count < LINES {
             let len = s.len().min(COLS);
             for i in 0..len {
-                self.lines[self.count][i] = s[i];
+                let b = s[i];
+                self.lines[self.count][i] = if b == 0 { b' ' } else { b };
             }
             for i in len..COLS {
-                self.lines[self.count][i] = 0;
+                self.lines[self.count][i] = b' ';
             }
             self.lens[self.count] = len as u8;
             self.count += 1;
@@ -109,7 +117,8 @@ impl<const LINES: usize, const COLS: usize> TextRegion<LINES, COLS> {
         }
         let len = s.len().min(COLS);
         for i in 0..COLS {
-            self.lines[LINES - 1][i] = if i < len { s[i] } else { 0 };
+            let b = if i < len { s[i] } else { b' ' };
+            self.lines[LINES - 1][i] = if b == 0 { b' ' } else { b };
         }
         self.lens[LINES - 1] = len as u8;
     }

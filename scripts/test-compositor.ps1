@@ -67,6 +67,7 @@ Copy-Item "kernel_rs\target\x86_64-unknown-none\release\agentic_kernel" "$FatDir
 if (Test-Path $SerialLog) { Clear-Content $SerialLog }
 $qemuArgs = @(
     "-machine", "q35,kernel-irqchip=split",
+    "-accel", "tcg,tb-size=128",
     "-m", "256M",
     "-device", "intel-iommu,intremap=on",
     "-drive", "if=pflash,format=raw,readonly=on,file=`"$OvmfCode`"",
@@ -108,7 +109,10 @@ $checks = @(
     "TEXT_FONT_INIT",
     "TEXT_DRAWN",
     "COMPOSITOR_TEXT_READBACK",
-    "COMPOSITOR_TEXT_SELF_CHECK_PASS"
+    "COMPOSITOR_TEXT_SELF_CHECK_PASS",
+    "BITMAP_DRAWN",
+    "COMPOSITOR_BITMAP_READBACK",
+    "COMPOSITOR_BITMAP_SELF_CHECK_PASS"
 )
 foreach ($c in $checks) {
     if ($content.Contains($c)) {
@@ -119,7 +123,7 @@ foreach ($c in $checks) {
     }
 }
 
-foreach ($bad in @("COMPOSITOR_SELF_CHECK_FAIL", "COMPOSITOR_MULTIPROC_SELF_CHECK_FAIL", "SURFACE_FILL_UNEXPECTED_DENIAL", "FOREIGN_CAP_UNEXPECTEDLY_SUCCEEDED")) {
+foreach ($bad in @("COMPOSITOR_SELF_CHECK_FAIL", "COMPOSITOR_MULTIPROC_SELF_CHECK_FAIL", "SURFACE_FILL_UNEXPECTED_DENIAL", "FOREIGN_CAP_UNEXPECTEDLY_SUCCEEDED", "COMPOSITOR_BITMAP_SELF_CHECK_FAIL")) {
     if ($content.Contains($bad)) {
         Write-Output "  FAIL: $bad appeared -- see $SerialLog"
         $allPassed = $false

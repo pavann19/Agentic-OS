@@ -32,11 +32,14 @@ Run host-side tests:
 docker compose run --rm os-build make test-host
 ```
 
-Run interactively from inside the build container:
+Run interactively:
 
-```sh
+```powershell
 make run-qemu
 ```
+
+> [!NOTE]
+> **Keyboard Grab Caveat**: When typing interactively into the QEMU graphical window, confirm the QEMU title bar displays `Press Ctrl+Alt+G to release grab` (click inside the black display area to activate it). If QEMU does not have the keyboard grab, keystrokes are retained by the host OS window manager rather than reaching the Agentic OS input router.
 
 ## Evidence Policy
 
