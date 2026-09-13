@@ -27,6 +27,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use core::arch::asm;
 use crate::klog_info;
+use crate::klog_error;
 
 pub const KERNEL_STACK_SIZE: usize = 64 * 1024;
 
@@ -197,6 +198,43 @@ extern "C" fn thread_trampoline() -> ! {
 /// that's not what's wanted.
 pub fn spawn(entry: extern "C" fn()) -> ThreadId {
     spawn_in(entry, crate::vmm::kernel_pml4_phys())
+}
+
+// Real, temporary diagnostic for the WHPX ring-0 #GP investigation: a
+// fixed-size ring buffer of the last N scheduler switches (outgoing id,
+// incoming id, TSS.RSP0 programmed for the incoming thread), so a fault
+// handler can dump the exact scheduling history leading up to a real
+// crash instead of it being inferred after the fact.
+const SWITCH_LOG_LEN: usize = 24;
+static SWITCH_LOG: [core::sync::atomic::AtomicU64; SWITCH_LOG_LEN * 3] = {
+    const Z: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    [Z; SWITCH_LOG_LEN * 3]
+};
+static SWITCH_LOG_POS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+fn record_switch(from: ThreadId, to: ThreadId, stack_top: u64) {
+    use core::sync::atomic::Ordering;
+    let slot = SWITCH_LOG_POS.fetch_add(1, Ordering::SeqCst) % SWITCH_LOG_LEN;
+    SWITCH_LOG[slot * 3].store(from, Ordering::SeqCst);
+    SWITCH_LOG[slot * 3 + 1].store(to, Ordering::SeqCst);
+    SWITCH_LOG[slot * 3 + 2].store(stack_top, Ordering::SeqCst);
+}
+
+/// Dumps the last `SWITCH_LOG_LEN` scheduler switches, oldest first. Called
+/// from `idt.rs::recover_or_halt` on a real ring-0 #GP so the exact
+/// scheduling history leading up to the fault is in the serial log.
+pub fn dump_switch_log() {
+    use core::sync::atomic::Ordering;
+    let pos = SWITCH_LOG_POS.load(Ordering::SeqCst);
+    let count = pos.min(SWITCH_LOG_LEN);
+    let start = pos.saturating_sub(count);
+    for i in start..pos {
+        let slot = i % SWITCH_LOG_LEN;
+        let from = SWITCH_LOG[slot * 3].load(Ordering::SeqCst);
+        let to = SWITCH_LOG[slot * 3 + 1].load(Ordering::SeqCst);
+        let stack_top = SWITCH_LOG[slot * 3 + 2].load(Ordering::SeqCst);
+        klog_error!("SWITCH_LOG[{}] from={} to={} rsp0=0x{:x}", i, from, to, stack_top);
+    }
 }
 
 /// Same as `spawn`, but binds the new thread to `address_space` (from
@@ -692,6 +730,7 @@ unsafe fn schedule_locked(caller_flags: u64) {
         if current.state == ThreadState::Running {
             current.state = ThreadState::Ready;
         }
+        let outgoing_id = current.id;
         let old_rsp_slot = &mut current.saved_rsp as *mut u64;
 
         // Requeue the outgoing thread (unless it exited) before picking
@@ -794,6 +833,14 @@ unsafe fn schedule_locked(caller_flags: u64) {
         // and thread 0 is always already ring 0, so this value is simply
         // never read while thread 0 is the one running.
         let new_kernel_stack_top = next._stack.as_ptr() as u64 + next._stack.len() as u64;
+        // Real, temporary diagnostic for the WHPX ring-0 #GP investigation
+        // (a stale/wrong TSS.RSP0 at the moment a ring-3 thread is
+        // interrupted): a small ring buffer of the last switches, so
+        // idt.rs's recover_or_halt can dump exactly which thread was
+        // selected as `next`, what stack top was programmed for it, and
+        // in what order, leading up to any real fault -- direct evidence
+        // instead of inferring the scheduling history after the fact.
+        record_switch(outgoing_id, next.id, new_kernel_stack_top);
         crate::gdt::set_kernel_stack(new_kernel_stack_top);
         crate::syscall::set_kernel_stack(new_kernel_stack_top);
         // Same real bug class, same fix, applied to the IOPB (see

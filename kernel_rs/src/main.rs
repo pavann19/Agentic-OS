@@ -269,6 +269,35 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     }
     klog_info!("TIMER_INIT_DONE");
 
+    // Phase 1: kernel threads + preemptive scheduling. kernel_main itself
+    // becomes "thread 0" (its execution continues below exactly as
+    // before -- this call just makes it visible to the scheduler so
+    // h_timer's schedule() has a valid thread to save/restore starting on
+    // the very next tick). Real bug found and fixed under WHPX (the fast,
+    // real interrupt timing exposed it; TCG's slower/serialized timing
+    // never did): this call used to sit much later in kernel_main, AFTER
+    // every Phase 3+ driver's own thread::spawn (AHCI, virtio, NVMe, xHCI,
+    // e1000, init, the driver processes, fault_isolation_demo, the agent
+    // demos, the shell -- 14 real threads' worth by the time it ran).
+    // Called that late, `NEXT_TID` was already 14, so kernel_main's own
+    // placeholder zero-length "not ours to own" stack (see this
+    // function's own doc comment) got registered under a normal-looking
+    // thread id and, on the very next tick, silently entered the SAME
+    // round-robin run queue as every real thread -- nothing here or in
+    // schedule_locked ever distinguished it as special. Once genuinely
+    // selected as `next` in that queue (an ordinary event, not an edge
+    // case), schedule_locked's own unconditional per-switch TSS.RSP0
+    // update (thread.rs) programmed the CPU's real ring3->ring0
+    // kernel-stack pointer to this thread's placeholder address --
+    // corrupting the ONE piece of hardware state every OTHER thread's own
+    // next ring-3 interrupt depends on being correct. Fixed by restoring
+    // the function's own documented invariant: called here, BEFORE this
+    // kernel's very first thread::spawn (virtio_blk below), so kernel_main
+    // truly is thread 0 -- NEXT_TID is 0 at this call, matching what the
+    // comment above already claimed but the call site's real position no
+    // longer did.
+    thread::init_as_current_thread();
+
     klog_info!("Rust kernel slice: PMM+VMM+heap+timer+deferred-IRQ-queue live, higher-half.");
     klog_info!("NOTE: graphics/keyboard not yet ported (Phase 0 core items complete).");
 
@@ -728,12 +757,9 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     }
     klog_info!("TIMER_TICKS_OBSERVED count={}", apic::tick_count());
 
-    // Phase 1: kernel threads + preemptive scheduling. kernel_main itself
-    // becomes "thread 0" (its execution continues below exactly as
-    // before — this call just makes it visible to the scheduler so
-    // h_timer's schedule() has a valid thread to save/restore starting on
-    // the very next tick).
-    thread::init_as_current_thread();
+    // thread::init_as_current_thread() now runs much earlier (right after
+    // TIMER_INIT_DONE, before any real thread exists) -- see its own call
+    // site's doc comment for the real bug this fixes.
     thread::spawn(demo_thread_a);
     thread::spawn(demo_thread_b);
     klog_info!("THREADS_SPAWNED count=2");
