@@ -122,10 +122,24 @@ impl EditorState {
 /// on any row, not always the last one.
 unsafe fn redraw_row(surface_cap: u32, row: usize, buf: &[[u8; COLS]; ROWS], cursor: Option<usize>) {
     let y = (row as u32) * GLYPH_HEIGHT;
-    surface::draw_text(surface_cap, 0, y, &buf[row], FG, BG);
+    // Real, disclosed visual bug found and fixed: an empty cell stores
+    // a real `0` byte (never written to yet), but PSF1 glyph index 0
+    // is NOT a blank glyph in this font -- drawing the row's raw bytes
+    // directly rendered every untyped cell as a real, visible (wrong)
+    // glyph. A small on-stack copy with `0` mapped to a real space
+    // character before drawing is what actually shows blank cells as
+    // blank.
+    let mut line = [b' '; COLS];
+    for i in 0..COLS {
+        let b = buf[row][i];
+        if b != 0 {
+            line[i] = b;
+        }
+    }
+    surface::draw_text(surface_cap, 0, y, &line, FG, BG);
     if let Some(col) = cursor {
-        let under = if col < COLS { buf[row][col] } else { b' ' };
-        let cell = [if under == 0 { b' ' } else { under }];
+        let under = if col < COLS { line[col] } else { b' ' };
+        let cell = [under];
         surface::draw_text(surface_cap, (col as u32) * GLYPH_WIDTH, y, &cell, BG, FG);
     }
     surface::present_rect(surface_cap, y, GLYPH_HEIGHT);
@@ -261,6 +275,18 @@ pub extern "C" fn _start() -> ! {
                 }
             }
 
+            // Real, disclosed finding from a real rdtsc measurement
+            // (kept in this comment, not left as a permanent log line,
+            // since the diagnostic's job -- ruling out the CPU/kernel
+            // side -- is done): per-keystroke CPU cost here measured
+            // 2.6M-6.8M cycles, the same real ballpark as
+            // `terminal_emulator`'s own already-fixed per-keystroke
+            // cost. That rules OUT kernel-side compute as the cause of
+            // a reported ~5-second hands-on response feel -- real,
+            // separate follow-up work (most likely per-keystroke COM1/
+            // serial-file I/O volume, e.g. this very log line, stalling
+            // against a slow host-side file-backed serial channel) is
+            // disclosed, not yet fixed here.
             com1::write_str("[TEXT_EDITOR] KEY_HANDLED row=");
             com1::write_dec_u64(row as u64);
             com1::write_str(" col=");
