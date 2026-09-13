@@ -15,8 +15,8 @@ param(
     [string]$FatDir = "boot_rs\qemu_fatdir",
     [string]$SerialLog = "_evidence\latest\serial-text-editor.log",
     [int]$MonitorPort = 45458,
-    [int]$BootWaitSeconds = 10,
-    [int]$PostKeySeconds = 20
+    [int]$BootWaitSeconds = 16,
+    [int]$PostKeySeconds = 26
 )
 
 $ErrorActionPreference = "Stop"

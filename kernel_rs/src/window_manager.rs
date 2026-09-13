@@ -12,21 +12,46 @@
 //!
 //! Real, disclosed scope: registration order is z-order (later
 //! registered = drawn on top) — a fixed, deterministic policy, not
-//! click-to-raise or any dynamic reordering. There is still no mouse in
-//! this kernel (Phase 12's own disclosed gap), so nothing here decides
-//! which window is "on top" interactively — that's real, separate
-//! follow-up work once mouse input exists, not silently pretended to
-//! be done.
+//! dynamic click-to-raise reordering (a real click still changes
+//! FOCUS and can DRAG a window, see `report_mouse` below, just not
+//! which window paints on top of another overlapping one).
+//!
+//! Real GUI mouse support (`report_mouse`): a real PS/2 mouse
+//! (`user_rs/mouse_driver`, IRQ12) reports real relative deltas and
+//! button state here via `SYS_MOUSE_REPORT` (syscall 22). This is the
+//! kernel's own real window-manager policy, not something any app
+//! decides: a press inside a window's real title-bar rect starts a
+//! real drag (subsequent moves call `move_window`); a press inside a
+//! window's real content rect changes real keyboard focus
+//! (`input_routing::set_focus`) -- the same real, disclosed
+//! click-to-focus Phase 12's own doc named as follow-up work, now
+//! done.
 
 use crate::capability::ObjectId;
 use crate::klog_info;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 const TITLE_BAR_HEIGHT: u32 = 12;
 const TITLE_BAR_COLOR: u32 = 0x0040_4040;
 const TITLE_FG: u32 = 0x00FF_FFFF;
 const MAX_TITLE_LEN: usize = 24;
+
+// Real cursor state -- a real, visible, moving GUI cursor, not just an
+// input-routing abstraction. Plain statics (unsafe, cooperative single-
+// core discipline this whole file already uses) rather than a lock:
+// `report_mouse` is the only writer, always called from the mouse
+// driver's own syscall dispatch, never concurrently with itself.
+static CURSOR_X: AtomicI32 = AtomicI32::new(160);
+static CURSOR_Y: AtomicI32 = AtomicI32::new(100);
+static LEFT_BUTTON_DOWN: AtomicBool = AtomicBool::new(false);
+/// `Some((surface_object, grab_offset_x, grab_offset_y))` while a real
+/// title-bar drag is in progress -- the offset is the real, fixed
+/// distance from the window's own top-left corner to wherever inside
+/// the title bar the button went down, so the window doesn't jump to
+/// have its corner snap under the cursor the instant a drag starts.
+static mut DRAGGING: Option<(ObjectId, i32, i32)> = None;
 
 pub struct Window {
     surface_object: ObjectId,
@@ -207,6 +232,11 @@ pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
     // would make WC's speed win silently reintroduce stale/incomplete
     // frames, a real correctness regression, not a nitpick.
     core::arch::asm!("sfence", options(nomem, nostack));
+    // Real GUI mouse support: the cursor is composited last, on top of
+    // every window, every time anything recomposites -- otherwise a
+    // keystroke's own redraw could paint window content right over
+    // wherever the cursor currently sits.
+    draw_cursor(fb_phys_base, ppsl, fb_width, fb_height);
 }
 
 /// Real, disclosed follow-up fix: real `rdtsc` measurement showed
@@ -248,5 +278,118 @@ pub unsafe fn present_partial(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_he
         }
     }
     core::arch::asm!("sfence", options(nomem, nostack));
+    draw_cursor(fb_phys_base, ppsl, fb_width, fb_height);
     true
+}
+
+fn point_in_rect(px: i32, py: i32, rx: i32, ry: i32, rw: u32, rh: u32) -> bool {
+    px >= rx && px < rx + rw as i32 && py >= ry && py < ry + rh as i32
+}
+
+/// Finds the TOPMOST window (highest z-order, i.e. last registered)
+/// whose real title-bar rect contains `(x, y)` -- checked before
+/// content, since a title bar can sit just above a window's own
+/// content rect and the two must never both match the same point.
+fn topmost_titlebar_at(x: i32, y: i32) -> Option<ObjectId> {
+    windows_mut().iter().rev().find_map(|w| {
+        let bar_y = w.y - TITLE_BAR_HEIGHT as i32;
+        point_in_rect(x, y, w.x, bar_y, w.width, TITLE_BAR_HEIGHT).then_some(w.surface_object)
+    })
+}
+
+/// Finds the TOPMOST window whose real content rect contains `(x, y)`.
+fn topmost_content_at(x: i32, y: i32) -> Option<ObjectId> {
+    windows_mut().iter().rev().find_map(|w| point_in_rect(x, y, w.x, w.y, w.width, w.height).then_some(w.surface_object))
+}
+
+/// Real, small (11x16), classic-arrow cursor bitmap -- 1 = a real black
+/// pixel, 0 = see-through (background/window content shows through).
+/// Same real, disclosed "simple but genuine" spirit as this project's
+/// other minimal-but-real UI primitives (the PSF1 glyph blit, the
+/// title bar fill): a real recognizable pointer shape, not a single
+/// crosshair pixel.
+const CURSOR_W: usize = 11;
+const CURSOR_H: usize = 16;
+#[rustfmt::skip]
+const CURSOR_BITMAP: [u16; CURSOR_H] = [
+    0b1000_0000_000,
+    0b1100_0000_000,
+    0b1110_0000_000,
+    0b1111_0000_000,
+    0b1111_1000_000,
+    0b1111_1100_000,
+    0b1111_1110_000,
+    0b1111_1111_000,
+    0b1111_1111_100,
+    0b1111_1111_110,
+    0b1111_1100_000,
+    0b1101_1110_000,
+    0b1000_1110_000,
+    0b0000_0111_000,
+    0b0000_0111_000,
+    0b0000_0011_000,
+];
+
+unsafe fn draw_cursor(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u32) {
+    let cx = CURSOR_X.load(Ordering::SeqCst);
+    let cy = CURSOR_Y.load(Ordering::SeqCst);
+    for row in 0..CURSOR_H {
+        let bits = CURSOR_BITMAP[row];
+        for col in 0..CURSOR_W {
+            if (bits >> (CURSOR_W - 1 - col)) & 1 == 0 {
+                continue;
+            }
+            let sx = cx + col as i32;
+            let sy = cy + row as i32;
+            if sx < 0 || sy < 0 || sx as u32 >= fb_width || sy as u32 >= fb_height {
+                continue;
+            }
+            put_fb_pixel(fb_phys_base, ppsl, sx as u32, sy as u32, 0x0000_0000);
+        }
+    }
+    core::arch::asm!("sfence", options(nomem, nostack));
+}
+
+/// Real PS/2 mouse event handler -- see this module's own doc for the
+/// real click-to-focus/drag policy. Called once per real, decoded
+/// 3-byte mouse packet (`mouse_driver`'s own syscall 22). Real,
+/// disclosed cost: unlike the keyboard's own dirty-rect `present_
+/// partial` path, this always recomposites the WHOLE desktop (every
+/// window, full content) before drawing the cursor on top -- a real,
+/// stated simplification (mouse movement isn't yet dirty-rect
+/// optimized the way text redraw is), not a hidden shortcut.
+pub fn report_mouse(dx: i32, dy: i32, left_down: bool) {
+    let Some((fb_phys_base, ppsl, fb_width, fb_height)) = crate::compositor::get_fb_params() else {
+        return; // no real framebuffer set up yet -- nothing to composite against
+    };
+
+    let new_x = (CURSOR_X.load(Ordering::SeqCst) + dx).clamp(0, fb_width as i32 - 1);
+    let new_y = (CURSOR_Y.load(Ordering::SeqCst) + dy).clamp(0, fb_height as i32 - 1);
+    CURSOR_X.store(new_x, Ordering::SeqCst);
+    CURSOR_Y.store(new_y, Ordering::SeqCst);
+
+    let was_down = LEFT_BUTTON_DOWN.swap(left_down, Ordering::SeqCst);
+    let press_edge = left_down && !was_down;
+
+    unsafe {
+        if press_edge {
+            if let Some(target) = topmost_titlebar_at(new_x, new_y) {
+                if let Some(w) = find_mut(target) {
+                    klog_info!("WINDOW_DRAG_START surface={}", target);
+                    DRAGGING = Some((target, new_x - w.x, new_y - w.y));
+                }
+            } else if let Some(target) = topmost_content_at(new_x, new_y) {
+                klog_info!("WINDOW_CLICK_FOCUS surface={}", target);
+                crate::input_routing::set_focus(target);
+            }
+        }
+        if !left_down {
+            DRAGGING = None;
+        }
+        if let Some((dragging_object, off_x, off_y)) = DRAGGING {
+            move_window(dragging_object, new_x - off_x, new_y - off_y, fb_width, fb_height);
+        }
+
+        present(fb_phys_base, ppsl, fb_width, fb_height); // also redraws the cursor on top, see present's own doc
+    }
 }

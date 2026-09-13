@@ -1,0 +1,23 @@
+[package]
+name = "mouse_driver"
+version = "0.1.0"
+edition = "2021"
+
+# Real GUI mouse support: a real, capability-isolated ring-3 PS/2 mouse
+# driver, same discipline as user_rs/keyboard_driver -- blocks on a
+# real InterruptLine capability for IRQ12, reads the real 8042
+# auxiliary-port data via its own granted PortIoRange, decodes the
+# real 3-byte relative-motion packet, and reports it to the kernel's
+# own window-manager policy (SYS_MOUSE_REPORT) for real cursor
+# movement, click-to-focus, and window dragging.
+[dependencies]
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

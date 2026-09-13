@@ -16,6 +16,12 @@ const PIC2_DATA: u16 = 0xA1;
 /// no collision.
 pub const KEYBOARD_VECTOR: u8 = 0x21;
 
+/// IRQ12 (PS/2 mouse, the second 8042 auxiliary port) after the same
+/// 0x20/0x28 remap -- offset2(0x28) + (IRQ12 - 8) = 0x2C. Real GUI
+/// mouse support (cursor, click-to-focus, window dragging) needs this;
+/// see `mouse_driver.rs`'s own module doc.
+pub const MOUSE_VECTOR: u8 = 0x2C;
+
 const ICW1_INIT: u8 = 0x10;
 const ICW1_ICW4: u8 = 0x01;
 const ICW4_8086: u8 = 0x01;

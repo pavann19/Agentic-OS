@@ -32,6 +32,7 @@ pub mod elf;
 pub mod fault_isolation_demo;
 pub mod file_manager; // Phase 13 deliverable 4 -- third real reference app spawn code, see its own module doc
 pub mod file_service; // real block/file-I/O-for-apps path (IPC-mediated), see its own module doc
+pub mod mouse_driver; // real GUI mouse support (PS/2, IRQ12), see its own module doc
 pub mod init;
 pub mod events;
 pub mod interrupt_forward;
@@ -104,6 +105,29 @@ const KERNEL_VIRTUAL_BASE: u64 = vmm::KERNEL_VIRTUAL_BASE;
 
 fn vaddr_of(sym: &u8) -> u64 {
     sym as *const u8 as u64
+}
+
+/// Real, disclosed GUI chrome: a real light-gray desktop background
+/// plus a real, fixed top menu bar (white, with a real "Agentic OS"
+/// label) -- the classic-Mac-System look this desktop now goes for.
+/// Real, disclosed scope: this is fixed, static chrome (the menu bar
+/// never opens real dropdown menus yet) -- a real, honest visual
+/// improvement, not a functional Finder-style menu system.
+const DESKTOP_BG_COLOR: u32 = 0x00C0_C0C0;
+const MENU_BAR_COLOR: u32 = 0x00FF_FFFF;
+const MENU_BAR_HEIGHT: u32 = 20;
+
+unsafe fn draw_desktop_chrome(fb_phys_base: u64, ppsl: u32, width: u32, height: u32) {
+    // Real, disclosed fix for the reported "boot splash still visible"
+    // bug (see this call site's own earlier history): a real,
+    // whole-screen clear before anything else draws -- now a light
+    // gray desktop instead of plain black, for the classic-Mac look.
+    text::clear_screen(fb_phys_base, ppsl, width, height, DESKTOP_BG_COLOR);
+    // Real top menu bar: a solid white strip layered over the desktop
+    // background (clear_screen fills from (0,0), so calling it again
+    // with just the bar's own height re-fills only that top strip).
+    text::clear_screen(fb_phys_base, ppsl, width, MENU_BAR_HEIGHT, MENU_BAR_COLOR);
+    text::draw_text(fb_phys_base, ppsl, 4, 2, b"Agentic OS", 0x0000_0000, MENU_BAR_COLOR, 0, 0, width, MENU_BAR_HEIGHT);
 }
 
 #[no_mangle]
@@ -220,6 +244,13 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     // pic.rs's own "APIC timer only" reasoning above (this clears
     // exactly one bit).
     pic::unmask_irq(1);
+    // Real GUI mouse support: IRQ12 (PS/2 mouse, the 8042's auxiliary
+    // port) lives on the SLAVE PIC -- a slave-PIC line also needs its
+    // own cascade line (IRQ2) unmasked on the MASTER PIC, or the
+    // slave's own interrupts never reach the CPU at all regardless of
+    // IRQ12 itself being unmasked (standard dual-8259 cascade wiring).
+    pic::unmask_irq(2);
+    pic::unmask_irq(12);
     klog_info!("TIMER_INIT_START");
     apic::init();
     // Phase 9: configure the BSP's own SYSCALL/SYSRET MSRs unconditionally,
@@ -357,7 +388,8 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             // whatever a surface/window draws stays boot-splash content
             // forever. One real, whole-screen clear before anything else
             // draws.
-            text::clear_screen(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height, 0);
+            draw_desktop_chrome(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height);
+            mouse_driver::spawn();
             compositor::spawn(compositor::FbParams {
                 phys_base: fb.base_address as u64,
                 size: fb.buffer_size,
@@ -392,7 +424,8 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             // visible behind TERMINAL_EMULATOR_READY" bug -- see the
             // identical clear_screen call in the compositor_demo branch
             // above for the full explanation.
-            text::clear_screen(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height, 0);
+            draw_desktop_chrome(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height);
+            mouse_driver::spawn();
             terminal::spawn(compositor::FbParams {
                 phys_base: fb.base_address as u64,
                 size: fb.buffer_size,
@@ -406,7 +439,8 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         #[cfg(feature = "text_editor_demo")]
         {
             text::init(info.payload.font);
-            text::clear_screen(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height, 0);
+            draw_desktop_chrome(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height);
+            mouse_driver::spawn();
             text_editor::spawn(compositor::FbParams {
                 phys_base: fb.base_address as u64,
                 size: fb.buffer_size,
@@ -424,7 +458,8 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         #[cfg(feature = "file_manager_demo")]
         {
             text::init(info.payload.font);
-            text::clear_screen(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height, 0);
+            draw_desktop_chrome(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height);
+            mouse_driver::spawn();
             file_manager::spawn(compositor::FbParams {
                 phys_base: fb.base_address as u64,
                 size: fb.buffer_size,

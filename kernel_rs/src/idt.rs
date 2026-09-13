@@ -247,6 +247,21 @@ extern "x86-interrupt" fn h_keyboard(_frame: InterruptStackFrame) {
     crate::thread::schedule();
 }
 
+/// Vector 0x2C (`pic::MOUSE_VECTOR`) -- real PS/2 mouse (IRQ12, the
+/// 8042's second/auxiliary port), same minimal-ISR discipline as
+/// `h_keyboard` right above: real hardware EOI (IRQ12 lives on the
+/// SLAVE PIC, so `send_eoi(12)` acknowledges BOTH PICs -- see that
+/// function's own doc), wake whatever's blocked in `interrupt_forward::
+/// wait_for_interrupt`, nothing else. The actual mouse-packet read
+/// (port 0x60) is left entirely to the real ring-3 driver
+/// (`user_rs/mouse_driver`), which holds the actual `PortIoRange`
+/// capability for it.
+extern "x86-interrupt" fn h_mouse(_frame: InterruptStackFrame) {
+    crate::interrupt_forward::notify(crate::pic::MOUSE_VECTOR);
+    crate::pic::send_eoi(12);
+    crate::thread::schedule();
+}
+
 /// Phase 9 deliverable 3 (`docs/ROADMAP.md` §5 — "IPI-based reschedule"):
 /// `smp::RESCHEDULE_VECTOR`, sent core-to-core via `apic::send_ipi_vector`
 /// (`smp::send_reschedule_ipi`). A real, ordinary interrupt like any
@@ -319,6 +334,11 @@ pub fn init() {
     set_entry(
         crate::pic::KEYBOARD_VECTOR as usize,
         h_keyboard as *const () as u64,
+        0,
+    );
+    set_entry(
+        crate::pic::MOUSE_VECTOR as usize,
+        h_mouse as *const () as u64,
         0,
     );
     // Phase 9 deliverables 3 and 4 -- real core-to-core IPI vectors.

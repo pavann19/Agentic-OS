@@ -31,6 +31,7 @@ $suite = @(
     @{ Name = "test-terminal";                 Script = "scripts\test-terminal.ps1" },
     @{ Name = "test-text-editor";              Script = "scripts\test-text-editor.ps1" },
     @{ Name = "test-file-manager";             Script = "scripts\test-file-manager.ps1" },
+    @{ Name = "test-mouse";                    Script = "scripts\test-mouse.ps1" },
     @{ Name = "test-manifest";                 Script = "scripts\test-manifest.ps1" },
     @{ Name = "test-installer";                Script = "scripts\test-installer.ps1" },
     @{ Name = "test-tcp-two-instance";         Script = "scripts\test-tcp-two-instance.ps1" },

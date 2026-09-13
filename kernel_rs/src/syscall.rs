@@ -156,6 +156,34 @@ fn kbd_cap() -> capability::CapId {
     KBD_CAP.load(core::sync::atomic::Ordering::SeqCst)
 }
 
+// Real GUI mouse support: the exact same "one fixed process, one
+// kernel-wide static table/capability pair" pattern as KBD_TABLE/
+// KBD_CAP right above -- `mouse_driver.rs` is the only process that
+// ever holds this InterruptLine capability, same as keyboard_driver.
+static mut MOUSE_TABLE: Option<capability::CapabilityTable> = None;
+static MOUSE_CAP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+pub fn init_mouse_capability() {
+    unsafe {
+        MOUSE_TABLE = Some(capability::CapabilityTable::new());
+        let table = (&mut *&raw mut MOUSE_TABLE).as_mut().unwrap();
+        let cap = driver::create_interrupt_capability(
+            table,
+            crate::pic::MOUSE_VECTOR,
+            capability::Rights::WAIT,
+        );
+        MOUSE_CAP.store(cap, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn mouse_table() -> &'static capability::CapabilityTable {
+    unsafe { (*(&raw const MOUSE_TABLE)).as_ref().unwrap() }
+}
+
+fn mouse_cap() -> capability::CapId {
+    MOUSE_CAP.load(core::sync::atomic::Ordering::SeqCst)
+}
+
 // Phase 5's agent-facing syscalls (7, 9) deliberately have NO dedicated
 // static table here, unlike syscalls 2-6 above: those all serve exactly
 // one fixed process each, so a single kernel-wide static table/capability
@@ -598,6 +626,41 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
             // SERVICE_REQUEST` returned; a1 = vaddr of a real
             // `FilePollRequest` in the CALLER's own mapped memory.
             crate::file_service::syscall_poll(vmm::current_cr3(), a0, a1)
+        }
+        20 => {
+            // Real GUI mouse support: SYS_MOUSE_WAIT_INTERRUPT -- same
+            // real, capability-gated block-until-IRQ12 mechanism
+            // syscall 5 already established for the keyboard, mirrored
+            // for the mouse's own fixed InterruptLine capability.
+            match driver::wait_interrupt(mouse_table(), mouse_cap()) {
+                Ok(()) => 0,
+                Err(_) => u64::MAX,
+            }
+        }
+        21 => {
+            // SYS_MOUSE_ACK_INTERRUPT -- mirrors syscall 6.
+            match driver::ack_interrupt(mouse_table(), mouse_cap()) {
+                Ok(()) => 0,
+                Err(_) => u64::MAX,
+            }
+        }
+        22 => {
+            // SYS_MOUSE_REPORT -- `mouse_driver` calls this once per
+            // real, decoded 3-byte PS/2 packet. a0 = packed real
+            // signed deltas and button state: `(dx as i16 as u16 as u64)
+            // | ((dy as i16 as u16 as u64) << 16) | (buttons as u64 <<
+            // 32)` (buttons bit 0 = left). This is NOT gated by a
+            // dedicated capability the way syscalls 2-6 are -- the
+            // same real, disclosed simplification `SYS_ROUTE_KEY_EVENT`
+            // (13) already carries (a single, fixed, shared mechanism,
+            // not yet a per-caller capability check); minting a real
+            // dedicated capability for the genuine mouse driver process
+            // specifically is real, separate follow-up work.
+            let dx = (a0 as u16) as i16;
+            let dy = ((a0 >> 16) as u16) as i16;
+            let buttons = ((a0 >> 32) as u8) & 0x1;
+            crate::window_manager::report_mouse(dx as i32, dy as i32, buttons != 0);
+            0
         }
         _ => {
             klog_info!("SYSCALL_UNKNOWN num={}", num);

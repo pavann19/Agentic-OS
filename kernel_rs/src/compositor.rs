@@ -125,6 +125,16 @@ pub unsafe fn set_fb_params_for_terminal(params: FbParams) {
     FB_PARAMS = Some(params);
 }
 
+/// Real GUI mouse support: `window_manager::report_mouse` needs the
+/// real framebuffer's own `(phys_base, pixels_per_scan_line, width,
+/// height)` to recomposite after a real mouse event, the same values
+/// every other syscall handler in this module already reads from
+/// `FB_PARAMS` -- exposed here rather than duplicating a second copy
+/// of this state in `window_manager.rs`.
+pub fn get_fb_params() -> Option<(u64, u32, u32, u32)> {
+    unsafe { (&*(&raw const FB_PARAMS)).as_ref().map(|p| (p.phys_base, p.pixels_per_scan_line, p.width, p.height)) }
+}
+
 /// Phase 9.5a's real respawn entry point, reused for the compositor
 /// (registered via `supervisor::register` in `main.rs`): re-invokes the
 /// SAME thread entry point `spawn` used the first time, reading the SAME
