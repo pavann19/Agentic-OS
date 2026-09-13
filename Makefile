@@ -57,8 +57,22 @@ image: bootloader kernel
 	cp "$(KERNEL_ELF)" "$(FATDIR)/kernel.elf"
 	cp font.psf "$(FATDIR)/font.psf"
 
+# WHPX (Windows Hypervisor Platform) hardware acceleration, not TCG software
+# emulation -- real, measured fix for the ~5s input lag under the old default
+# (see kernel_rs/src/thread.rs's switch_to/thread_trampoline doc comments for
+# the real scheduler race this exposed and the fix, verified via 15/15 clean
+# WHPX boots + the full TCG regression suite). WHPX requires
+# kernel-irqchip=on (split is unsupported by WHPX) plus a real IOMMU device
+# (kernel_rs/src/iommu.rs's own hard dependency once a device is assigned),
+# matching the exact flags used in that verification. Requires "Windows
+# Hypervisor Platform" enabled in Windows Features (Turn Windows features on
+# or off) -- same mechanism as Hyper-V/WSL2, not risky to enable. Automated
+# test scripts under scripts/ stay on TCG: several rely on
+# kernel-irqchip=split for IOMMU-dependent device-assignment tests, which
+# WHPX does not support.
 run-qemu: image
-	"$(QEMU)" -machine q35 -m 256M \
+	"$(QEMU)" -machine q35,accel=whpx,kernel-irqchip=on -m 256M \
+		-device intel-iommu,intremap=on \
 		-drive if=pflash,format=raw,readonly=on,file="$(OVMF_CODE)" \
 		-drive file=fat:rw:$(FATDIR),format=raw \
 		-serial stdio
