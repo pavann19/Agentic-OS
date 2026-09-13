@@ -11,7 +11,11 @@
 # checklist. Nothing here compiles them; `grep -r` them for reference only.
 
 CARGO      = cargo
-QEMU       = qemu-system-x86_64.exe
+# Full path, not a bare name: make's recipes run under MSYS2 sh, whose PATH
+# does not include the winget QEMU install dir even when it's on the
+# invoking PowerShell's own PATH (confirmed: "command not found" from sh
+# despite `qemu-system-x86_64.exe` working fine interactively).
+QEMU      ?= C:/Program Files/qemu/qemu-system-x86_64.exe
 # Bundled with the winget QEMU install (share/) — this build's stand-in for
 # OVMF; both are EDK2 firmware builds, this one just ships with QEMU itself.
 OVMF_CODE ?= C:/Program Files/qemu/share/edk2-x86_64-code.fd
