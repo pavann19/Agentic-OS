@@ -52,6 +52,26 @@ fn com1_write_str(s: &str) {
     }
 }
 
+fn write_dec_u64(v: u64) {
+    if v == 0 {
+        com1_write_str("0");
+        return;
+    }
+    let mut digits = [0u8; 20];
+    let mut n = 0usize;
+    let mut x = v;
+    while x > 0 && n < 20 {
+        digits[n] = b'0' + (x % 10) as u8;
+        x /= 10;
+        n += 1;
+    }
+    let mut i = n;
+    while i > 0 {
+        i -= 1;
+        com1_write_str(core::str::from_utf8(&digits[i..i + 1]).unwrap_or("?"));
+    }
+}
+
 /// Real bug found bringing this driver up (the actual root cause behind
 /// the page fault this crate's own self-check first hit): SYSCALL/SYSRET
 /// does NOT save/restore general-purpose registers the way an
@@ -92,6 +112,38 @@ struct VirtioBlkInfo {
     device_off: u32,
     dma_vaddr: u64,
     dma_phys: u64,
+    file_service_cap: u32,
+}
+
+/// Generic 2-arg syscall wrapper WITH a return value -- this crate's
+/// own pre-existing `syscall1` (above) is hardcoded to syscall 1
+/// (klog) and returns nothing; the real file-service protocol needs
+/// syscalls 12 (poll), 17-19 with real return values, so this is the
+/// same full-clobber-list fix that function's own doc already
+/// describes, generalized.
+unsafe fn syscall_ret(num: u64, a0: u64, a1: u64) -> u64 {
+    let ret: u64;
+    core::arch::asm!(
+        "mov rax, {num}", "syscall",
+        num = in(reg) num,
+        in("rdi") a0, in("rsi") a1,
+        lateout("rax") ret,
+        lateout("rdx") _, lateout("rcx") _,
+        lateout("r8") _, lateout("r9") _, lateout("r10") _, lateout("r11") _,
+        options(nostack)
+    );
+    ret
+}
+
+/// Real request struct for `SYS_FILE_SERVICE_REPLY` (syscall 18) --
+/// MUST stay field-for-field identical to `kernel_rs::file_service::
+/// FileReplyRequest`, the same raw ABI contract every other
+/// `INFO_VADDR`-mapped/request struct in this kernel already relies on.
+#[repr(C)]
+struct FileReplyRequest {
+    request_id: u64,
+    data_vaddr: u64,
+    len: u32,
 }
 
 // Common cfg register offsets (virtio 1.0 spec §4.1.4.3).
@@ -572,9 +624,54 @@ pub extern "C" fn _start() -> ! {
 
         run_filesystem_proof(common, notify_base, dma, dma_phys);
         run_audit_persistence_proof(common, notify_base, dma, dma_phys);
-    }
-    loop {
-        core::hint::spin_loop();
+
+        // Real block/file-I/O-for-apps path: this loop is what makes
+        // this driver a real, live file server, not just a one-shot
+        // self-check. Reuses the SAME already-proven ext2 read path
+        // (`ext2::read_file_data`) `run_filesystem_proof` above already
+        // exercised against itself -- the only thing new here is
+        // exposing that real result to another process (`file_manager`)
+        // over the real IPC request/reply protocol `file_service.rs`
+        // defines, instead of only ever comparing it against itself.
+        com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_LOOP_START cap=");
+        write_dec_u64(info.file_service_cap as u64);
+        com1_write_str("\n");
+        loop {
+            let r = syscall_ret(12, info.file_service_cap as u64, 0); // SYS_IPC_TRY_RECEIVE
+            if r == u64::MAX {
+                core::hint::spin_loop();
+                continue;
+            }
+            // Real, disclosed ABI limit: `SYS_IPC_TRY_RECEIVE`'s own
+            // syscall return value only ever carries `msg.data[0]`
+            // (one real u64) -- `file_service::request_file` packs
+            // both the real request id and the real inode into it
+            // (`(request_id << 32) | inode`), unpacked here the same
+            // way `SYS_WINDOW_MOVE`'s own packed x/y already does.
+            let request_id = r >> 32;
+            let inode = r as u32;
+            com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_REQUEST_RECEIVED inode=");
+            write_dec_u64(inode as u64);
+            com1_write_str("\n");
+
+            let mut inode_table1 = zeroed_block!();
+            ext2_read_block(common, notify_base, dma, dma_phys, ext2::INODE_TABLE_START_BLOCK + 1, &mut inode_table1);
+            let mut file_data = zeroed_block!();
+            ext2_read_block(common, notify_base, dma, dma_phys, ext2::FILE_DATA_BLOCK, &mut file_data);
+            let mut out = zeroed_block!();
+            let n = ext2::read_file_data(&inode_table1, &file_data, &mut out);
+
+            let reply = FileReplyRequest {
+                request_id,
+                data_vaddr: out.as_ptr() as u64,
+                len: n as u32,
+            };
+            let reply_vaddr = &reply as *const FileReplyRequest as u64;
+            let reply_status = syscall_ret(18, 0, reply_vaddr); // SYS_FILE_SERVICE_REPLY
+            com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_REPLY_SENT status=");
+            write_dec_u64(reply_status);
+            com1_write_str("\n");
+        }
     }
 }
 

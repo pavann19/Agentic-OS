@@ -40,6 +40,10 @@ struct VirtioBlkInfo {
     device_off: u32,
     dma_vaddr: u64,
     dma_phys: u64,
+    // Real block/file-I/O-for-apps path (`file_service.rs`): this
+    // driver's own real receive-side IpcEndpoint CapId for real
+    // file-content requests from other processes (e.g. `file_manager`).
+    file_service_cap: u32,
 }
 
 /// Finds the real virtio-blk PCI device from an already-completed
@@ -231,6 +235,15 @@ extern "C" fn virtio_blk_driver_thread() {
         let domain = iommu::assign_device(p.bus, p.device, p.function, &[(dma_phys, 4096)]);
         klog_info!("VIRTIO_BLK_IOMMU_DOMAIN_ASSIGNED device={:02x}:{:02x}.{} domain={}", p.bus, p.device, p.function, domain.0);
 
+        // Real block/file-I/O-for-apps path: this driver becomes the
+        // one real file-serving process other apps (e.g. `file_manager`)
+        // can request real file content from, over the exact same real
+        // IPC mechanism `input_routing::register_window_input` already
+        // established for routed keyboard input -- see `file_service.rs`'s
+        // own module doc.
+        let file_service_cap = crate::file_service::register_server();
+        klog_info!("VIRTIO_BLK_FILE_SERVICE_CAP={}", file_service_cap);
+
         // The real, minimal boot-time ABI -- same fixed-vaddr pattern
         // every other driver in this kernel already uses.
         let info_phys = pmm::alloc_page();
@@ -246,6 +259,7 @@ extern "C" fn virtio_blk_driver_thread() {
                 device_off: p.device_off,
                 dma_vaddr: DMA_VADDR,
                 dma_phys,
+                file_service_cap,
             },
         );
         vmm::map_page_in(

@@ -81,6 +81,7 @@ installer_demo = []
 # scripts/test-terminal.ps1.
 terminal_demo = []
 text_editor_demo = []
+file_manager_demo = []
 
 [profile.dev]
 panic = "abort"

@@ -30,6 +30,8 @@ pub mod driver;
 pub mod e1000;
 pub mod elf;
 pub mod fault_isolation_demo;
+pub mod file_manager; // Phase 13 deliverable 4 -- third real reference app spawn code, see its own module doc
+pub mod file_service; // real block/file-I/O-for-apps path (IPC-mediated), see its own module doc
 pub mod init;
 pub mod events;
 pub mod interrupt_forward;
@@ -413,7 +415,25 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
                 pixels_per_scan_line: fb.pixels_per_scan_line,
             });
         }
-        #[cfg(not(any(feature = "compositor_demo", feature = "terminal_demo", feature = "text_editor_demo")))]
+        // Phase 13 deliverable 4: the file_manager reference app -- same
+        // sole-keyboard-focus exclusion as the other demos above. Needs
+        // a real virtio-blk device actually attached to show real
+        // content (see scripts/test-file-manager.ps1); otherwise it
+        // reports "NO FILE SERVER REGISTERED" honestly rather than
+        // showing anything fake.
+        #[cfg(feature = "file_manager_demo")]
+        {
+            text::init(info.payload.font);
+            text::clear_screen(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height, 0);
+            file_manager::spawn(compositor::FbParams {
+                phys_base: fb.base_address as u64,
+                size: fb.buffer_size,
+                width: fb.width,
+                height: fb.height,
+                pixels_per_scan_line: fb.pixels_per_scan_line,
+            });
+        }
+        #[cfg(not(any(feature = "compositor_demo", feature = "terminal_demo", feature = "text_editor_demo", feature = "file_manager_demo")))]
         user_driver::spawn_framebuffer_driver(
             fb.base_address as u64,
             fb.buffer_size,

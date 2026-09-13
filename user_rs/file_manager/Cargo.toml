@@ -1,0 +1,27 @@
+[package]
+name = "file_manager"
+version = "0.1.0"
+edition = "2021"
+
+# Phase 13 deliverable 4: the third real reference app -- the first to
+# do real disk I/O from a non-driver process, over the real block/file
+# service protocol `kernel_rs::file_service` defines (a request/reply
+# IPC round trip to `virtio_blk_driver`, which serves it using its own
+# already-proven real ext2 read path). Real, disclosed scope: this
+# kernel's real on-disk filesystem holds exactly one real file today,
+# so this is a real single-file viewer, not yet a multi-file directory
+# browser -- listing multiple real files is real, separate follow-up
+# work once the filesystem itself grows past one, disclosed rather
+# than faked with an invented directory listing.
+[dependencies]
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+agentic_sdk = { path = "../agentic_sdk" }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

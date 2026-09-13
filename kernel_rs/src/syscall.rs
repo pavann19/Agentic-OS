@@ -578,6 +578,27 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
             };
             crate::compositor::syscall_present_window(a0 as capability::CapId, dirty)
         }
+        17 => {
+            // Real block/file-I/O-for-apps path: SYS_FILE_SERVICE_REQUEST
+            // -- a0 = the real ext2 inode number to request (see
+            // `file_service.rs`'s own module doc). Returns a real
+            // request id (poll for it via syscall 19), or 0 if no
+            // serving process has ever registered.
+            crate::file_service::request_file(a0 as u32)
+        }
+        18 => {
+            // SYS_FILE_SERVICE_REPLY -- called by the SERVING process
+            // (e.g. `virtio_blk_driver`) only. a1 = vaddr of a real
+            // `FileReplyRequest` in the CALLER's own mapped memory.
+            crate::file_service::syscall_reply(vmm::current_cr3(), a1)
+        }
+        19 => {
+            // SYS_FILE_SERVICE_POLL -- called by the REQUESTING process
+            // (e.g. `file_manager`). a0 = the request id `SYS_FILE_
+            // SERVICE_REQUEST` returned; a1 = vaddr of a real
+            // `FilePollRequest` in the CALLER's own mapped memory.
+            crate::file_service::syscall_poll(vmm::current_cr3(), a0, a1)
+        }
         _ => {
             klog_info!("SYSCALL_UNKNOWN num={}", num);
             u64::MAX
