@@ -15,7 +15,7 @@
 //! `main.rs`'s own spawn site and `scripts/test-compositor.ps1`.
 
 use crate::capability::{self, CapabilityTable, Rights};
-use crate::{driver, gdt, klog_info, pmm, ring3, syscall, thread, vmm};
+use crate::{driver, gdt, klog_info, pmm, ring3, syscall, thread, vmm, window_manager};
 
 const DRIVER_STACK_VADDR: u64 = 0x0000_0000_0070_0000;
 const INFO_VADDR: u64 = 0x0000_0000_0051_0000;
@@ -179,13 +179,23 @@ unsafe fn spawn_window_client(label: u8, x: u32, y: u32, color: u32) {
     let input_cap = crate::input_routing::register_window_input(surface_object);
     // Real, kernel-side (never process-self-declared) initial focus:
     // whichever window is labeled the primary one ('A') starts
-    // focused, a fixed, disclosed convention -- there is no window
-    // manager or click-to-focus yet (this module's own doc). The
-    // window process itself has no way to call this -- it isn't
-    // exposed as a syscall at all in this increment.
+    // focused, a fixed, disclosed convention -- there is no
+    // click-to-focus yet (no mouse in this kernel, this module's own
+    // doc). The window process itself has no way to call this -- it
+    // isn't exposed as a syscall at all in this increment.
     if label == b'A' {
         crate::input_routing::set_focus(surface_object);
     }
+
+    // Real window object: this Surface capability's content is now
+    // backed by its OWN in-memory buffer, composited onto the real
+    // framebuffer by `window_manager::present` -- the previous "draw
+    // directly onto the real framebuffer at a fixed baked-in position"
+    // model is gone for this window; `x`/`y` here is only its real
+    // INITIAL screen position, not a permanent one (see `move_window`).
+    let mut title = [0u8; 1];
+    title[0] = label;
+    crate::window_manager::register(surface_object, x as i32, y as i32, SURFACE_SIZE, SURFACE_SIZE, &title);
 
     let mut table = CapabilityTable::new();
     let com1_cap = driver::create_port_capability(&mut table, 0x3F8, 8, Rights::PORT_IO);
@@ -238,12 +248,31 @@ pub fn syscall_fill_surface(cap_id: capability::CapId, color: u32) -> u64 {
             Some(p) => p,
             None => return u64::MAX,
         };
-        let ppsl = params.pixels_per_scan_line as u64;
-        for py in y..y + height {
-            for px in x..x + width {
-                let byte_offset = (py as u64 * ppsl + px as u64) * 4;
-                let vaddr = vmm::map_mmio_page(params.phys_base + byte_offset);
-                core::ptr::write_volatile(vaddr as *mut u32, color);
+        // Real window object path: this Surface is backed by its own
+        // in-memory buffer (`window_manager`) -- fill THAT only.
+        // Real, disclosed latency fix: this used to recomposite the
+        // ENTIRE window (content + title bar, tens of thousands of
+        // pixels) onto the real framebuffer on every single call --
+        // fine for a one-shot startup fill, but the terminal's own
+        // per-keystroke redraw makes up to 9 of these calls (one per
+        // visible line plus the current line) for ONE keystroke, which
+        // measured as real, user-visible input lag. Presenting is now
+        // a separate, explicit step (`SYS_SURFACE_PRESENT`, syscall
+        // 16) a caller invokes ONCE after a whole batch of fill/
+        // draw_text calls, not once per call. Falls back to the legacy
+        // direct framebuffer write only for a Surface nothing ever
+        // registered as a window (none exist in practice -- every real
+        // caller of this syscall gets registered at spawn time).
+        if window_manager::fill(cap.object_id, color) {
+            // buffer updated; caller presents explicitly
+        } else {
+            let ppsl = params.pixels_per_scan_line as u64;
+            for py in y..y + height {
+                for px in x..x + width {
+                    let byte_offset = (py as u64 * ppsl + px as u64) * 4;
+                    let vaddr = vmm::map_mmio_page(params.phys_base + byte_offset);
+                    core::ptr::write_volatile(vaddr as *mut u32, color);
+                }
             }
         }
     }
@@ -321,21 +350,99 @@ pub fn syscall_draw_text(cap_id: capability::CapId, request_vaddr: u64) -> u64 {
             Some(p) => p,
             None => return u64::MAX,
         };
-        crate::text::draw_text(
-            params.phys_base,
-            params.pixels_per_scan_line,
-            sx + req.x,
-            sy + req.y,
-            &text_buf[..text_len],
-            req.fg,
-            req.bg,
-            sx,
-            sy,
-            swidth,
-            sheight,
-        );
+        // Real window object path (see `syscall_fill_surface`'s own
+        // doc, including why presenting is now a separate explicit
+        // step and not automatic here): draw into this Surface's own
+        // backing buffer at LOCAL coordinates only. Falls back to the
+        // legacy direct-framebuffer-at-absolute-coordinates path for a
+        // Surface with no registered window.
+        if window_manager::draw_text(cap.object_id, req.x, req.y, &text_buf[..text_len], req.fg, req.bg) {
+            // buffer updated; caller presents explicitly
+        } else {
+            crate::text::draw_text(
+                params.phys_base,
+                params.pixels_per_scan_line,
+                sx + req.x,
+                sy + req.y,
+                &text_buf[..text_len],
+                req.fg,
+                req.bg,
+                sx,
+                sy,
+                swidth,
+                sheight,
+            );
+        }
     }
     klog_info!("SYSCALL_SURFACE_DRAW_TEXT_OK cap={} rect=({},{},{},{})", cap_id, sx, sy, swidth, sheight);
+    0
+}
+
+/// Real SYS_WINDOW_MOVE handler: `cap_id` = the CALLER's own CapId for
+/// its Surface, `new_x`/`new_y` = the real requested screen position.
+/// Same per-process isolation as every other syscall here -- the
+/// capability is resolved against the CALLING thread's own cap_table
+/// only, so a process can only ever move ITS OWN window, never another
+/// process's. Immediately recomposites so the move is visible in the
+/// very next frame, not just recorded.
+pub fn syscall_move_window(cap_id: capability::CapId, new_x: i32, new_y: i32) -> u64 {
+    let cap = match thread::resolve_current_capability(cap_id, Rights::MAP) {
+        Ok(c) => c,
+        Err(_) => {
+            klog_info!("SYSCALL_WINDOW_MOVE_DENIED cap={}", cap_id);
+            return u64::MAX;
+        }
+    };
+    match capability::object_kind(cap.object_id) {
+        Some(capability::KernelObjectKind::Surface { .. }) => {}
+        _ => {
+            klog_info!("SYSCALL_WINDOW_MOVE_WRONG_KIND cap={}", cap_id);
+            return u64::MAX;
+        }
+    }
+    unsafe {
+        let params = match (&*(&raw const FB_PARAMS)).as_ref() {
+            Some(p) => p,
+            None => return u64::MAX,
+        };
+        if !window_manager::move_window(cap.object_id, new_x, new_y, params.width, params.height) {
+            klog_info!("SYSCALL_WINDOW_MOVE_NOT_A_WINDOW cap={}", cap_id);
+            return u64::MAX;
+        }
+        window_manager::present(params.phys_base, params.pixels_per_scan_line, params.width, params.height);
+    }
+    0
+}
+
+/// Real SYS_SURFACE_PRESENT handler: `cap_id` = the CALLER's own CapId
+/// for its Surface. Recomposites ONLY the caller's own window onto the
+/// real framebuffer -- the real fix for the reported per-keystroke
+/// input lag (see `syscall_fill_surface`'s own doc): a caller now does
+/// a whole batch of `SYS_SURFACE_FILL`/`SYS_SURFACE_DRAW_TEXT` calls
+/// (cheap RAM writes into its own window buffer) and presents exactly
+/// ONCE at the end, instead of once per call.
+pub fn syscall_present_window(cap_id: capability::CapId) -> u64 {
+    let cap = match thread::resolve_current_capability(cap_id, Rights::MAP) {
+        Ok(c) => c,
+        Err(_) => {
+            klog_info!("SYSCALL_SURFACE_PRESENT_DENIED cap={}", cap_id);
+            return u64::MAX;
+        }
+    };
+    match capability::object_kind(cap.object_id) {
+        Some(capability::KernelObjectKind::Surface { .. }) => {}
+        _ => {
+            klog_info!("SYSCALL_SURFACE_PRESENT_WRONG_KIND cap={}", cap_id);
+            return u64::MAX;
+        }
+    }
+    unsafe {
+        let params = match (&*(&raw const FB_PARAMS)).as_ref() {
+            Some(p) => p,
+            None => return u64::MAX,
+        };
+        window_manager::present(params.phys_base, params.pixels_per_scan_line, params.width, params.height);
+    }
     0
 }
 

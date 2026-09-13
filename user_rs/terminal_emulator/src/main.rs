@@ -74,6 +74,7 @@ pub extern "C" fn _start() -> ! {
         let mut current_len: usize = 0;
 
         surface::draw_text(info.surface_cap, 0, 0, b"TERMINAL_EMULATOR_READY", FG, BG);
+        surface::present(info.surface_cap);
         syscall1(4, info.ready_token); // SYS FB_READY-style signal, same real mechanism compositor.rs's own clients use
 
         let mut typed_total: u64 = 0;
@@ -109,6 +110,15 @@ pub extern "C" fn _start() -> ! {
             }
             (*history_ptr).render(info.surface_cap, 16, FG, BG);
             surface::draw_text(info.surface_cap, 0, (LINES as u32) * 16, &current[..current_len], FG, BG);
+            // Real, disclosed latency fix: `render` above issues up to
+            // `LINES` separate SYS_SURFACE_DRAW_TEXT calls, plus one
+            // more for the current line -- each used to trigger its OWN
+            // full window recomposite (title bar + all 320x200 content
+            // pixels), so ONE keystroke could cost up to 9 full-window
+            // redraws. All of those calls now only touch this window's
+            // own in-memory buffer; presenting exactly once here is the
+            // real fix for the reported per-keystroke input lag.
+            surface::present(info.surface_cap);
             com1::write_str("[TERMINAL_EMULATOR] KEY_ECHOED ascii=");
             com1::write_dec_u64(ascii as u64);
             com1::write_str("\n");

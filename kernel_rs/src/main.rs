@@ -77,6 +77,7 @@ pub mod usb_xhci; // Phase 11 -- real xHCI (USB) host controller discovery, see 
 pub mod virtio_blk;
 pub mod virtio_net;
 pub mod vmm;
+pub mod window_manager; // real window objects (movable, own backing buffer, title bar), see its own module doc
 
 use bootinfo::BootInfo;
 use vmm::KernelSegment;
@@ -341,6 +342,13 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             // boot_rs since Phase 0 (`bootinfo::BootInfoPayload::font`)
             // but never used by kernel_rs until now.
             text::init(info.payload.font);
+            // Real, disclosed fix: UEFI/TianoCore's own boot splash is
+            // still sitting in the real GOP framebuffer at this point --
+            // nothing before this ever cleared it, so any pixel outside
+            // whatever a surface/window draws stays boot-splash content
+            // forever. One real, whole-screen clear before anything else
+            // draws.
+            text::clear_screen(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height, 0);
             compositor::spawn(compositor::FbParams {
                 phys_base: fb.base_address as u64,
                 size: fb.buffer_size,
@@ -371,6 +379,11 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         #[cfg(feature = "terminal_demo")]
         {
             text::init(info.payload.font);
+            // Real, disclosed fix for the reported "boot splash still
+            // visible behind TERMINAL_EMULATOR_READY" bug -- see the
+            // identical clear_screen call in the compositor_demo branch
+            // above for the full explanation.
+            text::clear_screen(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height, 0);
             terminal::spawn(compositor::FbParams {
                 phys_base: fb.base_address as u64,
                 size: fb.buffer_size,

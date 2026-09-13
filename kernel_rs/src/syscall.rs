@@ -533,6 +533,34 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
             // doc for the real bounds enforcement.
             crate::compositor::syscall_draw_text(a0 as capability::CapId, a1)
         }
+        15 => {
+            // Real window objects: SYS_WINDOW_MOVE -- a0 = the CALLER's
+            // own CapId for its Surface, a1 = the new real screen
+            // position packed as (x << 32) | (y & 0xFFFFFFFF), each
+            // half a real i32 (window positions are small and can go
+            // slightly negative during clamping math, hence signed --
+            // never negative by the time it reaches the framebuffer,
+            // `window_manager::move_window` clamps on-screen). Same
+            // per-process isolation as every other Surface syscall
+            // here: resolved only against the CALLING thread's own
+            // cap_table, so a process can only ever move its OWN
+            // window.
+            let new_x = ((a1 >> 32) as u32) as i32;
+            let new_y = (a1 as u32) as i32;
+            crate::compositor::syscall_move_window(a0 as capability::CapId, new_x, new_y)
+        }
+        16 => {
+            // Real, disclosed latency fix: SYS_SURFACE_PRESENT -- a0 =
+            // the CALLER's own CapId for its Surface. `SYS_SURFACE_FILL`
+            // (11) and `SYS_SURFACE_DRAW_TEXT` (14) now only write into
+            // that window's own in-memory buffer; nothing reaches the
+            // real framebuffer until this syscall recomposites it. A
+            // caller does a whole batch of fill/draw_text calls, then
+            // presents exactly once -- see `compositor::
+            // syscall_present_window`'s own doc for the real
+            // per-keystroke redraw cost this replaces.
+            crate::compositor::syscall_present_window(a0 as capability::CapId)
+        }
         _ => {
             klog_info!("SYSCALL_UNKNOWN num={}", num);
             u64::MAX

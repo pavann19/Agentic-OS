@@ -86,6 +86,24 @@ unsafe fn syscall_surface_fill(cap_id: u64, color: u64) -> u64 {
     ret
 }
 
+/// syscall(num=16, a0=CapId): SYS_SURFACE_PRESENT (`syscall.rs`). Real,
+/// disclosed latency fix shared with `terminal_emulator`: `SYS_SURFACE_
+/// FILL`/`SYS_SURFACE_DRAW_TEXT` now only write into this window's own
+/// in-memory buffer -- nothing reaches the real framebuffer until this
+/// is called once, after the whole fill+text batch below.
+unsafe fn syscall_present(cap_id: u64) -> u64 {
+    let ret: u64;
+    core::arch::asm!(
+        "mov rax, 16", "syscall",
+        in("rdi") cap_id,
+        lateout("rax") ret,
+        lateout("rsi") _, lateout("rdx") _, lateout("rcx") _,
+        lateout("r8") _, lateout("r9") _, lateout("r10") _, lateout("r11") _,
+        options(nostack)
+    );
+    ret
+}
+
 /// syscall(num=12, a0=CapId): SYS_IPC_TRY_RECEIVE (`syscall.rs`).
 /// Non-blocking -- returns u64::MAX immediately if nothing has been
 /// routed to this process's own input endpoint yet, real evidence a
@@ -197,6 +215,12 @@ pub extern "C" fn _start() -> ! {
         com1_write_str("[WINDOW_CLIENT_");
         com1_write_str(core::str::from_utf8(core::slice::from_ref(&info.label)).unwrap_or("?"));
         com1_write_str("] TEXT_DRAWN via SYS_SURFACE_DRAW_TEXT\n");
+
+        // Real, disclosed latency fix shared with terminal_emulator:
+        // the fill above plus both push_line/render draw_text calls
+        // only touched this window's own in-memory buffer -- present
+        // exactly once now that the whole startup batch is done.
+        syscall_present(info.surface_cap as u64);
 
         syscall4(0xC1E0_0000 | info.label as u64);
 

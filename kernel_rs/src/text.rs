@@ -119,6 +119,62 @@ unsafe fn blit_glyph(
     }
 }
 
+/// Real, bounds-checked glyph blit into an in-memory RGBA buffer
+/// (`buf`, row-major, `buf_width * buf_height` entries) instead of the
+/// real framebuffer -- used by `window_manager::present`'s per-window
+/// backing store so a window's own content/title-bar rendering never
+/// touches the real framebuffer directly; the framebuffer write happens
+/// exactly once per window per compositor pass, not once per glyph.
+#[allow(clippy::too_many_arguments)]
+unsafe fn blit_glyph_to_buffer(buf: &mut [u32], buf_width: u32, buf_height: u32, x: u32, y: u32, ch: u8, fg: u32, bg: u32) {
+    let Some(f) = font() else { return };
+    let glyph_offset = f.glyph_buffer_vaddr + (ch as u64) * (f.glyph_height as u64);
+    for row in 0..f.glyph_height {
+        let row_byte = core::ptr::read_volatile((glyph_offset + row as u64) as *const u8);
+        let py = y + row;
+        if py >= buf_height {
+            continue;
+        }
+        for col in 0..GLYPH_WIDTH {
+            let px = x + col;
+            if px >= buf_width {
+                continue;
+            }
+            let bit_set = (row_byte & (0x80 >> col)) != 0;
+            let color = if bit_set { fg } else { bg };
+            buf[(py * buf_width + px) as usize] = color;
+        }
+    }
+}
+
+/// Buffer-target counterpart of `draw_text` -- same left-to-right glyph
+/// advance, bounds-checked against the buffer's own `buf_width` /
+/// `buf_height` instead of a framebuffer clip rect.
+pub unsafe fn draw_text_to_buffer(buf: &mut [u32], buf_width: u32, buf_height: u32, x: u32, y: u32, text: &[u8], fg: u32, bg: u32) {
+    for (i, &ch) in text.iter().enumerate() {
+        let cx = x + (i as u32) * GLYPH_WIDTH;
+        blit_glyph_to_buffer(buf, buf_width, buf_height, cx, y, ch, fg, bg);
+    }
+}
+
+/// Real, disclosed fix for the boot-splash-lingers-behind-the-terminal
+/// bug: UEFI/TianoCore draws its own boot logo into the GOP framebuffer
+/// before this kernel ever runs, and nothing before this cleared it --
+/// a small drawn surface (e.g. the terminal's 320x200 window) only ever
+/// overwrites ITS OWN rectangle, so the boot splash remained visible in
+/// every pixel outside it. Clears the ENTIRE real framebuffer to
+/// `color` once at startup, before any surface/window is drawn -- a
+/// real, one-time, whole-screen fill via the same bounds-checked
+/// per-pixel path `put_pixel` already established (now cheap: see
+/// `vmm::map_mmio_page`'s own last-page cache).
+pub unsafe fn clear_screen(fb_phys_base: u64, pixels_per_scan_line: u32, width: u32, height: u32, color: u32) {
+    for y in 0..height {
+        for x in 0..width {
+            put_pixel(fb_phys_base, pixels_per_scan_line, x, y, color);
+        }
+    }
+}
+
 /// Real, bounds-checked text blit: draws `text` (a bounded byte slice —
 /// real, disclosed scope, ASCII/Latin-1 glyph indices only, matching
 /// PSF1's own 256-glyph table, no UTF-8 decoding) left-to-right

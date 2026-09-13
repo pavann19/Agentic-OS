@@ -3,7 +3,7 @@
 //! text rendering into a held `Surface` capability, bounds-checked by
 //! the kernel exactly like `SYS_SURFACE_FILL` (syscall 11) already is.
 
-use crate::syscall::syscall2;
+use crate::syscall::{syscall1, syscall2};
 
 /// MUST stay field-for-field identical to `kernel_rs::compositor::
 /// SurfaceTextRequest` — this is a raw, unchecked-by-the-compiler ABI
@@ -45,4 +45,14 @@ pub unsafe fn draw_text(surface_cap: u32, x: u32, y: u32, text: &[u8], fg: u32, 
     };
     let req_vaddr = &req as *const SurfaceTextRequest as u64;
     syscall2(14, surface_cap as u64, req_vaddr)
+}
+
+/// Real, disclosed latency fix: `SYS_SURFACE_FILL`/`SYS_SURFACE_DRAW_TEXT`
+/// only write into this window's own in-memory buffer now — nothing
+/// reaches the real, on-screen framebuffer until this is called. A
+/// caller should do a whole batch of fill/draw_text calls, then call
+/// this exactly ONCE (syscall 16, `SYS_SURFACE_PRESENT`) to make that
+/// batch visible in one real recomposite, not one per call.
+pub unsafe fn present(surface_cap: u32) -> u64 {
+    syscall1(16, surface_cap as u64)
 }

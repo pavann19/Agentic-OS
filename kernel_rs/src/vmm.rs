@@ -472,6 +472,22 @@ pub unsafe fn map_heap_page(vaddr: u64, paddr: u64) {
     map_page(KERNEL_PML4_PHYS, vaddr, paddr, PAGE_WRITABLE | PAGE_NO_EXECUTE);
 }
 
+/// Real, disclosed fast-path fix for the input-typing-lag report: every
+/// caller of `map_mmio_page` (framebuffer pixel writes, one call per
+/// pixel) used to walk/insert into the real page tables via `map_page`
+/// on EVERY SINGLE pixel, even though consecutive pixels in a redraw
+/// overwhelmingly fall in the SAME already-mapped 4KB page (the
+/// framebuffer's own linear layout puts ~1024 32bpp pixels per page).
+/// `map_page` is idempotent, so re-calling it for an already-mapped
+/// page was always correct, just needlessly slow -- a full 4-level walk
+/// per pixel for a single on-screen text redraw (thousands of pixels)
+/// is real, measurable latency between a keystroke and its echo. Fixed
+/// by remembering the single most-recently-mapped page's physical
+/// address and skipping the walk entirely when the next pixel's page is
+/// the same one -- correct because mappings here are permanent (never
+/// unmapped/moved once established), so a cache hit can never be stale.
+static LAST_MMIO_PAGE_PADDR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+
 /// Maps one MMIO page (e.g. the Local APIC) into the MMIO window at
 /// `MMIO_VIRTUAL_BASE + paddr`, RW+NX+cache-disabled — MMIO registers must
 /// never be cached, or writes/reads can silently hit a stale cache line
@@ -479,11 +495,14 @@ pub unsafe fn map_heap_page(vaddr: u64, paddr: u64) {
 pub unsafe fn map_mmio_page(paddr: u64) -> u64 {
     let page_paddr = paddr & !0xFFF;
     let vaddr = MMIO_VIRTUAL_BASE + page_paddr;
-    map_page(
-        KERNEL_PML4_PHYS,
-        vaddr,
-        page_paddr,
-        PAGE_WRITABLE | PAGE_NO_EXECUTE | PAGE_CACHE_DISABLE,
-    );
+    if LAST_MMIO_PAGE_PADDR.load(core::sync::atomic::Ordering::Relaxed) != page_paddr {
+        map_page(
+            KERNEL_PML4_PHYS,
+            vaddr,
+            page_paddr,
+            PAGE_WRITABLE | PAGE_NO_EXECUTE | PAGE_CACHE_DISABLE,
+        );
+        LAST_MMIO_PAGE_PADDR.store(page_paddr, core::sync::atomic::Ordering::Relaxed);
+    }
     vaddr + (paddr & 0xFFF)
 }

@@ -123,6 +123,15 @@ extern "C" fn terminal_thread() {
         // this demo, so it always gets focus.
         crate::input_routing::set_focus(surface_object);
 
+        // Real window object: the terminal's Surface is now backed by
+        // its own in-memory buffer (`window_manager`), composited onto
+        // the real framebuffer with a real title bar -- initial
+        // position leaves room above it for that bar (Track C's own
+        // "turn the compositor's blocks into real windows" follow-up,
+        // applied here too since the terminal is the first real
+        // reference app to use a Surface at all).
+        crate::window_manager::register(surface_object, 20, 20, SURFACE_WIDTH, SURFACE_HEIGHT, b"Terminal");
+
         let info_phys = pmm::alloc_page();
         let info_ptr = pmm::p2v_pub(info_phys) as *mut TerminalInfo;
         core::ptr::write(info_ptr, TerminalInfo { surface_cap: 0, input_cap, ready_token: READY_TOKEN });
