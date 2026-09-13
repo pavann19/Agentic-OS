@@ -630,8 +630,38 @@ extern "C" fn syscall_entry() {
         // fully atomic with respect to any other thread's own entry on
         // this core, regardless of what gets preempted in between.
         "swapgs",
-        "mov gs:[8], rsp",           // stash the user RSP in THIS core's own slot
-        "mov rsp, gs:[0]",           // switch onto THIS core's own current kernel stack
+        // Real bug found and fixed THIS session, root-caused live via
+        // `text_editor`'s own crash (a real ring-3 #PF, cr2 landing near
+        // a totally unrelated thread's own stack region): the OLD
+        // sequence here (`mov gs:[8], rsp` then later `mov rsp, gs:[8]`
+        // at exit) stashes the user RSP in ONE shared PER-CORE slot.
+        // That is safe ONLY as long as no other thread's own syscall
+        // entry can occur between THIS thread's entry and its own exit
+        // — true for an ordinary non-blocking syscall on its own (see
+        // this file's own earlier fix removing the unconditional `sti`
+        // during dispatch), but NOT when a DIFFERENT thread is
+        // currently sitting inside its own BLOCKING wait (`ipc::
+        // spin_yield`/`interrupt_forward::wait_for_interrupt`'s own
+        // narrow `sti; hlt; cli`) — interrupts ARE briefly live there,
+        // so a timer tick can let a THIRD thread's syscall run,
+        // overwrite this SAME shared slot, and hand the blocked
+        // thread's eventual `sysretq` a completely wrong stack pointer
+        // once it wakes and finishes. `terminal_emulator` apparently
+        // never won that race in testing; `text_editor`'s different
+        // syscall cadence (more calls per keystroke: fill/draw_text/
+        // present, not just one) did, reliably. Real fix: stash the
+        // user RSP on THIS THREAD'S OWN kernel stack instead of a
+        // shared per-core slot -- `gs:[0]` (`kernel_rsp`) is already
+        // updated to the CURRENT thread's own kernel stack top on
+        // every real context switch (`thread.rs::schedule_locked`,
+        // unconditionally, every switch), so a slot addressed relative
+        // to it is automatically per-thread, with zero extra
+        // bookkeeping: no two threads can ever collide on it, because
+        // no two threads ever share a kernel stack.
+        "mov r10, rsp",              // save the real user RSP in a scratch reg (r10 carries no syscall arg in this kernel's 3-arg ABI, free to clobber here)
+        "mov rsp, gs:[0]",           // switch onto THIS thread's own current kernel stack
+        "sub rsp, 8",                // reserve THIS thread's own one-slot stash, on ITS OWN stack -- never shared with any other thread
+        "mov [rsp], r10",            // stash the real user RSP there
         "swapgs",                    // restore user-GS-active state -- see the real bug this fixes, above
         "push rcx",                  // user RIP (SYSCALL-saved) — must survive to sysretq
         "push r11",                  // user RFLAGS (SYSCALL-saved) — same
@@ -750,7 +780,16 @@ extern "C" fn syscall_entry() {
         // narrow toggle-in/toggle-out here keeps it correct with
         // respect to any OTHER thread's entry on this same core too).
         "swapgs",
-        "mov rsp, gs:[8]",           // back onto the user's own stack (THIS core's own slot -- see entry)
+        // Real fix, matching entry's own new per-thread-stack stash
+        // (see entry's own doc comment above for the real cross-thread
+        // race this replaces): the stash lives at [rsp] right here --
+        // `call {dispatch}`'s own internal push/pop discipline is
+        // self-balanced, so rsp is back to EXACTLY where entry's `sub
+        // rsp, 8` left it, on THIS SAME THREAD's own kernel stack (never
+        // another thread's, unlike the old shared per-core `gs:[8]`).
+        "mov r10, [rsp]",            // recover the real user RSP from THIS thread's own stash slot
+        "add rsp, 8",                // give back the stash slot (about to leave this kernel stack anyway)
+        "mov rsp, r10",              // switch onto the user's own real stack
         "swapgs",                    // restore the user's own GS base before returning to ring 3
         "sysretq",
         dispatch = sym syscall_dispatch,

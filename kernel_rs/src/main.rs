@@ -69,6 +69,7 @@ pub mod socket_demo; // Phase 10 -- real adversarial Socket capability revocatio
 pub mod supervisor; // Phase 9.5a -- real crash-to-restart supervision, see its own module doc
 pub mod syscall;
 pub mod terminal; // Phase 13 deliverable 4 -- first real reference app spawn code, see its own module doc
+pub mod text_editor; // Phase 13 deliverable 4 -- second real reference app spawn code, see its own module doc
 pub mod text; // Phase 12 deliverable 4 -- minimal real PSF1 text rendering, see its own module doc
 pub mod thread;
 pub mod tools;
@@ -398,7 +399,21 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
                 pixels_per_scan_line: fb.pixels_per_scan_line,
             });
         }
-        #[cfg(not(any(feature = "compositor_demo", feature = "terminal_demo")))]
+        // Phase 13 deliverable 4: the text_editor reference app -- same
+        // sole-keyboard-focus exclusion as terminal_demo above.
+        #[cfg(feature = "text_editor_demo")]
+        {
+            text::init(info.payload.font);
+            text::clear_screen(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height, 0);
+            text_editor::spawn(compositor::FbParams {
+                phys_base: fb.base_address as u64,
+                size: fb.buffer_size,
+                width: fb.width,
+                height: fb.height,
+                pixels_per_scan_line: fb.pixels_per_scan_line,
+            });
+        }
+        #[cfg(not(any(feature = "compositor_demo", feature = "terminal_demo", feature = "text_editor_demo")))]
         user_driver::spawn_framebuffer_driver(
             fb.base_address as u64,
             fb.buffer_size,

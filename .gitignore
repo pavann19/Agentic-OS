@@ -64,5 +64,6 @@ user_rs/compositor_driver/target/
 user_rs/window_client_driver/target/
 user_rs/agentic_sdk/target/
 user_rs/terminal_emulator/target/
+user_rs/text_editor/target/
 _evidence/disk-authority-revoke-test.img
 _evidence/disk-authority-revoke-ahci.img

@@ -189,10 +189,11 @@ extern "x86-interrupt" fn h_page_fault(frame: InterruptStackFrame, error_code: u
     // bits, not just the raw values).
     let cr2 = read_cr2();
     klog_error!(
-        "EXCEPTION vector=14 (PAGE FAULT) error_code=0x{:x} cr2=0x{:x} rip=0x{:x} present={} write={} user={} instr_fetch={}",
+        "EXCEPTION vector=14 (PAGE FAULT) error_code=0x{:x} cr2=0x{:x} rip=0x{:x} rsp=0x{:x} present={} write={} user={} instr_fetch={}",
         error_code,
         cr2,
         frame.instruction_pointer,
+        frame.stack_pointer,
         error_code & 1 != 0,
         error_code & 2 != 0,
         error_code & 4 != 0,

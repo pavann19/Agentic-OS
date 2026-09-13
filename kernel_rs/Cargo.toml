@@ -80,6 +80,7 @@ installer_demo = []
 # keyboard focus). See terminal.rs's own module doc and
 # scripts/test-terminal.ps1.
 terminal_demo = []
+text_editor_demo = []
 
 [profile.dev]
 panic = "abort"

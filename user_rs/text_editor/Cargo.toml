@@ -1,0 +1,29 @@
+[package]
+name = "text_editor"
+version = "0.1.0"
+edition = "2021"
+
+# Phase 13 deliverable 4: the second real reference app, reusing
+# terminal_emulator's own proven pipeline (Surface + routed-input
+# capabilities, PSF1 text rendering, dirty-rect present) for a real
+# multi-line editing surface. Real, disclosed scope for THIS increment:
+# a genuine 2D cursor (arrows in all four directions) over a fixed-size
+# grid of editable rows, with real insert/delete-at-cursor -- what's
+# NOT here yet is disk-backed load/save (no block-device IPC service
+# exists in this kernel for a non-driver process to go through; AHCI/
+# virtio-blk access today is only ever a dedicated driver process's own
+# direct MMIO capability, not something mediated for arbitrary apps).
+# That's real, separate follow-up work, disclosed here rather than
+# faked with an in-memory stand-in pretending to be persistence.
+[dependencies]
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+agentic_sdk = { path = "../agentic_sdk" }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true
