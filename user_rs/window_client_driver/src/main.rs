@@ -96,8 +96,18 @@ unsafe fn syscall_present(cap_id: u64) -> u64 {
     core::arch::asm!(
         "mov rax, 16", "syscall",
         in("rdi") cap_id,
+        // Real, disclosed bug found and fixed testing this exact
+        // change: `a1` (rsi) selects full vs. partial present in the
+        // kernel's own dispatch (0 = full) -- `lateout("rsi") _` alone
+        // (this function's original form) never actually PASSES a
+        // value in, it only marks the register clobbered, so `a1`
+        // arrived as whatever garbage was already in rsi, which the
+        // kernel then (usually) misread as a bogus partial-present
+        // request instead of the intended full one. `in("rsi") 0u64`
+        // is what actually zeroes it.
+        in("rsi") 0u64,
         lateout("rax") ret,
-        lateout("rsi") _, lateout("rdx") _, lateout("rcx") _,
+        lateout("rdx") _, lateout("rcx") _,
         lateout("r8") _, lateout("r9") _, lateout("r10") _, lateout("r11") _,
         options(nostack)
     );

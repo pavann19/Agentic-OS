@@ -56,3 +56,16 @@ pub unsafe fn draw_text(surface_cap: u32, x: u32, y: u32, text: &[u8], fg: u32, 
 pub unsafe fn present(surface_cap: u32) -> u64 {
     syscall1(16, surface_cap as u64)
 }
+
+/// Real, disclosed partial-present fast path (see `kernel_rs::
+/// window_manager::present_partial`'s own doc): presents ONLY local
+/// rows `[y, y+height)` of this window's content -- no title bar, no
+/// other rows. Real, disclosed caller obligation: only correct when
+/// the caller KNOWS nothing else about this window (or any other
+/// window) changed since the last present -- e.g. a terminal that just
+/// updated one text line without scrolling. A caller unsure should use
+/// `present` instead.
+pub unsafe fn present_rect(surface_cap: u32, y: u32, height: u32) -> u64 {
+    let packed = ((y as u64) << 32) | (height.max(1) as u64);
+    syscall2(16, surface_cap as u64, packed)
+}

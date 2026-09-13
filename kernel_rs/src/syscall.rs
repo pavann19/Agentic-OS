@@ -559,7 +559,24 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
             // presents exactly once -- see `compositor::
             // syscall_present_window`'s own doc for the real
             // per-keystroke redraw cost this replaces.
-            crate::compositor::syscall_present_window(a0 as capability::CapId)
+            //
+            // a1 == 0: full recomposite (all windows, title bar
+            // included) -- the ONLY safe choice the first time a
+            // window appears, or after anything that could affect more
+            // than one row of ITS OWN content.
+            // a1 != 0: a real, disclosed partial-redraw fast path --
+            // packed as `(local_y << 32) | local_height`, both real
+            // u32s (a text row is always small and non-negative, no
+            // sign-extension concern here unlike SYS_WINDOW_MOVE's
+            // packed i32 halves) -- see `window_manager::
+            // present_partial`'s own doc for why this exists and its
+            // real, disclosed "no overlapping windows yet" scope limit.
+            let dirty = if a1 == 0 {
+                None
+            } else {
+                Some(((a1 >> 32) as u32, a1 as u32))
+            };
+            crate::compositor::syscall_present_window(a0 as capability::CapId, dirty)
         }
         _ => {
             klog_info!("SYSCALL_UNKNOWN num={}", num);

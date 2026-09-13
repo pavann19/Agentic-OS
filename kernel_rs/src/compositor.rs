@@ -270,10 +270,13 @@ pub fn syscall_fill_surface(cap_id: capability::CapId, color: u32) -> u64 {
             for py in y..y + height {
                 for px in x..x + width {
                     let byte_offset = (py as u64 * ppsl + px as u64) * 4;
-                    let vaddr = vmm::map_mmio_page(params.phys_base + byte_offset);
+                    let vaddr = vmm::map_framebuffer_page(params.phys_base + byte_offset);
                     core::ptr::write_volatile(vaddr as *mut u32, color);
                 }
             }
+            // See `window_manager::present`'s own doc: WC stores need an
+            // explicit fence to become visible.
+            core::arch::asm!("sfence", options(nomem, nostack));
         }
     }
     klog_info!("SYSCALL_SURFACE_FILL_OK cap={} rect=({},{},{},{}) color=0x{:08x}", cap_id, x, y, width, height, color);
@@ -421,7 +424,15 @@ pub fn syscall_move_window(cap_id: capability::CapId, new_x: i32, new_y: i32) ->
 /// a whole batch of `SYS_SURFACE_FILL`/`SYS_SURFACE_DRAW_TEXT` calls
 /// (cheap RAM writes into its own window buffer) and presents exactly
 /// ONCE at the end, instead of once per call.
-pub fn syscall_present_window(cap_id: capability::CapId) -> u64 {
+/// `dirty`, when present, is `(local_y, local_height)` -- see
+/// `window_manager::present_partial`'s own doc for why this exists
+/// (the real fix for the "WC made no difference" finding: QEMU traps
+/// every framebuffer store regardless of guest cache attributes, so
+/// the only real lever is writing fewer pixels). `None` does the full,
+/// all-windows, title-bar-included recomposite (unchanged behavior,
+/// still needed the first time a window ever appears, or after a move,
+/// or after any change that could affect more than one text row).
+pub fn syscall_present_window(cap_id: capability::CapId, dirty: Option<(u32, u32)>) -> u64 {
     let cap = match thread::resolve_current_capability(cap_id, Rights::MAP) {
         Ok(c) => c,
         Err(_) => {
@@ -441,7 +452,16 @@ pub fn syscall_present_window(cap_id: capability::CapId) -> u64 {
             Some(p) => p,
             None => return u64::MAX,
         };
-        window_manager::present(params.phys_base, params.pixels_per_scan_line, params.width, params.height);
+        match dirty {
+            Some((local_y, local_height)) => {
+                if !window_manager::present_partial(params.phys_base, params.pixels_per_scan_line, params.width, params.height, cap.object_id, local_y, local_height) {
+                    return u64::MAX;
+                }
+            }
+            None => {
+                window_manager::present(params.phys_base, params.pixels_per_scan_line, params.width, params.height);
+            }
+        }
     }
     0
 }
@@ -574,6 +594,14 @@ extern "C" fn compositor_verify_thread() {
         let params = (&*(&raw const FB_PARAMS)).as_ref().unwrap();
         let ppsl = params.pixels_per_scan_line as u64;
 
+        // Write-Combining correctness (see `window_manager::present`'s
+        // own doc): the real writes this readback is about to check
+        // were made through the SAME WC mapping and may still be
+        // sitting in a write-combining buffer, not yet visible -- a
+        // real `sfence` here, before the first read, is what makes
+        // this readback trustworthy rather than a race.
+        core::arch::asm!("sfence", options(nomem, nostack));
+
         // Real bug found and fixed bringing this up: `map_mmio_page`
         // maps exactly ONE real 4KB page (see its own doc/impl) --
         // mapping just `phys_base` once and adding raw byte offsets
@@ -584,7 +612,7 @@ extern "C" fn compositor_verify_thread() {
         // so this is real, correct, and still simple.
         let read_pixel = |x: u32, y: u32| -> u32 {
             let byte_offset = (y as u64 * ppsl + x as u64) * 4;
-            let vaddr = vmm::map_mmio_page(params.phys_base + byte_offset);
+            let vaddr = vmm::map_framebuffer_page(params.phys_base + byte_offset);
             core::ptr::read_volatile(vaddr as *const u32)
         };
 

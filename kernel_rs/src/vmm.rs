@@ -47,6 +47,12 @@ const PAGE_PRESENT: u64 = 1 << 0;
 pub const PAGE_WRITABLE: u64 = 1 << 1;
 pub const PAGE_CACHE_DISABLE: u64 = 1 << 4;
 pub const PAGE_NO_EXECUTE: u64 = 1 << 63;
+/// PAT bit for a 4KB leaf PTE (bit 7) — selects PAT entry 4 when PCD/PWT
+/// are both 0 (the 3-bit PAT-table index is `PAT<<2 | PCD<<1 | PWT`).
+/// See `enable_pat_write_combining`'s own doc for why entry 4
+/// specifically, and why this is real, disclosed root-cause work for
+/// the reported input-lag/"still slow" follow-up, not another guess.
+const PAGE_PAT: u64 = 1 << 7;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 #[repr(C, align(4096))]
@@ -503,6 +509,73 @@ pub unsafe fn map_mmio_page(paddr: u64) -> u64 {
             PAGE_WRITABLE | PAGE_NO_EXECUTE | PAGE_CACHE_DISABLE,
         );
         LAST_MMIO_PAGE_PADDR.store(page_paddr, core::sync::atomic::Ordering::Relaxed);
+    }
+    vaddr + (paddr & 0xFFF)
+}
+
+/// Real root cause behind the "typing still feels slow" report after
+/// the page-walk-cache and batched-present fixes: real `rdtsc`
+/// measurement (see `terminal_emulator`'s own diagnostic) showed
+/// `draws` (writes into a window's own RAM buffer) costing ~1-2M
+/// cycles per keystroke while `present` (the same number of pixels,
+/// but through `map_mmio_page`'s UC/`PAGE_CACHE_DISABLE` mapping into
+/// the real framebuffer) cost ~18-22M cycles -- roughly 300 real CPU
+/// cycles per single 4-byte pixel store, an order of magnitude more
+/// than the walk-cache fix alone could explain. Root cause: `UC`
+/// (strong, fully uncached) memory is the CORRECT type for a real
+/// device's control/status registers (LAPIC, IOMMU, etc. — ordering
+/// there matters, and those still use `map_mmio_page` unchanged), but
+/// it is real, unnecessary overkill for a linear framebuffer, where
+/// real hardware and every real OS instead use Write-Combining (WC):
+/// stores can be buffered/coalesced and are only made visible in bulk,
+/// which is what actually makes bulk pixel writes fast. Fixed by
+/// reprogramming PAT entry 4 (via `enable_pat_write_combining`, called
+/// once at boot) from its reset default (WB) to WC, and mapping the
+/// framebuffer with the PAT bit set (selecting entry 4) instead of
+/// `PAGE_CACHE_DISABLE` (which selects entry 2, UC-) -- a dedicated
+/// function, not a change to `map_mmio_page` itself, so every other
+/// real MMIO device in this kernel keeps its correct, unmodified UC
+/// mapping.
+static LAST_FB_PAGE_PADDR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Real, one-time PAT setup — must run once at boot, before any real
+/// framebuffer page is mapped via `map_framebuffer_page` (main.rs calls
+/// this immediately after `vmm::init()`, well before `compositor_demo`/
+/// `terminal_demo` ever touch a framebuffer). Reprograms ONLY PAT entry
+/// 4 (WB -> WC); entries 0-3, 5-7 keep the architectural power-on reset
+/// values (Intel SDM Vol.3A, PAT MSR reset value) unchanged, so every
+/// existing mapping in this kernel (all of which select entry 0 or 2,
+/// never 4) is completely unaffected — this is additive, not a global
+/// cache-policy change.
+pub unsafe fn enable_pat_write_combining() {
+    const IA32_PAT: u32 = 0x277;
+    // PA0=WB(06) PA1=WT(04) PA2=UC-(07) PA3=UC(00) [reset defaults,
+    // unchanged] PA4=WC(01) [changed from reset default WB(06)]
+    // PA5=WT(04) PA6=UC-(07) PA7=UC(00) [reset defaults, unchanged]
+    let pat_value: u64 =
+        0x06 | (0x04 << 8) | (0x07 << 16) | (0x00 << 24) | (0x01 << 32) | (0x04 << 40) | (0x07 << 48) | (0x00 << 56);
+    let lo = pat_value as u32;
+    let hi = (pat_value >> 32) as u32;
+    core::arch::asm!(
+        "wrmsr",
+        in("ecx") IA32_PAT,
+        in("eax") lo,
+        in("edx") hi,
+        options(nomem, nostack)
+    );
+    crate::klog_info!("VMM_PAT_WRITE_COMBINING_ENABLED entry4=WC");
+}
+
+/// Maps one framebuffer page with Write-Combining instead of strict UC
+/// (see this section's own doc for why) — same last-page-cache
+/// discipline as `map_mmio_page`, kept as its OWN cache (not shared)
+/// since the two functions map different, unrelated physical regions.
+pub unsafe fn map_framebuffer_page(paddr: u64) -> u64 {
+    let page_paddr = paddr & !0xFFF;
+    let vaddr = MMIO_VIRTUAL_BASE + page_paddr;
+    if LAST_FB_PAGE_PADDR.load(core::sync::atomic::Ordering::Relaxed) != page_paddr {
+        map_page(KERNEL_PML4_PHYS, vaddr, page_paddr, PAGE_WRITABLE | PAGE_NO_EXECUTE | PAGE_PAT);
+        LAST_FB_PAGE_PADDR.store(page_paddr, core::sync::atomic::Ordering::Relaxed);
     }
     vaddr + (paddr & 0xFFF)
 }

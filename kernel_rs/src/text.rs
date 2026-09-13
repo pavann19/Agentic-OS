@@ -80,7 +80,7 @@ pub fn glyph_width() -> u32 {
 /// framebuffer is assumed anywhere in this module.
 unsafe fn put_pixel(fb_phys_base: u64, pixels_per_scan_line: u32, x: u32, y: u32, color: u32) {
     let byte_offset = (y as u64 * pixels_per_scan_line as u64 + x as u64) * 4;
-    let vaddr = crate::vmm::map_mmio_page(fb_phys_base + byte_offset);
+    let vaddr = crate::vmm::map_framebuffer_page(fb_phys_base + byte_offset);
     core::ptr::write_volatile(vaddr as *mut u32, color);
 }
 

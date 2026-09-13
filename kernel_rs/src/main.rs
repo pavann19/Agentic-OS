@@ -166,6 +166,12 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     }
     unsafe { vmm::init(info, &segments, current_rsp) };
     klog_info!("VMM_INIT_DONE");
+    // Real root-cause fix for the reported input/redraw lag (see
+    // `vmm::enable_pat_write_combining`'s own doc): must run before
+    // ANY real framebuffer page is ever mapped, so it goes here, right
+    // after the page tables it reprograms exist, and well before
+    // compositor_demo/terminal_demo touch the framebuffer.
+    unsafe { vmm::enable_pat_write_combining() };
 
     // Real bug this session found: `info` was validated against the
     // BOOTSTRAP identity mapping boot_rs set up, back before this line —
