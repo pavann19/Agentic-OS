@@ -112,22 +112,22 @@ fn vaddr_of(sym: &u8) -> u64 {
 /// label) -- the classic-Mac-System look this desktop now goes for.
 /// Real, disclosed scope: this is fixed, static chrome (the menu bar
 /// never opens real dropdown menus yet) -- a real, honest visual
-/// improvement, not a functional Finder-style menu system.
-const DESKTOP_BG_COLOR: u32 = 0x00C0_C0C0;
-const MENU_BAR_COLOR: u32 = 0x00FF_FFFF;
-const MENU_BAR_HEIGHT: u32 = 20;
-
+/// improvement, not a functional Finder-style menu system. Colors and
+/// height are `window_manager`'s own real constants (not a second,
+/// driftable copy here) -- that module's own `redraw_rect` repaints
+/// this exact same chrome, per-pixel, whenever the cursor moves over
+/// bare desktop.
 unsafe fn draw_desktop_chrome(fb_phys_base: u64, ppsl: u32, width: u32, height: u32) {
     // Real, disclosed fix for the reported "boot splash still visible"
     // bug (see this call site's own earlier history): a real,
     // whole-screen clear before anything else draws -- now a light
     // gray desktop instead of plain black, for the classic-Mac look.
-    text::clear_screen(fb_phys_base, ppsl, width, height, DESKTOP_BG_COLOR);
+    text::clear_screen(fb_phys_base, ppsl, width, height, window_manager::DESKTOP_BG_COLOR);
     // Real top menu bar: a solid white strip layered over the desktop
     // background (clear_screen fills from (0,0), so calling it again
     // with just the bar's own height re-fills only that top strip).
-    text::clear_screen(fb_phys_base, ppsl, width, MENU_BAR_HEIGHT, MENU_BAR_COLOR);
-    text::draw_text(fb_phys_base, ppsl, 4, 2, b"Agentic OS", 0x0000_0000, MENU_BAR_COLOR, 0, 0, width, MENU_BAR_HEIGHT);
+    text::clear_screen(fb_phys_base, ppsl, width, window_manager::MENU_BAR_HEIGHT, window_manager::MENU_BAR_COLOR);
+    text::draw_text(fb_phys_base, ppsl, 4, 2, b"Agentic OS", 0x0000_0000, window_manager::MENU_BAR_COLOR, 0, 0, width, window_manager::MENU_BAR_HEIGHT);
 }
 
 #[no_mangle]

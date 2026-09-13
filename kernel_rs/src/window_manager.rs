@@ -38,6 +38,14 @@ const TITLE_BAR_COLOR: u32 = 0x0040_4040;
 const TITLE_FG: u32 = 0x00FF_FFFF;
 const MAX_TITLE_LEN: usize = 24;
 
+// Real desktop chrome colors -- the single, real source of truth
+// `main.rs::draw_desktop_chrome` also reads, so the one-time full
+// paint at boot and this module's own per-pixel dirty-rect repaint
+// (`redraw_rect`, below) can never drift apart.
+pub const DESKTOP_BG_COLOR: u32 = 0x00C0_C0C0;
+pub const MENU_BAR_COLOR: u32 = 0x00FF_FFFF;
+pub const MENU_BAR_HEIGHT: u32 = 20;
+
 // Real cursor state -- a real, visible, moving GUI cursor, not just an
 // input-routing abstraction. Plain statics (unsafe, cooperative single-
 // core discipline this whole file already uses) rather than a lock:
@@ -59,12 +67,21 @@ pub struct Window {
     height: u32,
     x: i32,
     y: i32,
-    title: [u8; MAX_TITLE_LEN],
-    title_len: usize,
     /// This window's OWN content pixels — row-major, `width * height`
     /// entries. Every `fill`/`draw_text` call below writes ONLY here;
     /// the real framebuffer is touched only by `present`.
     buffer: Vec<u32>,
+    /// Real, precomputed title-bar pixels (`width * TITLE_BAR_HEIGHT`),
+    /// built ONCE at registration -- real, disclosed fix for two real
+    /// problems the old "rebuild it from scratch inside every single
+    /// `present()` call" approach had: (1) real, wasted per-frame cost
+    /// (re-rendering the same never-changing title text on every
+    /// recompositable event, including every mouse-move tick), and (2)
+    /// it's what makes `redraw_rect`'s own cursor-damage-rect repaint
+    /// possible at all -- that path repaints an arbitrary SUB-region,
+    /// which needs a real, already-rendered title image to sample from
+    /// rather than re-rendering a whole row just to read a few pixels.
+    title_buffer: Vec<u32>,
 }
 
 static mut WINDOWS: Option<Vec<Window>> = None;
@@ -92,15 +109,16 @@ pub fn register(surface_object: ObjectId, x: i32, y: i32, width: u32, height: u3
     let mut t = [0u8; MAX_TITLE_LEN];
     let n = title.len().min(MAX_TITLE_LEN);
     t[..n].copy_from_slice(&title[..n]);
+    let mut title_buffer = vec![TITLE_BAR_COLOR; width as usize * TITLE_BAR_HEIGHT as usize];
+    unsafe { crate::text::draw_text_to_buffer(&mut title_buffer, width, TITLE_BAR_HEIGHT, 2, 2, &t[..n], TITLE_FG, TITLE_BAR_COLOR) };
     windows_mut().push(Window {
         surface_object,
         width,
         height,
         x,
         y,
-        title: t,
-        title_len: n,
         buffer: vec![0u32; (width as usize) * (height as usize)],
+        title_buffer,
     });
     klog_info!("WINDOW_REGISTERED surface={} pos=({},{}) size=({},{})", surface_object, x, y, width, height);
 }
@@ -186,24 +204,7 @@ pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
                     if sx < 0 || sx as u32 >= fb_width {
                         continue;
                     }
-                    put_fb_pixel(fb_phys_base, ppsl, sx as u32, sy as u32, TITLE_BAR_COLOR);
-                }
-            }
-            let title_buf_width = w.width;
-            let mut title_row = vec![0u32; title_buf_width as usize * TITLE_BAR_HEIGHT as usize];
-            title_row.fill(TITLE_BAR_COLOR);
-            crate::text::draw_text_to_buffer(&mut title_row, title_buf_width, TITLE_BAR_HEIGHT, 2, 2, &w.title[..w.title_len], TITLE_FG, TITLE_BAR_COLOR);
-            for py in 0..TITLE_BAR_HEIGHT as i32 {
-                let sy = bar_y + py;
-                if sy < 0 || sy as u32 >= fb_height {
-                    continue;
-                }
-                for px in 0..w.width as i32 {
-                    let sx = w.x + px;
-                    if sx < 0 || sx as u32 >= fb_width {
-                        continue;
-                    }
-                    let color = title_row[(py as u32 * title_buf_width + px as u32) as usize];
+                    let color = w.title_buffer[(py as u32 * w.width + px as u32) as usize];
                     put_fb_pixel(fb_phys_base, ppsl, sx as u32, sy as u32, color);
                 }
             }
@@ -358,18 +359,89 @@ unsafe fn draw_cursor(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
 /// window, full content) before drawing the cursor on top -- a real,
 /// stated simplification (mouse movement isn't yet dirty-rect
 /// optimized the way text redraw is), not a hidden shortcut.
+/// Real, disclosed fix for TWO real problems the old "just call
+/// `present()` on every mouse event" approach had: (1) real, visible
+/// LAG -- a real PS/2 mouse sends dozens of packets per second while
+/// moving, and `present()` recomposites the ENTIRE desktop (every
+/// window's full content) on every single one; (2) real CURSOR TRAILS
+/// -- `present()` only ever repaints WINDOW rectangles, never the bare
+/// desktop background, so an old cursor position sitting over open
+/// desktop was never actually erased, leaving a permanent smear.
+///
+/// Repaints ONLY the real, small rectangle the cursor's bitmap
+/// actually occupies at its OLD and NEW position (background/menu-bar
+/// color first, then any window content that overlaps it, in real
+/// z-order) -- real background erasure AND a real, small, bounded
+/// redraw instead of the whole screen. A window POSITION change
+/// (dragging) is the one real exception that still needs a full
+/// `present()`: the window itself moved, potentially far from this
+/// event's own small cursor-damage rect, so anything less would leave
+/// a real ghost of it at its old spot.
+unsafe fn redraw_rect(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u32, rx: i32, ry: i32, rw: u32, rh: u32) {
+    let rx0 = rx.max(0);
+    let ry0 = ry.max(0);
+    let rx1 = (rx + rw as i32).min(fb_width as i32);
+    let ry1 = (ry + rh as i32).min(fb_height as i32);
+    if rx0 >= rx1 || ry0 >= ry1 {
+        return;
+    }
+    // Real desktop background + menu bar, per pixel -- the actual fix
+    // for cursor trails over bare desktop (see this function's own doc).
+    for py in ry0..ry1 {
+        let bg = if (py as u32) < MENU_BAR_HEIGHT { MENU_BAR_COLOR } else { DESKTOP_BG_COLOR };
+        for px in rx0..rx1 {
+            put_fb_pixel(fb_phys_base, ppsl, px as u32, py as u32, bg);
+        }
+    }
+    // Real window content (title bar, then body) for every window
+    // whose real rect overlaps this damage rect, in real z-order.
+    for w in windows_mut().iter() {
+        let bar_y = w.y - TITLE_BAR_HEIGHT as i32;
+        if bar_y >= 0 {
+            let by0 = ry0.max(bar_y);
+            let by1 = ry1.min(bar_y + TITLE_BAR_HEIGHT as i32);
+            let bx0 = rx0.max(w.x);
+            let bx1 = rx1.min(w.x + w.width as i32);
+            for sy in by0..by1 {
+                let local_y = (sy - bar_y) as u32;
+                for sx in bx0..bx1 {
+                    let local_x = (sx - w.x) as u32;
+                    let color = w.title_buffer[(local_y * w.width + local_x) as usize];
+                    put_fb_pixel(fb_phys_base, ppsl, sx as u32, sy as u32, color);
+                }
+            }
+        }
+        let cy0 = ry0.max(w.y);
+        let cy1 = ry1.min(w.y + w.height as i32);
+        let cx0 = rx0.max(w.x);
+        let cx1 = rx1.min(w.x + w.width as i32);
+        for sy in cy0..cy1 {
+            let local_y = (sy - w.y) as u32;
+            for sx in cx0..cx1 {
+                let local_x = (sx - w.x) as u32;
+                let color = w.buffer[(local_y * w.width + local_x) as usize];
+                put_fb_pixel(fb_phys_base, ppsl, sx as u32, sy as u32, color);
+            }
+        }
+    }
+    core::arch::asm!("sfence", options(nomem, nostack));
+}
+
 pub fn report_mouse(dx: i32, dy: i32, left_down: bool) {
     let Some((fb_phys_base, ppsl, fb_width, fb_height)) = crate::compositor::get_fb_params() else {
         return; // no real framebuffer set up yet -- nothing to composite against
     };
 
-    let new_x = (CURSOR_X.load(Ordering::SeqCst) + dx).clamp(0, fb_width as i32 - 1);
-    let new_y = (CURSOR_Y.load(Ordering::SeqCst) + dy).clamp(0, fb_height as i32 - 1);
+    let old_x = CURSOR_X.load(Ordering::SeqCst);
+    let old_y = CURSOR_Y.load(Ordering::SeqCst);
+    let new_x = (old_x + dx).clamp(0, fb_width as i32 - 1);
+    let new_y = (old_y + dy).clamp(0, fb_height as i32 - 1);
     CURSOR_X.store(new_x, Ordering::SeqCst);
     CURSOR_Y.store(new_y, Ordering::SeqCst);
 
     let was_down = LEFT_BUTTON_DOWN.swap(left_down, Ordering::SeqCst);
     let press_edge = left_down && !was_down;
+    let mut window_moved = false;
 
     unsafe {
         if press_edge {
@@ -387,9 +459,27 @@ pub fn report_mouse(dx: i32, dy: i32, left_down: bool) {
             DRAGGING = None;
         }
         if let Some((dragging_object, off_x, off_y)) = DRAGGING {
-            move_window(dragging_object, new_x - off_x, new_y - off_y, fb_width, fb_height);
+            window_moved = move_window(dragging_object, new_x - off_x, new_y - off_y, fb_width, fb_height);
         }
 
-        present(fb_phys_base, ppsl, fb_width, fb_height); // also redraws the cursor on top, see present's own doc
+        if window_moved {
+            // The window itself moved -- a real, small cursor-only
+            // damage rect could leave a ghost of it at its old
+            // position, so this one real case still needs the full
+            // recomposite (which also redraws the cursor on top).
+            present(fb_phys_base, ppsl, fb_width, fb_height);
+        } else {
+            // The common case (plain cursor movement, or a click that
+            // only changed FOCUS with no visible change): repaint just
+            // the real rect the cursor's bitmap occupies at its old
+            // AND new position, then draw the cursor at its new spot.
+            let pad = 1i32; // real, small margin so the very edge of the bitmap's own pixels never gets clipped by rounding
+            let rx = (old_x.min(new_x)) - pad;
+            let ry = (old_y.min(new_y)) - pad;
+            let rw = (old_x.max(new_x) - old_x.min(new_x)) as u32 + CURSOR_W as u32 + pad as u32 * 2;
+            let rh = (old_y.max(new_y) - old_y.min(new_y)) as u32 + CURSOR_H as u32 + pad as u32 * 2;
+            redraw_rect(fb_phys_base, ppsl, fb_width, fb_height, rx, ry, rw, rh);
+            draw_cursor(fb_phys_base, ppsl, fb_width, fb_height);
+        }
     }
 }
