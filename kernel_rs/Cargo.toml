@@ -73,6 +73,13 @@ manifest_demo = []
 # demo feature above; see installer_demo.rs's own module doc and
 # scripts/test-installer.ps1.
 installer_demo = []
+# Phase 13 deliverable 4: the first real reference app
+# (user_rs/terminal_emulator), installed through installer.rs under a
+# real manifest and wired into Phase 12's own input routing. Off by
+# default; mutually exclusive with compositor_demo (wants sole
+# keyboard focus). See terminal.rs's own module doc and
+# scripts/test-terminal.ps1.
+terminal_demo = []
 
 [profile.dev]
 panic = "abort"

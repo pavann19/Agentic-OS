@@ -188,10 +188,12 @@ pub extern "C" fn _start() -> ! {
         // corner -- deliberately away from the center pixel
         // compositor.rs's own verify thread already samples for the
         // solid-fill self-check above, so the two checks never collide.
-        let mut text_region: agentic_sdk::text_widget::TextRegion<2, 16> = agentic_sdk::text_widget::TextRegion::new();
-        text_region.push_line(b"HI");
-        text_region.push_line(b"OK");
-        text_region.render(info.surface_cap, 16, 0x00FFFFFF, info.color);
+        let mut text_region_mu = core::mem::MaybeUninit::<agentic_sdk::text_widget::TextRegion<2, 16>>::uninit();
+        let text_region_ptr = text_region_mu.as_mut_ptr();
+        agentic_sdk::text_widget::TextRegion::init_in_place(text_region_ptr);
+        (*text_region_ptr).push_line(b"HI");
+        (*text_region_ptr).push_line(b"OK");
+        (*text_region_ptr).render(info.surface_cap, 16, 0x00FFFFFF, info.color);
         com1_write_str("[WINDOW_CLIENT_");
         com1_write_str(core::str::from_utf8(core::slice::from_ref(&info.label)).unwrap_or("?"));
         com1_write_str("] TEXT_DRAWN via SYS_SURFACE_DRAW_TEXT\n");

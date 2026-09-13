@@ -114,6 +114,17 @@ pub fn spawn(params: FbParams) {
     thread::spawn(window_client_b_thread);
 }
 
+/// Real, shared framebuffer-access state: `syscall_fill_surface`/
+/// `syscall_draw_text` both read `FB_PARAMS` regardless of which real
+/// demo is driving the framebuffer -- `terminal.rs`'s own spawn path
+/// (mutually exclusive with the rest of `spawn` above, since it wants
+/// sole keyboard focus) sets it through this real setter instead of a
+/// second, separate static, so both syscalls keep working unmodified
+/// no matter which app actually owns the screen.
+pub unsafe fn set_fb_params_for_terminal(params: FbParams) {
+    FB_PARAMS = Some(params);
+}
+
 /// Phase 9.5a's real respawn entry point, reused for the compositor
 /// (registered via `supervisor::register` in `main.rs`): re-invokes the
 /// SAME thread entry point `spawn` used the first time, reading the SAME

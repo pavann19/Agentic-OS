@@ -1,0 +1,29 @@
+[package]
+name = "terminal_emulator"
+version = "0.1.0"
+edition = "2021"
+
+# Phase 13 deliverable 4 (docs/ROADMAP.md Sec5): the first real
+# reference app built on Phase 12's minimal UI toolkit + input routing
+# and Phase 13's own manifest/installer core -- a genuine, capability-
+# isolated ring-3 process, not a kernel-side demo. Real, disclosed
+# scope for this increment: a real, live keystroke-to-screen echo
+# terminal (types characters, backspace, Enter starts a new line, all
+# rendered via the real PSF1 text widget) -- NOT yet piped to the real
+# Phase 7 shell process (user_rs/shell) itself, since no inter-process
+# stdin/stdout redirection mechanism exists in this kernel yet. That
+# real integration is separate, disclosed follow-up work; what's here
+# is the actual, working input->render pipeline every terminal
+# ultimately needs underneath.
+[dependencies]
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+agentic_sdk = { path = "../agentic_sdk" }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

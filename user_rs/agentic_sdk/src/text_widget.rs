@@ -28,8 +28,30 @@ pub struct TextRegion<const LINES: usize, const COLS: usize> {
 }
 
 impl<const LINES: usize, const COLS: usize> TextRegion<LINES, COLS> {
-    pub const fn new() -> Self {
-        Self { lines: [[0u8; COLS]; LINES], lens: [0u8; LINES], count: 0 }
+    /// Real, in-place zero-init -- writes directly into `place`'s own
+    /// memory, byte by byte, and NEVER constructs or returns a `Self`
+    /// by value. Necessary, not just cautious: this project has already
+    /// found (see `kernel_common::mem_intrinsics` and `netstack_driver`'s
+    /// own module docs) that a large zero-init or move/copy on this
+    /// toolchain can get lowered through a broken GOT-indirect
+    /// intrinsic-call path this freestanding kernel's ELF loader never
+    /// resolves, landing on a call through address 0 -- previously seen
+    /// for `[0u8; N]` literals, and reproduced AGAIN live bringing up
+    /// `terminal_emulator` (a real #PF, cr2=0x0) from the seemingly
+    /// safer `MaybeUninit`-then-return-by-value version of this exact
+    /// function: returning a `TextRegion` sized for a real terminal
+    /// (8 lines x 40 columns = 320+ bytes) still forces the compiler to
+    /// move that many bytes out of this function, and that move itself
+    /// hit the same broken path. Writing directly into the caller's own
+    /// already-allocated memory (a local `MaybeUninit<TextRegion<..>>`
+    /// on their own stack, per-field access via the raw pointer this
+    /// returns) never moves the struct as a whole at all, sidestepping
+    /// the bug by construction rather than by size limit.
+    pub unsafe fn init_in_place(place: *mut Self) {
+        let bytes = place as *mut u8;
+        for i in 0..core::mem::size_of::<Self>() {
+            core::ptr::write_volatile(bytes.add(i), 0);
+        }
     }
 
     /// Appends one line, truncated to `COLS` bytes. Once `LINES` lines

@@ -68,6 +68,7 @@ pub mod smp_race_soak; // Phase 9 deliverable 3's real cross-core race evidence,
 pub mod socket_demo; // Phase 10 -- real adversarial Socket capability revocation demo, off by default (see Cargo.toml)
 pub mod supervisor; // Phase 9.5a -- real crash-to-restart supervision, see its own module doc
 pub mod syscall;
+pub mod terminal; // Phase 13 deliverable 4 -- first real reference app spawn code, see its own module doc
 pub mod text; // Phase 12 deliverable 4 -- minimal real PSF1 text rendering, see its own module doc
 pub mod thread;
 pub mod tools;
@@ -363,7 +364,22 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             });
             supervisor::register(compositor::SYNTHETIC_BUS, compositor::SYNTHETIC_DEVICE, compositor::SYNTHETIC_FUNCTION, compositor::respawn);
         }
-        #[cfg(not(feature = "compositor_demo"))]
+        // Phase 13 deliverable 4: the terminal_emulator reference app --
+        // mutually exclusive with compositor_demo (it wants sole
+        // keyboard focus, which would conflict with compositor.rs's own
+        // fixed "window A starts focused" convention).
+        #[cfg(feature = "terminal_demo")]
+        {
+            text::init(info.payload.font);
+            terminal::spawn(compositor::FbParams {
+                phys_base: fb.base_address as u64,
+                size: fb.buffer_size,
+                width: fb.width,
+                height: fb.height,
+                pixels_per_scan_line: fb.pixels_per_scan_line,
+            });
+        }
+        #[cfg(not(any(feature = "compositor_demo", feature = "terminal_demo")))]
         user_driver::spawn_framebuffer_driver(
             fb.base_address as u64,
             fb.buffer_size,

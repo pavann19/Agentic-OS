@@ -90,7 +90,16 @@ agentic_sdk = { path = "../agentic_sdk" }
   `render` draws every held line into a surface via `draw_text`). Real,
   disclosed scope: no line-wrapping, no cursor — the single primitive a
   terminal emulator, text editor, or file-manager list view (Phase 13's
-  own planned reference apps) all reduce to.
+  own planned reference apps) all reduce to. **Construction is
+  in-place, not `new() -> Self`**: a real toolchain bug (see
+  `text_widget`'s own module doc) means returning a `TextRegion` sized
+  for a real terminal by value can move enough bytes to hit the same
+  broken GOT-indirect-call path as a large `[0u8; N]` zero-init
+  literal. Allocate a `MaybeUninit<TextRegion<L, C>>` on your own stack,
+  call `TextRegion::init_in_place(place.as_mut_ptr())`, then use the
+  widget only through that raw pointer (`(*ptr).push_line(...)`,
+  `(*ptr).render(...)`) — never call `.assume_init()` to move it into
+  an owned value.
 
 `user_rs/serial_driver` is migrated to `agentic_sdk` as this crate's
 own first, real proof that it is a genuine drop-in: same COM1 output,
