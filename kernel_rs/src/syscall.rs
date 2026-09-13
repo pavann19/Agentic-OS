@@ -841,27 +841,20 @@ extern "C" fn syscall_entry() {
         "pop r14",
         "pop r11",
         "pop rcx",
-        // `cli` before swapping onto the user's own stack: right after
-        // that swap, RSP holds a user-space address but CS is STILL the
-        // kernel selector (sysretq hasn't run yet) — CPL is still 0, so
-        // an interrupt landing in that window would push its frame using
-        // the CURRENT RSP (no privilege-change stack switch happens,
-        // because CPL isn't changing), i.e. onto the USER's stack from
-        // kernel context. Interrupts are already off by this point
-        // (entry's own `sti` was removed -- see that comment), so this
-        // is now a real no-op in the common case; kept anyway as a
-        // correct, explicit statement of the invariant this exit
-        // sequence relies on, in case a future blocking primitive ever
-        // needs to `sti` this late in dispatch.
+        // `cli`, unconditionally, for the rest of this exit sequence --
+        // interrupts are already off by this point (entry's own `sti`
+        // was removed -- see that comment) so this is a no-op in the
+        // common case; kept as an explicit statement of the invariant
+        // the frame-building sequence below relies on.
         "cli",
         // Real fix, matching entry's own toggle-in/toggle-out pair
         // (see entry's own doc comment): swap to kernel-GS just long
         // enough to read this core's own saved user RSP back out, then
-        // immediately swap back to user-GS before `sysretq` -- never
-        // leave kernel-GS "held" active across anything preemptible
-        // (this whole exit sequence runs `cli`'d, so it's already
-        // atomic with respect to this core's own interrupts; the
-        // narrow toggle-in/toggle-out here keeps it correct with
+        // immediately swap back to user-GS before returning to ring 3 --
+        // never leave kernel-GS "held" active across anything
+        // preemptible (this whole exit sequence runs `cli`'d, so it's
+        // already atomic with respect to this core's own interrupts;
+        // the narrow toggle-in/toggle-out here keeps it correct with
         // respect to any OTHER thread's entry on this same core too).
         "swapgs",
         // Real fix, matching entry's own new per-thread-stack stash
@@ -872,11 +865,43 @@ extern "C" fn syscall_entry() {
         // rsp, 8` left it, on THIS SAME THREAD's own kernel stack (never
         // another thread's, unlike the old shared per-core `gs:[8]`).
         "mov r10, [rsp]",            // recover the real user RSP from THIS thread's own stash slot
-        "add rsp, 8",                // give back the stash slot (about to leave this kernel stack anyway)
-        "mov rsp, r10",              // switch onto the user's own real stack
+        "add rsp, 8",                // give back the stash slot -- rsp is now back on this thread's own kernel stack
+        // Real bug found and fixed (WHPX-only, never reproducible under
+        // TCG): this used to `mov rsp, r10` (switch straight onto the
+        // user's own stack) then `sysretq`. SYSRET's CS/SS/RIP/RFLAGS
+        // reload is NOT a single atomic stack-frame load the way IRETQ's
+        // is -- it's a sequence of discrete MSR-derived register loads,
+        // and on real silicon (exposed here by WHPX's real interrupt
+        // timing, invisible under TCG's atomic instruction-at-a-time
+        // interpreter) a hardware interrupt landing during that sequence
+        // can be delivered against a torn combination of already-updated
+        // and not-yet-updated segment state -- observed live as a ring-0
+        // #GP (error code referencing the user data selector, GDT index
+        // 5) when AHCI's own driver thread got timer-interrupted right
+        // as its own SYSCALL round-trip was returning: the CPU's live SS
+        // held 0x28 (the raw GDT index, RPL bits not yet applied) while
+        // CS had already updated to the real 0x33 (RPL 3) user code
+        // selector -- an architecturally inconsistent pair no ordinary
+        // ring-3 execution could otherwise produce. IRETQ has no
+        // equivalent hazard: it pops a single, fully-formed 5-word frame
+        // (RIP, CS, RFLAGS, RSP, SS) already sitting in memory, with no
+        // partial-update window an interrupt could land inside. Fixed by
+        // building that exact frame on THIS thread's own kernel stack
+        // (still fully valid at this point) instead of switching RSP
+        // early, and using `iretq` instead of `sysretq` for the return
+        // to ring 3 -- a small, deliberate cost (iretq's own segment/
+        // privilege checks are pricier than sysret's) paid only on the
+        // exit side, entry still uses the fast `syscall` path.
+        "push {user_ss}",            // SS (highest address of the frame -- iretq pops SS last)
+        "push r10",                  // RSP -- the user's real stack pointer
+        "push r11",                  // RFLAGS (SYSCALL-saved)
+        "push {user_cs}",            // CS
+        "push rcx",                  // RIP (SYSCALL-saved) -- lowest address, iretq pops this first
         "swapgs",                    // restore the user's own GS base before returning to ring 3
-        "sysretq",
+        "iretq",
         dispatch = sym syscall_dispatch,
+        user_cs = const crate::gdt::USER_CODE_SELECTOR as u64,
+        user_ss = const crate::gdt::USER_DATA_SELECTOR as u64,
     );
 }
 
