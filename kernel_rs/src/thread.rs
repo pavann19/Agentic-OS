@@ -156,6 +156,35 @@ unsafe fn current_ref_for(cpu: usize) -> &'static Option<Box<Thread>> {
 extern "C" fn thread_trampoline() -> ! {
     core::arch::naked_asm!(
         "pop rax",      // the entry fn pointer spawn() placed here
+        // Real, disclosed bug found and fixed via a real WHPX-only,
+        // intermittent ring-0 #GP investigation (real hardware timing
+        // exposed this; TCG's own timing apparently never had): this
+        // `sti` used to live in `switch_to` itself (see that function's
+        // own doc, kept for the real history but no longer accurate
+        // about where the enable happens) so a BRAND NEW thread
+        // (which has no prior interrupt context to unwind back
+        // through) would ever get interrupts enabled at all. The real
+        // bug: `switch_to` is ALSO the resume path for an
+        // ALREADY-RUNNING thread that was merely preempted mid-`h_timer`/
+        // `h_keyboard`/`h_reschedule`/`h_tlb_shootdown` (`thread::
+        // schedule()`'s only real callers, all real IDT handlers) --
+        // that thread's own eventual `iretq` (once it unwinds back out
+        // through whichever ISR preempted it) ALREADY correctly
+        // restores its real, original interrupt state. Putting `sti`
+        // in `switch_to` unconditionally re-enabled interrupts a
+        // SECOND time, WHILE STILL NESTED inside that not-yet-unwound
+        // ISR call chain -- a real, unbounded-depth reentrancy hazard:
+        // if a new tick arrived before the pending `iretq` ever ran,
+        // the SAME kernel stack took ANOTHER full nested ISR frame,
+        // repeatably, with no bound -- a real stack overflow under
+        // fast/real interrupt timing (WHPX), rare enough under TCG's
+        // own software timing to go unnoticed. Moving the enable HERE
+        // (a brand new thread's own real first instructions, which by
+        // construction has no pending ISR of its own to unwind back
+        // through) keeps the original fix's real intent while removing
+        // the double-enable for the far more common "resume an
+        // existing, merely-preempted thread" case.
+        "sti",
         "call rax",     // run the thread's real entry function
         "call {exit}",  // entry() returned instead of calling exit itself
         exit = sym exit_current,
@@ -188,10 +217,11 @@ pub fn spawn(entry: extern "C" fn()) -> ThreadId {
 /// LATER `pop_front()` a garbage `Box<Thread>` (a corrupted `saved_rsp`,
 /// among other fields), which `switch_to`'s `ret` would then jump to.
 /// `schedule()` itself doesn't need this same wrapping — it only ever
-/// runs already-inside an interrupt-gate entry (hardware IF=0) until its
-/// own deliberate `sti` right before `switch_to`'s `ret` — but every
-/// other public function here that touches this state from normal
-/// context does.
+/// runs already-inside an interrupt-gate entry (hardware IF=0 for its
+/// ENTIRE body — interrupts are no longer explicitly re-enabled before
+/// `switch_to`'s `ret` returns into it either, see that function's own
+/// doc for the real bug that fixed) — but every other public function
+/// here that touches this state from normal context does.
 pub fn spawn_in(entry: extern "C" fn(), address_space: u64) -> ThreadId {
     crate::critical::without_interrupts(|| unsafe { spawn_in_locked(entry, address_space) })
 }
@@ -517,20 +547,28 @@ unsafe extern "C" fn switch_to(old_rsp_slot: *mut u64, new_rsp: u64, new_cr3: u6
         "pop r12",
         "pop rbx",
         "pop rbp",
-        // Real bug this session found: `schedule()` always runs from
-        // inside an interrupt-GATE handler (h_timer), which the CPU
-        // enters with IF=0. A plain `ret` never touches RFLAGS, so
-        // whatever thread we switch INTO would silently inherit
-        // interrupts-disabled and could never be preempted again — only
-        // escaping via something that explicitly re-enables them (which is
-        // why the first version ran thread A to completion with zero
-        // interleaving: exactly one `sti`, in exit_current, was the only
-        // thing that ever turned interrupts back on). `sti` here,
-        // immediately before `ret`, is safe due to x86's one-instruction
-        // STI-shadow guarantee — the enable doesn't take effect until
-        // after the NEXT instruction (this `ret`) has already jumped away,
-        // so nothing can be preempted between the two.
-        "sti",
+        // Real bug found and fixed (via a real, intermittent,
+        // WHPX-only ring-0 #GP): this used to unconditionally `sti`
+        // right here, on the theory that `schedule()` always runs
+        // inside an interrupt-gate handler (IF=0), so the incoming
+        // thread would otherwise silently inherit interrupts-disabled.
+        // True for a BRAND NEW thread (no prior interrupt context to
+        // ever restore IF for it) -- real fix for that case moved to
+        // `thread_trampoline`'s own first real instruction instead
+        // (see its doc for the full story). For the FAR more common
+        // case this same `ret` also serves -- resuming an
+        // ALREADY-RUNNING thread merely preempted mid-ISR -- that
+        // thread's own eventual real `iretq` (once it unwinds back out
+        // through whichever handler preempted it) already restores its
+        // correct original interrupt state; enabling it a second time
+        // HERE, while still nested inside that not-yet-unwound ISR
+        // call chain, was a real, unbounded-depth reentrancy hazard:
+        // a new tick arriving before that pending `iretq` ran could
+        // stack another full nested ISR frame on the SAME kernel
+        // stack, repeatedly, with no bound -- a real stack overflow
+        // under fast/real interrupt timing, rare enough under TCG's
+        // own software timing to have gone unnoticed until real
+        // hardware-accelerated (WHPX) timing exposed it.
         "ret",
     );
 }

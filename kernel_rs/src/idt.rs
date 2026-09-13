@@ -111,6 +111,15 @@ fn halt_forever() -> ! {
 /// process's own mistake, and there is no safe "just kill it" recovery
 /// for that.
 fn recover_or_halt(vector: u8, frame: &InterruptStackFrame) -> ! {
+    // Real, temporary diagnostic for the WHPX-specific ring0 #GP
+    // investigation: an unambiguous marker naming the real vector/CS/
+    // RIP at the exact moment this function is entered, so a fault
+    // occurring anywhere in its own body (including inlined callees)
+    // is traceable to a specific real invocation from fresh serial
+    // evidence, not static disassembly guesswork (which real testing
+    // showed is unreliable here -- LTO can merge/inline small
+    // functions in ways that make symbol-based attribution mislead).
+    klog_error!("RECOVER_OR_HALT_ENTER vector={} cs=0x{:x} rip=0x{:x}", vector, frame.code_segment, frame.instruction_pointer);
     if frame.code_segment & 0x3 == 3 {
         klog_error!("PROCESS_KILLED: fault occurred in ring 3 -- terminating this process, system continues");
         // Phase 9.5a: real observation point, BEFORE the thread is
