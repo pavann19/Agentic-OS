@@ -76,18 +76,32 @@ extern "C" fn terminal_thread() {
         // maps exactly ONE 4KB stack page at `STACK_VADDR` (the same
         // convention every other driver's own hand-written spawn code
         // uses) -- fine for those, but this app's own locals
-        // (`TextRegion<8, 40>` alone is 300+ bytes, plus closures and
-        // several nested calls into `agentic_sdk`) pushed real usage
-        // past one page, a real, reproduced write #PF at `STACK_VADDR +
-        // 4096 + 0x18` (just past the mapped page's own top) the moment
-        // the first real routed keystroke reached the render path.
-        // Fixed by mapping 3 additional pages below the stack top,
-        // growing the same downward-growing region installer.rs already
-        // started -- 16KB total, a real, generous bound for this app's
-        // actual stack usage, not a guess.
+        // (`TextRegion<8, 40>` alone is 300+ bytes, plus several nested
+        // calls into `agentic_sdk`) pushed real usage past one page.
+        // Mapping 3 additional pages BELOW the nominal top (growing the
+        // same downward-growing region installer.rs already started, to
+        // 16KB total) fixed most of it, but a real, reproduced write #PF
+        // kept landing at addresses just ABOVE `STACK_VADDR + 4096` (the
+        // INITIAL entry RSP `ring3::enter_user_mode` is handed) — e.g.
+        // `STACK_VADDR + 4096 + 0x18`. Root cause not fully traced to
+        // the exact LLVM mechanism (real disassembly at the fault site
+        // showed ordinary-looking local-variable/register-spill
+        // instructions, not an obviously buggy one), but empirically
+        // and reproducibly real: something in this app's own compiled
+        // entry sequence touches memory at or just past the ORIGINAL
+        // entry RSP value even after its own frame pointer has already
+        // moved below it — plausibly a stack-probe sequence LLVM can
+        // still emit for a large enough stack frame even on this
+        // freestanding target. Fixed by mapping one additional page
+        // starting exactly AT the nominal top too, so that touch lands
+        // on real, mapped memory instead of past the end of the region.
         for extra_page in 1..4u64 {
             let page = pmm::alloc_page();
             vmm::map_page_in(space, STACK_VADDR - extra_page * 4096, page, vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE | vmm::PAGE_WRITABLE);
+        }
+        for extra_above in 0..2u64 {
+            let page = pmm::alloc_page();
+            vmm::map_page_in(space, STACK_VADDR + 4096 + extra_above * 4096, page, vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE | vmm::PAGE_WRITABLE);
         }
 
         // Real Surface object_id recovery: the manifest declared and

@@ -54,6 +54,36 @@ impl<const LINES: usize, const COLS: usize> TextRegion<LINES, COLS> {
         }
     }
 
+    /// Real, explicit per-byte copy -- NOT `copy_from_slice`/array
+    /// assignment. Real bug found and fixed bringing up
+    /// `terminal_emulator`'s Enter-key path: `copy_from_slice` (and a
+    /// plain `self.lines[i] = self.lines[j]` array assignment) can both
+    /// get lowered by LLVM into an actual `memcpy` call on this
+    /// toolchain, and this freestanding target's ELF loader doesn't
+    /// resolve that indirection -- a real, reproduced call through a
+    /// NULL pointer (`call qword ptr [rip+...]` landing at address 0,
+    /// confirmed via real disassembly of the faulting binary). Same
+    /// root cause class already documented in `kernel_common::
+    /// mem_intrinsics` and `netstack_driver`'s own module docs (there,
+    /// for zero-init literals; here, for a copy) -- `vmm::
+    /// write_user_bytes`'s own doc already names this exact copy-vs-
+    /// memcpy distinction. A real, explicit, volatile-free per-byte
+    /// loop is what reliably avoids it.
+    /// Raw-pointer copy specifically to avoid `self.lines[i-1] =
+    /// self.lines[i]` (a plain array assignment the borrow checker
+    /// wouldn't even allow directly between two indices of the same
+    /// array anyway) — real, explicit per-byte `read_volatile`/
+    /// `write_volatile`, never a value that could get lowered into a
+    /// `memcpy` call.
+    unsafe fn shift_row_up(lines: *mut [u8; COLS], dst_index: usize, src_index: usize) {
+        let dst = lines.add(dst_index) as *mut u8;
+        let src = lines.add(src_index) as *const u8;
+        for i in 0..COLS {
+            let byte = core::ptr::read_volatile(src.add(i));
+            core::ptr::write_volatile(dst.add(i), byte);
+        }
+    }
+
     /// Appends one line, truncated to `COLS` bytes. Once `LINES` lines
     /// have been pushed, the OLDEST line is discarded to make room —
     /// real scrolling, implemented as the simplest correct thing that
@@ -62,18 +92,25 @@ impl<const LINES: usize, const COLS: usize> TextRegion<LINES, COLS> {
     pub fn push_line(&mut self, s: &[u8]) {
         if self.count < LINES {
             let len = s.len().min(COLS);
-            self.lines[self.count][..len].copy_from_slice(&s[..len]);
+            for i in 0..len {
+                self.lines[self.count][i] = s[i];
+            }
+            for i in len..COLS {
+                self.lines[self.count][i] = 0;
+            }
             self.lens[self.count] = len as u8;
             self.count += 1;
             return;
         }
+        let lines_ptr = self.lines.as_mut_ptr();
         for i in 1..LINES {
-            self.lines[i - 1] = self.lines[i];
+            unsafe { Self::shift_row_up(lines_ptr, i - 1, i) };
             self.lens[i - 1] = self.lens[i];
         }
         let len = s.len().min(COLS);
-        self.lines[LINES - 1] = [0u8; COLS];
-        self.lines[LINES - 1][..len].copy_from_slice(&s[..len]);
+        for i in 0..COLS {
+            self.lines[LINES - 1][i] = if i < len { s[i] } else { 0 };
+        }
         self.lens[LINES - 1] = len as u8;
     }
 

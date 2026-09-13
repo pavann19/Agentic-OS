@@ -48,9 +48,17 @@ pub fn notify(vector: u8) {
 /// Blocks (spin-yields) until `vector` has a pending notification, then
 /// consumes it. This IS "receiving" the interrupt from user space's
 /// perspective — logged distinctly from acknowledge() below.
+///
+/// Real fix, same reasoning as `ipc::spin_yield`'s own updated doc:
+/// syscall dispatch (this is reached from syscall 5,
+/// `driver::wait_interrupt`) no longer keeps interrupts enabled for
+/// its whole duration, so this genuinely blocking wait — for a REAL
+/// hardware interrupt (e.g. PS/2 IRQ1) to even have a chance to fire
+/// and set `PENDING` in the first place — must briefly re-enable them
+/// itself around each `hlt`, the same `sti; hlt; cli` idiom.
 pub fn wait_for_interrupt(vector: u8) {
     while !PENDING[vector as usize].swap(false, Ordering::SeqCst) {
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+        unsafe { core::arch::asm!("sti", "hlt", "cli", options(nomem, nostack)) };
     }
     LAST_DELIVERED_VECTOR.store(vector, Ordering::SeqCst);
     audit::record(audit::AuditEvent::InterruptDelivered { vector });

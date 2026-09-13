@@ -590,17 +590,36 @@ extern "C" fn syscall_entry() {
         "swapgs",                    // restore user-GS-active state -- see the real bug this fixes, above
         "push rcx",                  // user RIP (SYSCALL-saved) — must survive to sysretq
         "push r11",                  // user RFLAGS (SYSCALL-saved) — same
-        // Real bug this session found: IA32_FMASK clears IF on SYSCALL
-        // entry, and dispatch is free to call blocking operations
-        // (ipc::send/receive spin-yield via hlt, waiting for another
-        // thread to run) — with interrupts still masked, the timer can
-        // never fire, schedule() never runs, and a blocking syscall
-        // deadlocks the entire machine forever. `sti` here, AFTER the two
-        // pushes above are safely on the kernel stack, fixes it — same
-        // STI-shadow reasoning as thread.rs's switch_to (the enable
-        // doesn't take effect until after the NEXT instruction), so
-        // nothing can be preempted mid-push.
-        "sti",
+        // Real bug found and fixed THIS session, replacing an earlier
+        // real fix that turned out to be incomplete: this used to `sti`
+        // right here, unconditionally, so a blocking syscall (ipc::
+        // send/receive's own spin-yield via hlt) wouldn't deadlock the
+        // timer. That real fix (IA32_FMASK clears IF on SYSCALL entry)
+        // was correct as far as it went, but it also reopened the exact
+        // per-core race this module's own doc already fixed once for
+        // the GS-base-active TOGGLE: with interrupts live for the
+        // WHOLE dispatch, a second thread's own syscall entry on this
+        // SAME core can preempt-and-interleave with this one, and
+        // BOTH entries stash their real user RSP into the SAME
+        // per-core `gs:[8]` slot (see entry's own comment) — whichever
+        // one restores last wins, handing the OTHER thread's exit a
+        // completely wrong stack pointer. Reproduced live bringing up
+        // Phase 13's `terminal_emulator`: its own tight, real,
+        // non-blocking `SYS_IPC_TRY_RECEIVE` poll loop (syscall 12)
+        // interleaving with `keyboard_driver`'s own real routing
+        // syscall (13) on the same core crashed the terminal with a
+        // real ring-3 write #PF just past its own mapped stack, every
+        // time. Real fix: dispatch no longer re-enables interrupts at
+        // all -- every syscall this kernel defines today is either
+        // genuinely non-blocking (safe, and now fully atomic with
+        // respect to this core's own preemption) or blocks via a
+        // `hlt`-based spin (`ipc::spin_yield`, `interrupt_forward::
+        // wait_for_interrupt`) that now does its OWN narrow `sti`/`hlt`
+        // pairing around just the wait itself (see those functions'
+        // own updated doc) — the timer can still fire and this core
+        // can still be preempted DURING a blocking wait, but no longer
+        // for the full duration of an ordinary, non-blocking syscall,
+        // which is what this specific race needed.
         // Real bug found and fixed (root-caused via Phase 4's
         // virtio_blk_driver, the first caller whose code actually kept a
         // value live in a callee-saved register — r13 — across a
@@ -615,6 +634,33 @@ extern "C" fn syscall_entry() {
         // r12/r13 to still hold anything meaningful after the call.
         // Pushed/popped now, the same real save-then-restore discipline
         // rcx/r11 already get two lines below.
+        //
+        // Real bug found and fixed THIS session, disassembly-confirmed:
+        // r14/r15/rbx/rbp were left OUT of that same fix, on the
+        // assumption that `syscall_dispatch` being a normal Rust
+        // `extern "C" fn` would preserve them itself per the SysV ABI
+        // (true in general -- a compliant callee saves whatever
+        // callee-saved registers it actually uses). In practice, one of
+        // Phase 13's own `terminal_emulator` local variables
+        // (`current_len`) got allocated to r15 and came back corrupted
+        // after a single `SYS_IPC_TRY_RECEIVE` syscall — root-caused via
+        // a real disassembly of the faulting binary (capstone), which
+        // showed the actual crash instruction (`mov [rsp+r15+0x30], al`
+        // — the real `current[current_len] = ch` write) using a
+        // garbage r15 instead of the real value 0. Whatever the exact
+        // codegen path that let r14/r15/rbx/rbp leak past `dispatch`'s
+        // own preservation (this naked `call` site, crossing into a
+        // deep, multi-module call chain, is real, unusual territory
+        // this kernel had never exercised at this frequency before),
+        // the kernel's OWN entry/exit stub explicitly guaranteeing ALL
+        // SIX callee-saved registers survive a syscall — not just the
+        // two this module happens to reshuffle — is the real, robust
+        // fix: never again trust an implicit, transitive ABI guarantee
+        // for a boundary this security- and correctness-critical.
+        "push r14",
+        "push r15",
+        "push rbx",
+        "push rbp",
         "push r12",
         "push r13",
         // Syscall args arrive in rdi/rsi/rdx/r10/r8/r9 (Linux convention,
@@ -630,6 +676,10 @@ extern "C" fn syscall_entry() {
         // return value already in rax, exactly where sysretq's caller expects it
         "pop r13",
         "pop r12",
+        "pop rbp",
+        "pop rbx",
+        "pop r15",
+        "pop r14",
         "pop r11",
         "pop rcx",
         // `cli` before swapping onto the user's own stack: right after
@@ -638,10 +688,12 @@ extern "C" fn syscall_entry() {
         // an interrupt landing in that window would push its frame using
         // the CURRENT RSP (no privilege-change stack switch happens,
         // because CPL isn't changing), i.e. onto the USER's stack from
-        // kernel context. `cli` closes that window; sysretq itself
-        // restores IF from R11 (the user's original RFLAGS, IF=1) the
-        // instant it lands back in ring 3, so nothing stays disabled
-        // longer than this narrow gap.
+        // kernel context. Interrupts are already off by this point
+        // (entry's own `sti` was removed -- see that comment), so this
+        // is now a real no-op in the common case; kept anyway as a
+        // correct, explicit statement of the invariant this exit
+        // sequence relies on, in case a future blocking primitive ever
+        // needs to `sti` this late in dispatch.
         "cli",
         // Real fix, matching entry's own toggle-in/toggle-out pair
         // (see entry's own doc comment): swap to kernel-GS just long

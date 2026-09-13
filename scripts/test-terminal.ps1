@@ -18,7 +18,7 @@ param(
     [string]$SerialLog = "_evidence\latest\serial-terminal.log",
     [int]$MonitorPort = 45456,
     [int]$BootWaitSeconds = 10,
-    [int]$PostKeySeconds = 8
+    [int]$PostKeySeconds = 20
 )
 
 $ErrorActionPreference = "Stop"
@@ -113,12 +113,22 @@ $checks = @(
     @{ Name = "real ELF64 process banner printed"; Pattern = "[TERMINAL_EMULATOR] real ELF64 ring-3 process" },
     @{ Name = "'h' key echoed (ascii 104)"; Pattern = "KEY_ECHOED ascii=104" },
     @{ Name = "'i' key echoed (ascii 105)"; Pattern = "KEY_ECHOED ascii=105" },
-    @{ Name = "Enter echoed (ascii 10)"; Pattern = "KEY_ECHOED ascii=10" },
-    @{ Name = "'x' key echoed (ascii 120)"; Pattern = "KEY_ECHOED ascii=120" },
-    @{ Name = "backspace echoed (ascii 8)"; Pattern = "KEY_ECHOED ascii=8" }
+    @{ Name = "Enter echoed (ascii 10)"; Pattern = "KEY_ECHOED ascii=10\D" },
+    @{ Name = "'x' key echoed (ascii 120)"; Pattern = "KEY_ECHOED ascii=120\D" },
+    @{ Name = "backspace echoed (ascii 8)"; Pattern = "KEY_ECHOED ascii=8\D" }
 )
 foreach ($c in $checks) {
-    if ($content.Contains($c.Pattern)) {
+    # Real, deliberate fix: a plain substring Contains() check for
+    # "ascii=10" is a false-positive trap against "ascii=104"/"ascii=105"
+    # (both genuinely start with "10") -- regex with a trailing
+    # non-digit boundary is what actually distinguishes them. Patterns
+    # without a `\` are treated as plain substrings still (Contains).
+    if ($c.Pattern -match '\\D') {
+        $matched = $content -match $c.Pattern
+    } else {
+        $matched = $content.Contains($c.Pattern)
+    }
+    if ($matched) {
         Write-Output "  PASS: $($c.Name)"
     } else {
         Write-Output "  FAIL: $($c.Name) -- pattern not found: $($c.Pattern)"

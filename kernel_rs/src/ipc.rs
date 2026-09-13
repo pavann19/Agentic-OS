@@ -85,8 +85,21 @@ unsafe fn endpoints_mut() -> &'static mut alloc::vec::Vec<Endpoint> {
     (&mut *&raw mut ENDPOINTS).as_mut().unwrap()
 }
 
+/// Real fix, paired with `syscall.rs`'s own entry-stub doc: syscall
+/// dispatch no longer unconditionally `sti`s for its entire duration
+/// (that reopened a real per-core user-RSP-stash race between two
+/// threads' syscalls interleaving on the same core — see that comment
+/// for the full story). Interrupts are OFF by default for the whole
+/// syscall now, so a genuinely blocking wait like this one must
+/// briefly re-enable them itself, right around the `hlt` that needs
+/// them to ever wake up — the classic `sti; hlt` idiom, safe because
+/// of the real "STI shadow" hardware guarantee (an interrupt enabled
+/// by `sti` cannot actually be taken until AFTER the very next
+/// instruction), so this pairing can only ever be interrupted at the
+/// `hlt` itself, immediately followed by `cli` again before this
+/// function returns to its own (non-preemptible-by-design) caller.
 fn spin_yield() {
-    unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+    unsafe { core::arch::asm!("sti", "hlt", "cli", options(nomem, nostack)) };
 }
 
 /// Creates a new IPC endpoint object and returns a capability to it (with
