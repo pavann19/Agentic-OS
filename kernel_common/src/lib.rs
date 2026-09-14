@@ -29,6 +29,7 @@ pub mod madt;
 pub mod mem_intrinsics;
 pub mod pagetable;
 pub mod supervision; // Phase 9.5a -- pure restart-decision + BDF-packing logic, see its own module doc
+pub mod virtio_gpu_proto; // Phase 5.13 -- VirtIO-GPU wire protocol packets and commands
 
 /// Rounds `addr` up to the nearest multiple of `align` (`align` must be a
 /// power of two — matches every caller's usage in this codebase, and this

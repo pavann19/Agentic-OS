@@ -90,6 +90,7 @@ pub mod tools;
 pub mod user_driver;
 pub mod usb_xhci; // Phase 11 -- real xHCI (USB) host controller discovery, see its own module doc
 pub mod virtio_blk;
+pub mod virtio_gpu; // Phase 5.13 -- VirtIO-GPU hardware graphics path and probe
 pub mod virtio_net;
 pub mod vmm;
 pub mod vsync; // Phase 5.12 -- VSync and presentation synchronization
@@ -320,6 +321,7 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     // real DMA-safe buffer + IOMMU domain assignment.
     virtio_blk::spawn_if_present(&pci_devices);
     virtio_net::spawn_if_present(&pci_devices);
+    virtio_gpu::probe_and_init(&pci_devices);
     ahci::spawn_if_present(&pci_devices);
     nvme::spawn_if_present(&pci_devices);
     // Phase 11 (docs/ROADMAP.md Sec5, deliverable 2): real xHCI (USB)

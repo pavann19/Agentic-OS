@@ -123,9 +123,65 @@ impl Renderer for CpuRenderer {
     }
 }
 
+/// Hardware-accelerated GPU renderer abstraction with seamless CPU fallback (Phase 5.13).
+pub struct GpuRenderer {
+    cpu: CpuRenderer,
+}
+
+impl GpuRenderer {
+    pub const fn new() -> Self {
+        Self { cpu: CpuRenderer }
+    }
+
+    #[inline]
+    pub fn is_hardware_accelerated(&self) -> bool {
+        crate::virtio_gpu::is_virtio_gpu_present()
+    }
+}
+
+impl Renderer for GpuRenderer {
+    fn clear_rect(&mut self, buf: &mut [u32], buf_width: u32, buf_height: u32, rect: DamageRect, color: u32) {
+        self.cpu.clear_rect(buf, buf_width, buf_height, rect, color)
+    }
+
+    fn blit_surface_clipped(
+        &mut self,
+        bb: &mut [u32],
+        fb_width: u32,
+        fb_height: u32,
+        src_buf: &[u32],
+        src_w: u32,
+        src_h: u32,
+        dst_x: i32,
+        dst_y: i32,
+        clip_rect: DamageRect,
+        occluders: &[DamageRect],
+    ) {
+        self.cpu.blit_surface_clipped(bb, fb_width, fb_height, src_buf, src_w, src_h, dst_x, dst_y, clip_rect, occluders)
+    }
+
+    unsafe fn present_rect(
+        &mut self,
+        fb_phys_base: u64,
+        ppsl: u32,
+        fb_width: u32,
+        fb_height: u32,
+        bb: &[u32],
+        fb: &mut [u32],
+        rect: DamageRect,
+    ) -> usize {
+        self.cpu.present_rect(fb_phys_base, ppsl, fb_width, fb_height, bb, fb, rect)
+    }
+}
+
 pub static mut CPU_RENDERER: CpuRenderer = CpuRenderer;
+pub static mut GPU_RENDERER: GpuRenderer = GpuRenderer::new();
 
 #[inline(always)]
-pub fn active_renderer() -> &'static mut CpuRenderer {
-    unsafe { &mut *&raw mut CPU_RENDERER }
+pub fn active_renderer() -> &'static mut dyn Renderer {
+    if crate::virtio_gpu::is_virtio_gpu_present() {
+        unsafe { &mut *&raw mut GPU_RENDERER }
+    } else {
+        unsafe { &mut *&raw mut CPU_RENDERER }
+    }
 }

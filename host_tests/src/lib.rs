@@ -1774,6 +1774,47 @@ mod vsync_and_display_timing_tests {
     }
 }
 
+#[cfg(test)]
+mod virtio_gpu_tests {
+    use kernel_common::virtio_gpu_proto::*;
+    use core::mem::size_of;
+
+    #[test]
+    fn virtio_gpu_packet_sizes_and_alignment() {
+        assert_eq!(size_of::<VirtioGpuCtrlHdr>(), 24);
+        assert_eq!(size_of::<VirtioGpuRect>(), 16);
+        assert_eq!(size_of::<VirtioGpuResourceCreate2d>(), 40);
+        assert_eq!(size_of::<VirtioGpuSetScanout>(), 48);
+        assert_eq!(size_of::<VirtioGpuTransferToHost2d>(), 56);
+        assert_eq!(size_of::<VirtioGpuResourceFlush>(), 48);
+    }
+
+    #[test]
+    fn virtio_gpu_command_packet_construction() {
+        let create_cmd = VirtioGpuResourceCreate2d::new(1, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM, 1024, 768);
+        assert_eq!(create_cmd.hdr.hdr_type, VIRTIO_GPU_CMD_RESOURCE_CREATE_2D);
+        assert_eq!(create_cmd.resource_id, 1);
+        assert_eq!(create_cmd.width, 1024);
+        assert_eq!(create_cmd.height, 768);
+
+        let rect = VirtioGpuRect::new(0, 0, 1024, 768);
+        let scanout_cmd = VirtioGpuSetScanout::new(0, 1, rect);
+        assert_eq!(scanout_cmd.hdr.hdr_type, VIRTIO_GPU_CMD_SET_SCANOUT);
+        assert_eq!(scanout_cmd.scanout_id, 0);
+        assert_eq!(scanout_cmd.resource_id, 1);
+        assert_eq!(scanout_cmd.r.width, 1024);
+
+        let flush_cmd = VirtioGpuResourceFlush::new(1, rect);
+        assert_eq!(flush_cmd.hdr.hdr_type, VIRTIO_GPU_CMD_RESOURCE_FLUSH);
+        assert_eq!(flush_cmd.resource_id, 1);
+
+        let transfer_cmd = VirtioGpuTransferToHost2d::new(1, 0, rect);
+        assert_eq!(transfer_cmd.hdr.hdr_type, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D);
+        assert_eq!(transfer_cmd.offset, 0);
+    }
+}
+
+
 
 
 

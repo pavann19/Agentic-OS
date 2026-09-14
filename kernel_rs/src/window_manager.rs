@@ -18,7 +18,6 @@
 
 use crate::capability::ObjectId;
 use crate::klog_info;
-use crate::renderer::Renderer;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
