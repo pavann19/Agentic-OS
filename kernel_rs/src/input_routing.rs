@@ -91,6 +91,7 @@ pub fn set_focus(surface_object: ObjectId) {
 /// someone").
 pub fn deliver_key_event(scancode: u8) {
     crate::compositor_metrics::record_keyboard_event();
+    crate::input_queue::enqueue(crate::input_queue::InputEventKind::Key { scancode });
 
     // Hotkeys for automated benchmarking & telemetry
     match scancode {

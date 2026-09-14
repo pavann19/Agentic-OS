@@ -38,6 +38,7 @@ pub mod init;
 pub mod events;
 pub mod interrupt_forward;
 pub mod introspect;
+pub mod input_queue; // Phase 5.1 -- lock-free input event queue decoupling input from rendering
 pub mod input_routing; // Phase 12 exit criterion 4 -- minimal real keyboard input routing, see its own module doc
 pub mod installer; // Phase 13 deliverable 2 -- real manifest-gated app install core, see its own module doc
 pub mod installer_demo; // Phase 13 -- real adversarial installer demo against a genuine ELF app, off by default (see Cargo.toml)

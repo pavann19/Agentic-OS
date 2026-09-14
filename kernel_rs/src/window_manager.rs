@@ -45,6 +45,40 @@ static mut BACKBUFFER: Option<Vec<u32>> = None;
 static mut BACKBUFFER_WIDTH: u32 = 0;
 static mut BACKBUFFER_HEIGHT: u32 = 0;
 
+// Phase 5.1: Decoupled presentation & dirty flags
+static CURSOR_DIRTY: AtomicBool = AtomicBool::new(false);
+static WINDOW_DIRTY: AtomicBool = AtomicBool::new(false);
+
+#[derive(Copy, Clone, Default, Debug)]
+pub struct DamageRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+static mut PENDING_VACATED_RECT: Option<DamageRect> = None;
+
+#[inline(always)]
+pub fn mark_cursor_dirty() {
+    CURSOR_DIRTY.store(true, Ordering::Release);
+}
+
+#[inline(always)]
+pub fn mark_window_dirty() {
+    WINDOW_DIRTY.store(true, Ordering::Release);
+}
+
+#[inline(always)]
+pub fn is_window_dirty() -> bool {
+    WINDOW_DIRTY.load(Ordering::Acquire)
+}
+
+#[inline(always)]
+pub fn is_cursor_dirty() -> bool {
+    CURSOR_DIRTY.load(Ordering::Acquire)
+}
+
 pub struct Window {
     surface_object: ObjectId,
     width: u32,
@@ -729,6 +763,9 @@ pub fn report_mouse(dx: i32, dy: i32, left_down: bool) {
     let t_start = crate::compositor_metrics::read_tsc();
     crate::compositor_metrics::record_mouse_event();
 
+    // Phase 5.1: Enqueue hardware input event into lock-free ring buffer
+    crate::input_queue::enqueue(crate::input_queue::InputEventKind::MouseMotion { dx, dy, left_down });
+
     let Some((fb_phys_base, ppsl, fb_width, fb_height)) = crate::compositor::get_fb_params() else {
         return;
     };
@@ -780,11 +817,14 @@ pub fn report_mouse(dx: i32, dy: i32, left_down: bool) {
         }
 
         if window_moved || window_raised {
-            // Restore vacated window area in BACKBUFFER and flush
+            // Decoupled window composition: mark dirty and flush scheduled damage
             if let Some((ox, oy, ow, oh)) = old_win_rect {
-                redraw_rect(fb_phys_base, ppsl, fb_width, fb_height, ox, oy, ow, oh);
+                #[allow(static_mut_refs)]
+                let slot = &mut *&raw mut PENDING_VACATED_RECT;
+                *slot = Some(DamageRect { x: ox, y: oy, width: ow, height: oh });
             }
-            present(fb_phys_base, ppsl, fb_width, fb_height);
+            mark_window_dirty();
+            flush_dirty_surfaces(fb_phys_base, ppsl, fb_width, fb_height);
         } else {
             // Buttery-smooth mouse motion: restore old cursor 12x18 rect from RAM backbuffer,
             // then blit new cursor sprite at new coordinates. Zero window recomposition!
@@ -807,6 +847,20 @@ pub fn report_mouse(dx: i32, dy: i32, left_down: bool) {
             };
             crate::compositor_metrics::record_frame(&metrics);
         }
+    }
+}
+
+/// Flushes pending presentations if any dirty flags are active (Phase 5.1).
+pub unsafe fn flush_dirty_surfaces(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u32) {
+    if WINDOW_DIRTY.swap(false, Ordering::AcqRel) {
+        #[allow(static_mut_refs)]
+        let vacated = (*&raw mut PENDING_VACATED_RECT).take();
+        if let Some(r) = vacated {
+            redraw_rect(fb_phys_base, ppsl, fb_width, fb_height, r.x, r.y, r.width, r.height);
+        }
+        present(fb_phys_base, ppsl, fb_width, fb_height);
+    } else if CURSOR_DIRTY.swap(false, Ordering::AcqRel) {
+        draw_cursor(fb_phys_base, ppsl, fb_width, fb_height);
     }
 }
 
