@@ -23,20 +23,20 @@ pub fn launch_all_apps(params: crate::compositor::FbParams) {
     klog_info!("LAUNCHER_STARTING_ALL_APPS");
 
     // Tile 1: Terminal Emulator (top-left)
-    crate::terminal::spawn_at(20, 30);
-    klog_info!("LAUNCHER_SPAWNED_TERMINAL at=(20, 30)");
+    crate::terminal::spawn_at(20, 50);
+    klog_info!("LAUNCHER_SPAWNED_TERMINAL at=(20, 50)");
 
     // Tile 2: Text Editor (top-right)
-    crate::text_editor::spawn_at(350, 30);
-    klog_info!("LAUNCHER_SPAWNED_TEXT_EDITOR at=(350, 30)");
+    crate::text_editor::spawn_at(350, 50);
+    klog_info!("LAUNCHER_SPAWNED_TEXT_EDITOR at=(350, 50)");
 
     // Tile 3: File Manager (bottom-left)
-    crate::file_manager::spawn_at(20, 240);
-    klog_info!("LAUNCHER_SPAWNED_FILE_MANAGER at=(20, 240)");
+    crate::file_manager::spawn_at(20, 270);
+    klog_info!("LAUNCHER_SPAWNED_FILE_MANAGER at=(20, 270)");
 
     // Tile 4: Net Client (bottom-right)
-    crate::net_client_app::spawn_at(350, 240);
-    klog_info!("LAUNCHER_SPAWNED_NET_CLIENT at=(350, 240)");
+    crate::net_client_app::spawn_at(350, 270);
+    klog_info!("LAUNCHER_SPAWNED_NET_CLIENT at=(350, 270)");
 
     klog_info!("LAUNCHER_ALL_APPS_SPAWNED");
 }

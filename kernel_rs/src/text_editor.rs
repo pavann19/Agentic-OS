@@ -45,7 +45,7 @@ pub fn spawn_at(x: i32, y: i32) {
     thread::spawn(text_editor_thread_at);
 }
 
-static mut TEXT_EDITOR_POS: (i32, i32) = (20, 20);
+static mut TEXT_EDITOR_POS: (i32, i32) = (20, 50);
 
 extern "C" fn text_editor_thread_at() {
     let (x, y) = unsafe { TEXT_EDITOR_POS };
@@ -53,7 +53,7 @@ extern "C" fn text_editor_thread_at() {
 }
 
 extern "C" fn text_editor_thread() {
-    spawn_text_editor_inner(20, 20);
+    spawn_text_editor_inner(20, 50);
 }
 
 fn spawn_text_editor_inner(x: i32, y: i32) {

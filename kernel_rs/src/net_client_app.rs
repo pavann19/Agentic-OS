@@ -46,7 +46,7 @@ pub fn spawn_at(x: i32, y: i32) {
 static mut NET_CLIENT_POS: (i32, i32) = (340, 220);
 
 extern "C" fn net_client_thread() {
-    spawn_net_client_inner(20, 20);
+    spawn_net_client_inner(20, 50);
 }
 
 extern "C" fn net_client_thread_at() {

@@ -125,16 +125,9 @@ fn vaddr_of(sym: &u8) -> u64 {
 /// bare desktop.
 #[allow(dead_code)]
 unsafe fn draw_desktop_chrome(fb_phys_base: u64, ppsl: u32, width: u32, height: u32) {
-    // Real, disclosed fix for the reported "boot splash still visible"
-    // bug (see this call site's own earlier history): a real,
-    // whole-screen clear before anything else draws -- now a light
-    // gray desktop instead of plain black, for the classic-Mac look.
-    text::clear_screen(fb_phys_base, ppsl, width, height, window_manager::DESKTOP_BG_COLOR);
-    // Real top menu bar: a solid white strip layered over the desktop
-    // background (clear_screen fills from (0,0), so calling it again
-    // with just the bar's own height re-fills only that top strip).
-    text::clear_screen(fb_phys_base, ppsl, width, window_manager::MENU_BAR_HEIGHT, window_manager::MENU_BAR_COLOR);
-    text::draw_text(fb_phys_base, ppsl, 4, 2, b"Agentic OS", 0x0000_0000, window_manager::MENU_BAR_COLOR, 0, 0, width, window_manager::MENU_BAR_HEIGHT);
+    let size = (height as u64 * ppsl as u64) * 4;
+    vmm::map_framebuffer_range(fb_phys_base, size);
+    window_manager::init_desktop_chrome(fb_phys_base, ppsl, width, height);
 }
 
 #[no_mangle]

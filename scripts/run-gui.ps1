@@ -90,8 +90,8 @@ Write-Host "Tip: Click inside the QEMU window to type and interact directly with
 Write-Host "Press Ctrl + Alt + G to release mouse grab if captured.`n" -ForegroundColor Gray
 
 $qemuArgs = @(
-    "-machine", "q35",
-    "-accel", "whpx",
+    "-machine", "q35,accel=whpx,kernel-irqchip=on",
+    "-vga", "std",
     "-m", "256M",
     "-device", "intel-iommu,intremap=on",
     "-drive", "if=pflash,format=raw,readonly=on,file=$OvmfCode",
@@ -117,4 +117,34 @@ $qemuArgs += @(
     "-no-reboot"
 )
 
-& $QemuExe @qemuArgs
+try {
+    & $QemuExe @qemuArgs
+} catch {
+    Write-Warning "WHPX execution encountered an issue. Falling back to TCG mode..."
+    $qemuArgsFallback = @(
+        "-machine", "q35,kernel-irqchip=split",
+        "-accel", "tcg,tb-size=128",
+        "-vga", "std",
+        "-m", "256M",
+        "-device", "intel-iommu,intremap=on",
+        "-drive", "if=pflash,format=raw,readonly=on,file=$OvmfCode",
+        "-drive", "file=fat:rw:$FatDir,format=raw"
+    )
+    if ($Mode -eq "launcher" -or $Mode -eq "files") {
+        $qemuArgsFallback += @(
+            "-device", "virtio-blk-pci,drive=disk0,disable-legacy=on,iommu_platform=on,ats=on",
+            "-drive", "file=$diskImg,if=none,id=disk0,format=raw"
+        )
+    }
+    if ($Mode -eq "launcher" -or $Mode -eq "net") {
+        $qemuArgsFallback += @(
+            "-netdev", "user,id=net0",
+            "-device", "e1000,netdev=net0"
+        )
+    }
+    $qemuArgsFallback += @(
+        "-serial", "stdio",
+        "-no-reboot"
+    )
+    & $QemuExe @qemuArgsFallback
+}

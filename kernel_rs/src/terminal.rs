@@ -52,7 +52,7 @@ pub fn spawn_at(x: i32, y: i32) {
     thread::spawn(terminal_thread_at);
 }
 
-static mut TERMINAL_POS: (i32, i32) = (20, 20);
+static mut TERMINAL_POS: (i32, i32) = (20, 50);
 
 extern "C" fn terminal_thread_at() {
     let (x, y) = unsafe { TERMINAL_POS };
@@ -60,7 +60,7 @@ extern "C" fn terminal_thread_at() {
 }
 
 extern "C" fn terminal_thread() {
-    spawn_terminal_inner(20, 20);
+    spawn_terminal_inner(20, 50);
 }
 
 fn spawn_terminal_inner(x: i32, y: i32) {

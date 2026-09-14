@@ -47,7 +47,7 @@ pub fn spawn_at(x: i32, y: i32) {
     thread::spawn(file_manager_thread_at);
 }
 
-static mut FILE_MANAGER_POS: (i32, i32) = (20, 20);
+static mut FILE_MANAGER_POS: (i32, i32) = (20, 50);
 
 extern "C" fn file_manager_thread_at() {
     let (x, y) = unsafe { FILE_MANAGER_POS };
@@ -55,7 +55,7 @@ extern "C" fn file_manager_thread_at() {
 }
 
 extern "C" fn file_manager_thread() {
-    spawn_file_manager_inner(20, 20);
+    spawn_file_manager_inner(20, 50);
 }
 
 fn spawn_file_manager_inner(x: i32, y: i32) {

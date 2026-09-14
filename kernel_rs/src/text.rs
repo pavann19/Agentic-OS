@@ -175,10 +175,11 @@ pub unsafe fn draw_text_to_buffer(buf: &mut [u32], buf_width: u32, buf_height: u
 /// `vmm::map_mmio_page`'s own last-page cache).
 pub unsafe fn clear_screen(fb_phys_base: u64, pixels_per_scan_line: u32, width: u32, height: u32, color: u32) {
     for y in 0..height {
-        for x in 0..width {
-            put_pixel(fb_phys_base, pixels_per_scan_line, x, y, color);
-        }
+        let row_vaddr = crate::vmm::map_framebuffer_page(fb_phys_base + (y as u64 * pixels_per_scan_line as u64) * 4) as *mut u32;
+        let slice = core::slice::from_raw_parts_mut(row_vaddr, width as usize);
+        slice.fill(color);
     }
+    core::arch::asm!("sfence", options(nomem, nostack));
 }
 
 /// Real, bounds-checked text blit: draws `text` (a bounded byte slice —
