@@ -23,9 +23,17 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 pub const TITLE_BAR_HEIGHT: u32 = 20;
-pub const TITLE_BAR_COLOR: u32 = 0x001E_293B; // Slate 800 - dark modern aesthetic
+pub const TITLE_BAR_ACTIVE_BG: u32 = 0x001E_293B; // Slate 800 - dark modern aesthetic
+pub const TITLE_BAR_INACTIVE_BG: u32 = 0x000F_172A; // Slate 900 - subtle inactive aesthetic
+pub const TITLE_BAR_ACTIVE_TOP: u32 = 0x0038_BDF8; // Sky 400 - 1px active window accent indicator
+pub const TITLE_BAR_INACTIVE_TOP: u32 = 0x001E_293B; // Slate 800 - muted inactive top
 pub const TITLE_BAR_BORDER_COLOR: u32 = 0x0033_4155; // Slate 700
-pub const TITLE_FG: u32 = 0x00F8_FAFC; // Crisp Slate 50
+pub const TITLE_FG_ACTIVE: u32 = 0x00F8_FAFC; // Crisp Slate 50
+pub const TITLE_FG_INACTIVE: u32 = 0x0064_748B; // Muted Slate 500
+
+// Backwards compatibility aliases
+pub const TITLE_BAR_COLOR: u32 = TITLE_BAR_ACTIVE_BG;
+pub const TITLE_FG: u32 = TITLE_FG_ACTIVE;
 pub const MAX_TITLE_LEN: usize = 24;
 
 // Real desktop chrome colors
@@ -33,6 +41,8 @@ pub const DESKTOP_BG_COLOR: u32 = 0x000F_172A; // Modern dark slate 900
 pub const MENU_BAR_COLOR: u32 = 0x001E_293B; // Slate 800
 pub const MENU_BAR_HEIGHT: u32 = 22; // 22px height fits 16px font + 3px padding
 pub const MENU_BAR_BORDER_COLOR: u32 = 0x0033_4155; // 1px bottom border
+pub const STATUS_BAR_BG_COLOR: u32 = 0x000B_1120; // Deep slate dock strip
+pub const STATUS_BAR_BORDER_COLOR: u32 = 0x001E_293B; // Slate 800 border
 
 // Real cursor state
 static CURSOR_X: AtomicI32 = AtomicI32::new(160);
@@ -101,6 +111,8 @@ pub struct Window {
     y: i32,
     buffer: Vec<u32>,
     title_buffer: Vec<u32>,
+    title: [u8; MAX_TITLE_LEN],
+    title_len: usize,
 }
 
 static mut WINDOWS: Option<Vec<Window>> = None;
@@ -140,20 +152,129 @@ pub unsafe fn ensure_frontbuffer(width: u32, height: u32) -> &'static mut [u32] 
     ensure_buffers(width, height).1
 }
 
-fn draw_circle_to_buffer(buf: &mut [u32], buf_width: u32, buf_height: u32, cx: i32, cy: i32, r: i32, color: u32) {
-    let r2 = r * r;
-    for dy in -r..=r {
+fn draw_control_button(
+    buf: &mut [u32],
+    buf_width: u32,
+    buf_height: u32,
+    cx: i32,
+    cy: i32,
+    inner_color: u32,
+    ring_color: u32,
+) {
+    for dy in -3..=3 {
         let py = cy + dy;
         if py < 0 || py >= buf_height as i32 {
             continue;
         }
-        for dx in -r..=r {
-            if dx * dx + dy * dy <= r2 {
+        for dx in -3..=3 {
+            let d2 = dx * dx + dy * dy;
+            if d2 <= 9 {
                 let px = cx + dx;
                 if px >= 0 && px < buf_width as i32 {
-                    buf[(py as u32 * buf_width + px as u32) as usize] = color;
+                    let c = if d2 <= 4 { inner_color } else { ring_color };
+                    buf[(py as u32 * buf_width + px as u32) as usize] = c;
                 }
             }
+        }
+    }
+}
+
+pub fn render_title_bar(buf: &mut [u32], width: u32, title: &[u8], is_active: bool) {
+    let bg = if is_active { TITLE_BAR_ACTIVE_BG } else { TITLE_BAR_INACTIVE_BG };
+    buf.fill(bg);
+
+    // Top border: active window has vibrant Sky 400 accent indicator; inactive has subtle Slate 800 border
+    let top_color = if is_active { TITLE_BAR_ACTIVE_TOP } else { TITLE_BAR_INACTIVE_TOP };
+    buf[..width as usize].fill(top_color);
+
+    // Bottom separator line
+    let border_start = ((TITLE_BAR_HEIGHT - 1) * width) as usize;
+    buf[border_start..border_start + width as usize].fill(TITLE_BAR_BORDER_COLOR);
+
+    // Left and right subtle vertical borders
+    for y in 0..TITLE_BAR_HEIGHT {
+        let row = (y * width) as usize;
+        buf[row] = TITLE_BAR_BORDER_COLOR;
+        buf[row + (width as usize - 1)] = TITLE_BAR_BORDER_COLOR;
+    }
+
+    // Modern Mac/NeXT-style action dots: Red (Close), Amber (Minimize), Green (Maximize)
+    // Tactile 2-tone buttons with dark contrast rings
+    if width >= 48 {
+        if is_active {
+            draw_control_button(buf, width, TITLE_BAR_HEIGHT, 12, 10, 0x00EF_4444, 0x0099_1B1B); // Close: Red / dark red ring
+            draw_control_button(buf, width, TITLE_BAR_HEIGHT, 24, 10, 0x00F5_9E0B, 0x0092_400E); // Minimize: Amber / dark amber ring
+            draw_control_button(buf, width, TITLE_BAR_HEIGHT, 36, 10, 0x0010_B981, 0x0006_5F46); // Maximize: Emerald / dark emerald ring
+        } else {
+            draw_control_button(buf, width, TITLE_BAR_HEIGHT, 12, 10, 0x0047_5569, 0x0033_4155); // Muted slate dots
+            draw_control_button(buf, width, TITLE_BAR_HEIGHT, 24, 10, 0x0047_5569, 0x0033_4155);
+            draw_control_button(buf, width, TITLE_BAR_HEIGHT, 36, 10, 0x0047_5569, 0x0033_4155);
+        }
+    }
+
+    let text_x = if width >= 48 { 48 } else { 4 };
+    let fg = if is_active { TITLE_FG_ACTIVE } else { TITLE_FG_INACTIVE };
+    let n = title.len().min(MAX_TITLE_LEN);
+    unsafe {
+        crate::text::draw_text_to_buffer(buf, width, TITLE_BAR_HEIGHT, text_x, 2, &title[..n], fg, bg);
+    }
+}
+
+/// Draws the top menu bar with consistent typography hierarchy and status badges
+pub fn draw_menu_bar(bb: &mut [u32], fb_width: u32, fb_height: u32) {
+    let menu_h = MENU_BAR_HEIGHT.min(fb_height);
+    for y in 0..menu_h {
+        let row_start = (y * fb_width) as usize;
+        let row_end = row_start + fb_width as usize;
+        if y == 0 || y == menu_h - 1 {
+            bb[row_start..row_end].fill(MENU_BAR_BORDER_COLOR);
+        } else {
+            bb[row_start..row_end].fill(MENU_BAR_COLOR);
+        }
+    }
+
+    // Branding & menu items: "AGENTIC OS   File   Edit   View   Apps   Help"
+    unsafe {
+        crate::text::draw_text_to_buffer(bb, fb_width, fb_height, 10, 3, b"AGENTIC OS", 0x0038_BDF8, MENU_BAR_COLOR);
+        crate::text::draw_text_to_buffer(bb, fb_width, fb_height, 114, 3, b"File   Edit   View   Apps   Help", 0x00CBD5E1, MENU_BAR_COLOR);
+
+        // System info badges on top right
+        let badge_text = b"[RAM: 256MB]  [Ring-3 Microkernel]";
+        let badge_x = fb_width.saturating_sub((badge_text.len() as u32 * 8) + 12);
+        if badge_x > 400 {
+            crate::text::draw_text_to_buffer(bb, fb_width, fb_height, badge_x, 3, badge_text, 0x0038_BDF8, MENU_BAR_COLOR);
+        }
+    }
+}
+
+/// Draws the bottom helper status bar / dock strip with navigation tips and status indicators
+pub fn draw_bottom_status_bar(bb: &mut [u32], fb_width: u32, fb_height: u32) {
+    let footer_y = fb_height.saturating_sub(20);
+    if footer_y <= MENU_BAR_HEIGHT + 50 {
+        return;
+    }
+
+    for y in footer_y..fb_height {
+        let row_start = (y * fb_width) as usize;
+        let row_end = row_start + fb_width as usize;
+        if y == footer_y {
+            bb[row_start..row_end].fill(STATUS_BAR_BORDER_COLOR);
+        } else {
+            bb[row_start..row_end].fill(STATUS_BAR_BG_COLOR);
+        }
+    }
+
+    unsafe {
+        crate::text::draw_text_to_buffer(bb, fb_width, fb_height, 10, footer_y + 2, b"Ready", 0x0034_D399, STATUS_BAR_BG_COLOR);
+
+        let tip = b"Tip: Click window to focus | Drag title bar to move | Ctrl+Alt+G release mouse";
+        let tip_x = (fb_width.saturating_sub(tip.len() as u32 * 8)) / 2;
+        crate::text::draw_text_to_buffer(bb, fb_width, fb_height, tip_x, footer_y + 2, tip, 0x0094_A3B8, STATUS_BAR_BG_COLOR);
+
+        let fps_text = b"60 FPS";
+        let fps_x = fb_width.saturating_sub((fps_text.len() as u32 * 8) + 12);
+        if fps_x > tip_x + (tip.len() as u32 * 8) + 20 {
+            crate::text::draw_text_to_buffer(bb, fb_width, fb_height, fps_x, footer_y + 2, fps_text, 0x0038_BDF8, STATUS_BAR_BG_COLOR);
         }
     }
 }
@@ -163,43 +284,26 @@ pub unsafe fn init_desktop_chrome(fb_phys_base: u64, ppsl: u32, width: u32, heig
     let bb = ensure_backbuffer(width, height);
     bb.fill(DESKTOP_BG_COLOR);
 
-    // Top menu bar
-    let menu_h = MENU_BAR_HEIGHT.min(height);
-    for y in 0..menu_h {
-        let row_start = (y * width) as usize;
-        let row_end = row_start + width as usize;
-        if y == menu_h - 1 {
-            bb[row_start..row_end].fill(MENU_BAR_BORDER_COLOR);
-        } else {
-            bb[row_start..row_end].fill(MENU_BAR_COLOR);
-        }
-    }
-
-    // Branding & menu items: "● AGENTIC OS   File   Edit   View   Apps   Help"
-    crate::text::draw_text_to_buffer(bb, width, height, 8, 3, b"AGENTIC OS", 0x0038_BDF8, MENU_BAR_COLOR);
-    crate::text::draw_text_to_buffer(bb, width, height, 110, 3, b"File   Edit   View   Apps   Help", 0x0094_A3B8, MENU_BAR_COLOR);
-
-    // System info badges on top right
-    let badge_text = b"[RAM: 256MB]  [Ring-3 Microkernel]";
-    let badge_x = width.saturating_sub((badge_text.len() as u32 * 8) + 12);
-    if badge_x > 380 {
-        crate::text::draw_text_to_buffer(bb, width, height, badge_x, 3, badge_text, 0x0038_BDF8, MENU_BAR_COLOR);
-    }
-
-    // Bottom helper status bar
-    let footer_y = height.saturating_sub(20);
-    if footer_y > menu_h + 50 {
-        let tip = b"Tip: Click window to focus | Drag title bar to move | Ctrl+Alt+G release mouse";
-        let tip_x = (width.saturating_sub(tip.len() as u32 * 8)) / 2;
-        crate::text::draw_text_to_buffer(bb, width, height, tip_x, footer_y + 2, tip, 0x0064_748B, DESKTOP_BG_COLOR);
-    }
+    draw_menu_bar(bb, width, height);
+    draw_bottom_status_bar(bb, width, height);
 
     // Synchronize BACKBUFFER to FRONTBUFFER and flush to physical GOP via Renderer (Phase 5.6/5.11)
     let fb = ensure_frontbuffer(width, height);
-    unsafe {
-        let r = crate::renderer::active_renderer();
-        r.present_rect(fb_phys_base, ppsl, width, height, bb, fb, DamageRect::new(0, 0, width, height));
-        draw_cursor(fb_phys_base, ppsl, width, height);
+    let r = crate::renderer::active_renderer();
+    r.present_rect(fb_phys_base, ppsl, width, height, bb, fb, DamageRect::new(0, 0, width, height));
+    draw_cursor(fb_phys_base, ppsl, width, height);
+}
+
+/// Refreshes title bar styling for all windows so the topmost window is active and others are inactive
+pub fn update_window_focus_visuals() {
+    let windows = windows_mut();
+    let num_windows = windows.len();
+    if num_windows == 0 {
+        return;
+    }
+    for (i, w) in windows.iter_mut().enumerate() {
+        let is_top = i == num_windows - 1;
+        render_title_bar(&mut w.title_buffer, w.width, &w.title[..w.title_len], is_top);
     }
 }
 
@@ -208,23 +312,8 @@ pub fn register(surface_object: ObjectId, x: i32, y: i32, width: u32, height: u3
     let n = title.len().min(MAX_TITLE_LEN);
     t[..n].copy_from_slice(&title[..n]);
 
-    let mut title_buffer = vec![TITLE_BAR_COLOR; width as usize * TITLE_BAR_HEIGHT as usize];
-
-    // Bottom border of title bar
-    let border_start = ((TITLE_BAR_HEIGHT - 1) * width) as usize;
-    title_buffer[border_start..border_start + width as usize].fill(TITLE_BAR_BORDER_COLOR);
-
-    // Modern Mac/NeXT-style action dots: Red (Close), Amber (Minimize), Green (Maximize)
-    if width >= 40 {
-        draw_circle_to_buffer(&mut title_buffer, width, TITLE_BAR_HEIGHT, 9, 9, 3, 0x00EF_4444); // Red
-        draw_circle_to_buffer(&mut title_buffer, width, TITLE_BAR_HEIGHT, 19, 9, 3, 0x00F5_9E0B); // Amber
-        draw_circle_to_buffer(&mut title_buffer, width, TITLE_BAR_HEIGHT, 29, 9, 3, 0x0010_B981); // Emerald
-    }
-
-    let text_x = if width >= 40 { 38 } else { 4 };
-    unsafe {
-        crate::text::draw_text_to_buffer(&mut title_buffer, width, TITLE_BAR_HEIGHT, text_x, 2, &t[..n], TITLE_FG, TITLE_BAR_COLOR);
-    }
+    let mut title_buffer = vec![0u32; width as usize * TITLE_BAR_HEIGHT as usize];
+    render_title_bar(&mut title_buffer, width, &t[..n], true);
 
     windows_mut().push(Window {
         surface_object,
@@ -234,7 +323,10 @@ pub fn register(surface_object: ObjectId, x: i32, y: i32, width: u32, height: u3
         y,
         buffer: vec![0u32; (width as usize) * (height as usize)],
         title_buffer,
+        title: t,
+        title_len: n,
     });
+    update_window_focus_visuals();
     klog_info!("WINDOW_REGISTERED surface={} pos=({},{}) size=({},{})", surface_object, x, y, width, height);
 }
 
@@ -252,6 +344,7 @@ pub fn raise_window(surface_object: ObjectId) -> bool {
         if pos + 1 < windows.len() {
             let win = windows.remove(pos);
             windows.push(win);
+            update_window_focus_visuals();
             klog_info!("WINDOW_RAISED surface={}", surface_object);
             return true;
         }
@@ -263,6 +356,7 @@ pub fn unregister_window(surface_object: ObjectId, fb_phys_base: u64, ppsl: u32,
     let windows = windows_mut();
     if let Some(pos) = windows.iter().position(|w| w.surface_object == surface_object) {
         let w = windows.remove(pos);
+        update_window_focus_visuals();
         let bar_y = w.y - TITLE_BAR_HEIGHT as i32;
         let total_h = w.height + TITLE_BAR_HEIGHT;
         unsafe {
@@ -848,12 +942,19 @@ unsafe fn redraw_rect(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
     let r = crate::renderer::active_renderer();
 
     // 1. Restore background in BACKBUFFER
+    let footer_y = fb_height.saturating_sub(20);
     for py in ry0..ry1 {
         let bg = if (py as u32) < MENU_BAR_HEIGHT {
-            if py as u32 == MENU_BAR_HEIGHT - 1 {
+            if py as u32 == 0 || py as u32 == MENU_BAR_HEIGHT - 1 {
                 MENU_BAR_BORDER_COLOR
             } else {
                 MENU_BAR_COLOR
+            }
+        } else if (py as u32) >= footer_y && footer_y > MENU_BAR_HEIGHT + 50 {
+            if py as u32 == footer_y {
+                STATUS_BAR_BORDER_COLOR
+            } else {
+                STATUS_BAR_BG_COLOR
             }
         } else {
             DESKTOP_BG_COLOR
@@ -863,20 +964,11 @@ unsafe fn redraw_rect(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
     }
 
     if ry0 < MENU_BAR_HEIGHT as i32 {
-        crate::text::draw_text_to_buffer(bb, fb_width, fb_height, 8, 3, b"AGENTIC OS", 0x0038_BDF8, MENU_BAR_COLOR);
-        crate::text::draw_text_to_buffer(bb, fb_width, fb_height, 110, 3, b"File   Edit   View   Apps   Help", 0x0094_A3B8, MENU_BAR_COLOR);
-        let badge_text = b"[RAM: 256MB]  [Ring-3 Microkernel]";
-        let badge_x = fb_width.saturating_sub((badge_text.len() as u32 * 8) + 12);
-        if badge_x > 380 {
-            crate::text::draw_text_to_buffer(bb, fb_width, fb_height, badge_x, 3, badge_text, 0x0038_BDF8, MENU_BAR_COLOR);
-        }
+        draw_menu_bar(bb, fb_width, fb_height);
     }
 
-    let footer_y = fb_height.saturating_sub(20);
     if (ry1 as u32) > footer_y && footer_y > MENU_BAR_HEIGHT + 50 {
-        let tip = b"Tip: Click window to focus | Drag title bar to move | Ctrl+Alt+G release mouse";
-        let tip_x = (fb_width.saturating_sub(tip.len() as u32 * 8)) / 2;
-        crate::text::draw_text_to_buffer(bb, fb_width, fb_height, tip_x, footer_y + 2, tip, 0x0064_748B, DESKTOP_BG_COLOR);
+        draw_bottom_status_bar(bb, fb_width, fb_height);
     }
 
     // 2. Re-blit overlapping windows in z-order with occlusion clipping (Phase 5.4/5.5/5.11)
