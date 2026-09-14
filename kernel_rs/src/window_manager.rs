@@ -40,8 +40,11 @@ static CURSOR_Y: AtomicI32 = AtomicI32::new(100);
 static LEFT_BUTTON_DOWN: AtomicBool = AtomicBool::new(false);
 static mut DRAGGING: Option<(ObjectId, i32, i32)> = None;
 
-// RAM Backbuffer state for double-buffered compositing
+// Explicit double buffering / presentation pipeline (Phase 5.6):
+// BACKBUFFER: offscreen surface for window composition.
+// FRONTBUFFER: pristine display buffer matching hardware presentation, used for flicker-free cursor restoration.
 static mut BACKBUFFER: Option<Vec<u32>> = None;
+static mut FRONTBUFFER: Option<Vec<u32>> = None;
 static mut BACKBUFFER_WIDTH: u32 = 0;
 static mut BACKBUFFER_HEIGHT: u32 = 0;
 
@@ -114,15 +117,27 @@ fn windows_mut() -> &'static mut Vec<Window> {
 }
 
 #[allow(static_mut_refs)]
-pub unsafe fn ensure_backbuffer(width: u32, height: u32) -> &'static mut [u32] {
-    let slot = &mut *&raw mut BACKBUFFER;
+pub unsafe fn ensure_buffers(width: u32, height: u32) -> (&'static mut [u32], &'static mut [u32]) {
+    let slot_bb = &mut *&raw mut BACKBUFFER;
+    let slot_fb = &mut *&raw mut FRONTBUFFER;
     let size = (width * height) as usize;
-    if slot.is_none() || BACKBUFFER_WIDTH != width || BACKBUFFER_HEIGHT != height {
-        *slot = Some(vec![DESKTOP_BG_COLOR; size]);
+    if slot_bb.is_none() || slot_fb.is_none() || BACKBUFFER_WIDTH != width || BACKBUFFER_HEIGHT != height {
+        *slot_bb = Some(vec![DESKTOP_BG_COLOR; size]);
+        *slot_fb = Some(vec![DESKTOP_BG_COLOR; size]);
         BACKBUFFER_WIDTH = width;
         BACKBUFFER_HEIGHT = height;
     }
-    slot.as_mut().unwrap().as_mut_slice()
+    (slot_bb.as_mut().unwrap().as_mut_slice(), slot_fb.as_mut().unwrap().as_mut_slice())
+}
+
+#[allow(static_mut_refs)]
+pub unsafe fn ensure_backbuffer(width: u32, height: u32) -> &'static mut [u32] {
+    ensure_buffers(width, height).0
+}
+
+#[allow(static_mut_refs)]
+pub unsafe fn ensure_frontbuffer(width: u32, height: u32) -> &'static mut [u32] {
+    ensure_buffers(width, height).1
 }
 
 fn draw_circle_to_buffer(buf: &mut [u32], buf_width: u32, buf_height: u32, cx: i32, cy: i32, r: i32, color: u32) {
@@ -179,9 +194,13 @@ pub unsafe fn init_desktop_chrome(fb_phys_base: u64, ppsl: u32, width: u32, heig
         crate::text::draw_text_to_buffer(bb, width, height, tip_x, footer_y + 2, tip, 0x0064_748B, DESKTOP_BG_COLOR);
     }
 
-    // Flush entire backbuffer to physical GOP framebuffer using fast scanline blit!
+    // Synchronize BACKBUFFER to FRONTBUFFER (Phase 5.6)
+    let fb = ensure_frontbuffer(width, height);
+    fb.copy_from_slice(bb);
+
+    // Flush entire frontbuffer to physical GOP framebuffer using fast scanline blit!
     for y in 0..height {
-        let src_ptr = bb.as_ptr().add((y * width) as usize);
+        let src_ptr = fb.as_ptr().add((y * width) as usize);
         put_fb_scanline_fast(fb_phys_base, ppsl, 0, y, src_ptr, width);
     }
     core::arch::asm!("sfence", options(nomem, nostack));
@@ -458,7 +477,7 @@ unsafe fn blit_window_clipped(
 /// then flushes only the un-occluded visible rectangles to the physical GOP framebuffer.
 pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u32) {
     let t_start = crate::compositor_metrics::read_tsc();
-    let bb = ensure_backbuffer(fb_width, fb_height);
+    let (bb, fb) = ensure_buffers(fb_width, fb_height);
     let screen_rect = DamageRect::new(0, 0, fb_width, fb_height);
 
     let t_compose_start = crate::compositor_metrics::read_tsc();
@@ -473,7 +492,7 @@ pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
         win_bounds[i] = DamageRect::new(w.x, bar_y, w.width, total_h);
     }
 
-    // Compose each window in z-order, clipped against all higher-z windows
+    // Compose each window in z-order, clipped against all higher-z windows into BACKBUFFER
     for i in 0..num_windows {
         let occluders = &win_bounds[i + 1..num_windows.min(16)];
         blit_window_clipped(&windows[i], occluders, bb, fb_width, fb_height);
@@ -484,6 +503,7 @@ pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
     let mut damaged_scanlines = 0usize;
     let mut damaged_pixels = 0usize;
 
+    // Presentation pipeline (Phase 5.6): Commit visible rects from BACKBUFFER to FRONTBUFFER and flush to GOP
     let t_flush_start = crate::compositor_metrics::read_tsc();
     for i in 0..num_windows {
         let w = &windows[i];
@@ -500,11 +520,14 @@ pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
             let r = vis[k];
             if let Some(rc) = r.intersect(&screen_rect) {
                 damaged_rects += 1;
+                let slice_w = rc.width as usize;
                 for sy in rc.y..rc.bottom() {
-                    let src_ptr = bb.as_ptr().add((sy as u32 * fb_width + rc.x as u32) as usize);
+                    let offset = (sy as u32 * fb_width + rc.x as u32) as usize;
+                    fb[offset..offset + slice_w].copy_from_slice(&bb[offset..offset + slice_w]);
+                    let src_ptr = fb.as_ptr().add(offset);
                     put_fb_scanline_fast(fb_phys_base, ppsl, rc.x as u32, sy as u32, src_ptr, rc.width);
                     damaged_scanlines += 1;
-                    damaged_pixels += rc.width as usize;
+                    damaged_pixels += slice_w;
                 }
             }
         }
@@ -514,11 +537,14 @@ pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
             let r = vis[k];
             if let Some(rc) = r.intersect(&screen_rect) {
                 damaged_rects += 1;
+                let slice_w = rc.width as usize;
                 for sy in rc.y..rc.bottom() {
-                    let src_ptr = bb.as_ptr().add((sy as u32 * fb_width + rc.x as u32) as usize);
+                    let offset = (sy as u32 * fb_width + rc.x as u32) as usize;
+                    fb[offset..offset + slice_w].copy_from_slice(&bb[offset..offset + slice_w]);
+                    let src_ptr = fb.as_ptr().add(offset);
                     put_fb_scanline_fast(fb_phys_base, ppsl, rc.x as u32, sy as u32, src_ptr, rc.width);
                     damaged_scanlines += 1;
-                    damaged_pixels += rc.width as usize;
+                    damaged_pixels += slice_w;
                 }
             }
         }
@@ -596,7 +622,7 @@ pub unsafe fn present_partial(
         return true;
     }
 
-    let bb = ensure_backbuffer(fb_width, fb_height);
+    let (bb, fb) = ensure_buffers(fb_width, fb_height);
     let cx = CURSOR_X.load(Ordering::SeqCst);
     let cy = CURSOR_Y.load(Ordering::SeqCst);
     let mut cursor_affected = false;
@@ -608,20 +634,24 @@ pub unsafe fn present_partial(
         let r = vis[i];
         if let Some(rc) = r.intersect(&screen_rect) {
             let count = rc.width;
+            let slice_w = count as usize;
             for sy in rc.y..rc.bottom() {
                 let py = (sy - w.y) as u32;
                 let local_x = (rc.x - w.x) as u32;
                 let src_offset = (py * w.width + local_x) as usize;
                 let dst_offset = (sy as u32 * fb_width + rc.x as u32) as usize;
 
-                // Update RAM backbuffer
-                bb[dst_offset..dst_offset + count as usize].copy_from_slice(&w.buffer[src_offset..src_offset + count as usize]);
+                // 1. Update RAM backbuffer
+                bb[dst_offset..dst_offset + slice_w].copy_from_slice(&w.buffer[src_offset..src_offset + slice_w]);
 
-                // Flush scanline to physical GOP framebuffer
-                let src_ptr = bb.as_ptr().add(dst_offset);
+                // 2. Commit to FRONTBUFFER (Phase 5.6)
+                fb[dst_offset..dst_offset + slice_w].copy_from_slice(&bb[dst_offset..dst_offset + slice_w]);
+
+                // 3. Flush scanline from frontbuffer to physical GOP framebuffer
+                let src_ptr = fb.as_ptr().add(dst_offset);
                 put_fb_scanline_fast(fb_phys_base, ppsl, rc.x as u32, sy as u32, src_ptr, count);
                 damaged_scanlines += 1;
-                damaged_pixels += count as usize;
+                damaged_pixels += slice_w;
 
                 if sy >= cy && sy < cy + CURSOR_H as i32 && (rc.x) < cx + CURSOR_W as i32 && (rc.x + count as i32) > cx {
                     cursor_affected = true;
@@ -717,9 +747,9 @@ const CURSOR_INTERIOR: [u16; 18] = [
     0b0000_0000_0000,
 ];
 
-/// Restores the rectangle under the cursor directly from the pristine RAM backbuffer
+/// Restores the rectangle under the cursor directly from the pristine RAM frontbuffer (Phase 5.6)
 unsafe fn restore_cursor_rect(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u32, cx: i32, cy: i32) {
-    let bb = ensure_backbuffer(fb_width, fb_height);
+    let fb = ensure_frontbuffer(fb_width, fb_height);
     for row in 0..CURSOR_H {
         let sy = cy + row as i32;
         if sy < 0 || sy as u32 >= fb_height {
@@ -731,14 +761,14 @@ unsafe fn restore_cursor_rect(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_he
             continue;
         }
         let count = x_end - x_start;
-        let src_ptr = bb.as_ptr().add((sy as u32 * fb_width + x_start) as usize);
+        let src_ptr = fb.as_ptr().add((sy as u32 * fb_width + x_start) as usize);
         put_fb_scanline_fast(fb_phys_base, ppsl, x_start, sy as u32, src_ptr, count);
     }
 }
 
-/// Blits the cursor sprite over the underlying pixels at (cx, cy)
+/// Blits the cursor sprite over the underlying pixels at (cx, cy) using pristine FRONTBUFFER (Phase 5.6)
 unsafe fn draw_cursor_at(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u32, cx: i32, cy: i32) {
-    let bb = ensure_backbuffer(fb_width, fb_height);
+    let fb = ensure_frontbuffer(fb_width, fb_height);
     let mut line_buf = [0u32; CURSOR_W as usize];
 
     for row in 0..CURSOR_H {
@@ -752,8 +782,8 @@ unsafe fn draw_cursor_at(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height:
             continue;
         }
         let count = x_end - x_start;
-        let bb_off = (sy as u32 * fb_width + x_start) as usize;
-        line_buf[..count as usize].copy_from_slice(&bb[bb_off..bb_off + count as usize]);
+        let fb_off = (sy as u32 * fb_width + x_start) as usize;
+        line_buf[..count as usize].copy_from_slice(&fb[fb_off..fb_off + count as usize]);
 
         let outline_bits = CURSOR_OUTLINE[row as usize];
         let interior_bits = CURSOR_INTERIOR[row as usize];
@@ -792,7 +822,7 @@ unsafe fn redraw_rect(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
         return;
     }
     let count = (rx1 - rx0) as usize;
-    let bb = ensure_backbuffer(fb_width, fb_height);
+    let (bb, fb) = ensure_buffers(fb_width, fb_height);
 
     // 1. Restore background in BACKBUFFER
     for py in ry0..ry1 {
@@ -880,9 +910,11 @@ unsafe fn redraw_rect(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
         }
     }
 
-    // 3. Flush the damaged scanlines to physical GOP framebuffer
+    // 3. Commit to FRONTBUFFER and flush the damaged scanlines to physical GOP framebuffer (Phase 5.6)
     for py in ry0..ry1 {
-        let src_ptr = bb.as_ptr().add((py as u32 * fb_width + rx0 as u32) as usize);
+        let row_off = (py as u32 * fb_width + rx0 as u32) as usize;
+        fb[row_off..row_off + count].copy_from_slice(&bb[row_off..row_off + count]);
+        let src_ptr = fb.as_ptr().add(row_off);
         put_fb_scanline_fast(fb_phys_base, ppsl, rx0 as u32, py as u32, src_ptr, (rx1 - rx0) as u32);
     }
     core::arch::asm!("sfence", options(nomem, nostack));
