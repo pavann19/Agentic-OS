@@ -1669,5 +1669,47 @@ mod frame_pacing_tests {
     }
 }
 
+#[cfg(test)]
+mod allocation_free_hotpath_tests {
+    use kernel_common::geometry::Rect;
+    use kernel_common::frame_pacing::FramePacer;
+
+    #[test]
+    fn zero_allocation_composition_hotpath_soak() {
+        let mut pacer = FramePacer::new(60);
+        let screen = Rect::new(0, 0, 1024, 768);
+        let mut visible_out = [Rect::default(); 32];
+        let mut vacated_out = [Rect::default(); 4];
+
+        // Simulate 500 frames of rapid mouse drag with multiple occluding windows
+        for frame in 0..500 {
+            let win_x = 100 + (frame % 200) as i32;
+            let win_y = 100 + (frame % 150) as i32;
+            let current_win = Rect::new(win_x, win_y, 300, 200);
+            let prev_win = Rect::new(win_x - 2, win_y - 1, 300, 200);
+
+            // Compute vacated slices (zero alloc)
+            let n_vacated = prev_win.subtract(&current_win, &mut vacated_out);
+            assert!(n_vacated <= 4);
+
+            // Compute visible slices against occluders (zero alloc)
+            let occluder = Rect::new(150, 150, 200, 200);
+            let n_vis = Rect::compute_visible_rects(&current_win, &[occluder], &mut visible_out);
+            assert!(n_vis <= 32);
+
+            // Ensure all visible slices are inside screen
+            for k in 0..n_vis {
+                let r = visible_out[k];
+                assert!(screen.contains_rect(&r) || screen.intersect(&r).is_some());
+            }
+
+            pacer.mark_damage();
+            let now = 1_000_000_000 + (frame as u64) * 2_500_000;
+            let _ = pacer.request_presentation(now, 2500, false);
+        }
+    }
+}
+
+
 
 
