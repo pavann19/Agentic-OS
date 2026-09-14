@@ -1461,3 +1461,132 @@ mod request_queue_tests {
     }
 }
 
+#[cfg(test)]
+mod geometry_tests {
+    use kernel_common::geometry::Rect;
+
+    #[test]
+    fn intersect_disjoint_returns_none() {
+        let a = Rect::new(0, 0, 50, 50);
+        let b = Rect::new(60, 60, 50, 50);
+        assert_eq!(a.intersect(&b), None);
+        assert_eq!(b.intersect(&a), None);
+    }
+
+    #[test]
+    fn intersect_touching_edge_returns_none() {
+        let a = Rect::new(0, 0, 50, 50);
+        let b = Rect::new(50, 0, 50, 50);
+        assert_eq!(a.intersect(&b), None);
+    }
+
+    #[test]
+    fn intersect_overlapping_returns_correct_box() {
+        let a = Rect::new(10, 10, 100, 100);
+        let b = Rect::new(50, 50, 100, 100);
+        let inter = a.intersect(&b).expect("should intersect");
+        assert_eq!(inter, Rect::new(50, 50, 60, 60));
+    }
+
+    #[test]
+    fn contains_rect_full_and_partial() {
+        let outer = Rect::new(0, 0, 200, 200);
+        let inner = Rect::new(10, 10, 50, 50);
+        let crossing = Rect::new(150, 150, 100, 100);
+        assert!(outer.contains_rect(&inner));
+        assert!(outer.contains_rect(&outer));
+        assert!(!outer.contains_rect(&crossing));
+        assert!(!inner.contains_rect(&outer));
+    }
+
+    #[test]
+    fn subtract_disjoint_returns_original() {
+        let a = Rect::new(0, 0, 50, 50);
+        let b = Rect::new(100, 100, 50, 50);
+        let mut out = [Rect::default(); 4];
+        let n = a.subtract(&b, &mut out);
+        assert_eq!(n, 1);
+        assert_eq!(out[0], a);
+    }
+
+    #[test]
+    fn subtract_fully_covered_returns_zero() {
+        let target = Rect::new(20, 20, 40, 40);
+        let occluder = Rect::new(0, 0, 100, 100);
+        let mut out = [Rect::default(); 4];
+        let n = target.subtract(&occluder, &mut out);
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn subtract_center_hole_produces_four_disjoint_slices_matching_area() {
+        let target = Rect::new(10, 10, 100, 100); // area = 10,000
+        let hole = Rect::new(30, 30, 40, 40);     // area = 1,600
+        let mut out = [Rect::default(); 4];
+        let n = target.subtract(&hole, &mut out);
+        assert_eq!(n, 4);
+
+        let total_area: usize = out[..n].iter().map(|r| r.area()).sum();
+        assert_eq!(total_area, 10000 - 1600); // 8,400
+
+        // Ensure all slices are mutually disjoint
+        for i in 0..n {
+            for j in (i + 1)..n {
+                assert_eq!(out[i].intersect(&out[j]), None, "slice {} and {} overlap", i, j);
+            }
+        }
+    }
+
+    #[test]
+    fn subtract_top_edge_returns_one_bottom_slice() {
+        let target = Rect::new(0, 0, 100, 100);
+        let occluder = Rect::new(0, 0, 100, 40);
+        let mut out = [Rect::default(); 4];
+        let n = target.subtract(&occluder, &mut out);
+        assert_eq!(n, 1);
+        assert_eq!(out[0], Rect::new(0, 40, 100, 60));
+    }
+
+    #[test]
+    fn subtract_left_edge_returns_one_right_slice() {
+        let target = Rect::new(0, 0, 100, 100);
+        let occluder = Rect::new(0, 0, 30, 100);
+        let mut out = [Rect::default(); 4];
+        let n = target.subtract(&occluder, &mut out);
+        assert_eq!(n, 1);
+        assert_eq!(out[0], Rect::new(30, 0, 70, 100));
+    }
+
+    #[test]
+    fn compute_visible_rects_with_multiple_occluders() {
+        let target = Rect::new(0, 0, 200, 200); // area = 40,000
+        // Two non-overlapping occluders
+        let occ1 = Rect::new(0, 0, 100, 100);     // top-left (10,000)
+        let occ2 = Rect::new(100, 100, 100, 100); // bottom-right (10,000)
+
+        let mut out = [Rect::default(); 32];
+        let n = Rect::compute_visible_rects(&target, &[occ1, occ2], &mut out);
+        assert!(n > 0);
+
+        let visible_area: usize = out[..n].iter().map(|r| r.area()).sum();
+        assert_eq!(visible_area, 20000); // 40,000 - 20,000 = 20,000
+
+        // Ensure all resulting visible rects are mutually disjoint
+        for i in 0..n {
+            for j in (i + 1)..n {
+                assert_eq!(out[i].intersect(&out[j]), None, "rects {} and {} overlap", i, j);
+            }
+        }
+    }
+
+    #[test]
+    fn compute_visible_rects_complete_occlusion() {
+        let target = Rect::new(50, 50, 50, 50);
+        let big = Rect::new(0, 0, 200, 200);
+        let mut out = [Rect::default(); 32];
+        let n = Rect::compute_visible_rects(&target, &[big], &mut out);
+        assert_eq!(n, 0);
+    }
+}
+
+

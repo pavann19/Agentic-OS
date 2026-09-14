@@ -49,13 +49,7 @@ static mut BACKBUFFER_HEIGHT: u32 = 0;
 static CURSOR_DIRTY: AtomicBool = AtomicBool::new(false);
 static WINDOW_DIRTY: AtomicBool = AtomicBool::new(false);
 
-#[derive(Copy, Clone, Default, Debug)]
-pub struct DamageRect {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
+pub type DamageRect = kernel_common::geometry::Rect;
 
 static mut GLOBAL_DAMAGE: crate::damage::DamageRegion = crate::damage::DamageRegion::new();
 
@@ -406,51 +400,78 @@ unsafe fn put_fb_scanline_fast(fb_phys_base: u64, ppsl: u32, sx: u32, sy: u32, s
     core::ptr::copy_nonoverlapping(src, vaddr, pixel_count as usize);
 }
 
-/// Blits a window's title bar and content buffer into the RAM BACKBUFFER
-unsafe fn blit_window_to_backbuffer(w: &Window, bb: &mut [u32], fb_width: u32, fb_height: u32) {
+/// Blits a window's visible title bar and content into RAM BACKBUFFER after subtracting higher-z occluders (Phase 5.4).
+unsafe fn blit_window_clipped(
+    w: &Window,
+    occluders: &[DamageRect],
+    bb: &mut [u32],
+    fb_width: u32,
+    fb_height: u32,
+) {
+    let screen_rect = DamageRect::new(0, 0, fb_width, fb_height);
+
+    // 1. Title bar visible pieces
     let bar_y = w.y - TITLE_BAR_HEIGHT as i32;
-    for py in 0..TITLE_BAR_HEIGHT as i32 {
-        let sy = bar_y + py;
-        if sy < 0 || sy as u32 >= fb_height {
-            continue;
-        }
-        let x_start = if w.x < 0 { (-w.x) as u32 } else { 0 };
-        let x_end = (w.width).min(fb_width.saturating_sub(w.x.max(0) as u32));
-        if x_end > x_start {
-            let sx = (w.x + x_start as i32) as u32;
-            let count = (x_end - x_start) as usize;
-            let src_off = (py as u32 * w.width + x_start) as usize;
-            let dst_off = (sy as u32 * fb_width + sx) as usize;
-            bb[dst_off..dst_off + count].copy_from_slice(&w.title_buffer[src_off..src_off + count]);
+    let title_rect = DamageRect::new(w.x, bar_y, w.width, TITLE_BAR_HEIGHT);
+    let mut vis_title = [DamageRect::default(); 32];
+    let n_title = DamageRect::compute_visible_rects(&title_rect, occluders, &mut vis_title);
+
+    for i in 0..n_title {
+        if let Some(rc) = vis_title[i].intersect(&screen_rect) {
+            let slice_w = rc.width as usize;
+            for sy in rc.y..rc.bottom() {
+                let local_y = (sy - bar_y) as u32;
+                let local_x = (rc.x - w.x) as u32;
+                let src_off = (local_y * w.width + local_x) as usize;
+                let dst_off = (sy as u32 * fb_width + rc.x as u32) as usize;
+                bb[dst_off..dst_off + slice_w].copy_from_slice(&w.title_buffer[src_off..src_off + slice_w]);
+            }
         }
     }
 
-    for py in 0..w.height as i32 {
-        let sy = w.y + py;
-        if sy < 0 || sy as u32 >= fb_height {
-            continue;
-        }
-        let x_start = if w.x < 0 { (-w.x) as u32 } else { 0 };
-        let x_end = (w.width).min(fb_width.saturating_sub(w.x.max(0) as u32));
-        if x_end > x_start {
-            let sx = (w.x + x_start as i32) as u32;
-            let count = (x_end - x_start) as usize;
-            let src_off = (py as u32 * w.width + x_start) as usize;
-            let dst_off = (sy as u32 * fb_width + sx) as usize;
-            bb[dst_off..dst_off + count].copy_from_slice(&w.buffer[src_off..src_off + count]);
+    // 2. Content buffer visible pieces
+    let content_rect = DamageRect::new(w.x, w.y, w.width, w.height);
+    let mut vis_content = [DamageRect::default(); 32];
+    let n_content = DamageRect::compute_visible_rects(&content_rect, occluders, &mut vis_content);
+
+    for i in 0..n_content {
+        if let Some(rc) = vis_content[i].intersect(&screen_rect) {
+            let slice_w = rc.width as usize;
+            for sy in rc.y..rc.bottom() {
+                let local_y = (sy - w.y) as u32;
+                let local_x = (rc.x - w.x) as u32;
+                let src_off = (local_y * w.width + local_x) as usize;
+                let dst_off = (sy as u32 * fb_width + rc.x as u32) as usize;
+                bb[dst_off..dst_off + slice_w].copy_from_slice(&w.buffer[src_off..src_off + slice_w]);
+            }
         }
     }
 }
 
-/// Full compositing pass: composites all windows into RAM BACKBUFFER,
-/// then flushes each window's bounding scanlines to the physical GOP framebuffer.
+/// Full compositing pass with Z-order occlusion culling and sub-rectangle clipping (Phase 5.4):
+/// Composites only visible portions of all windows into RAM BACKBUFFER,
+/// then flushes only the un-occluded visible rectangles to the physical GOP framebuffer.
 pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u32) {
     let t_start = crate::compositor_metrics::read_tsc();
     let bb = ensure_backbuffer(fb_width, fb_height);
+    let screen_rect = DamageRect::new(0, 0, fb_width, fb_height);
 
     let t_compose_start = crate::compositor_metrics::read_tsc();
-    for w in windows_mut().iter() {
-        blit_window_to_backbuffer(w, bb, fb_width, fb_height);
+    let windows = windows_mut();
+    let num_windows = windows.len();
+
+    // Collect bounding boxes of all windows for occlusion computation
+    let mut win_bounds = [DamageRect::default(); 16];
+    for (i, w) in windows.iter().enumerate().take(16) {
+        let bar_y = w.y - TITLE_BAR_HEIGHT as i32;
+        let total_h = w.height + TITLE_BAR_HEIGHT;
+        win_bounds[i] = DamageRect::new(w.x, bar_y, w.width, total_h);
+    }
+
+    // Compose each window in z-order, clipped against all higher-z windows
+    for i in 0..num_windows {
+        let occluders = &win_bounds[i + 1..num_windows.min(16)];
+        blit_window_clipped(&windows[i], occluders, bb, fb_width, fb_height);
     }
     let t_compose_end = crate::compositor_metrics::read_tsc();
 
@@ -459,24 +480,41 @@ pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
     let mut damaged_pixels = 0usize;
 
     let t_flush_start = crate::compositor_metrics::read_tsc();
-    for w in windows_mut().iter() {
-        damaged_rects += 1;
+    for i in 0..num_windows {
+        let w = &windows[i];
+        let occluders = &win_bounds[i + 1..num_windows.min(16)];
+
+        // Compute visible rects for title + content
         let bar_y = w.y - TITLE_BAR_HEIGHT as i32;
-        let total_h = w.height + TITLE_BAR_HEIGHT;
-        for py in 0..total_h as i32 {
-            let sy = bar_y + py;
-            if sy < 0 || sy as u32 >= fb_height {
-                continue;
+        let title_rect = DamageRect::new(w.x, bar_y, w.width, TITLE_BAR_HEIGHT);
+        let content_rect = DamageRect::new(w.x, w.y, w.width, w.height);
+
+        let mut vis = [DamageRect::default(); 32];
+        let n_title = DamageRect::compute_visible_rects(&title_rect, occluders, &mut vis);
+        for k in 0..n_title {
+            let r = vis[k];
+            if let Some(rc) = r.intersect(&screen_rect) {
+                damaged_rects += 1;
+                for sy in rc.y..rc.bottom() {
+                    let src_ptr = bb.as_ptr().add((sy as u32 * fb_width + rc.x as u32) as usize);
+                    put_fb_scanline_fast(fb_phys_base, ppsl, rc.x as u32, sy as u32, src_ptr, rc.width);
+                    damaged_scanlines += 1;
+                    damaged_pixels += rc.width as usize;
+                }
             }
-            let x_start = if w.x < 0 { (-w.x) as u32 } else { 0 };
-            let x_end = (w.width).min(fb_width.saturating_sub(w.x.max(0) as u32));
-            if x_end > x_start {
-                let sx = (w.x + x_start as i32) as u32;
-                let count = x_end - x_start;
-                let src_ptr = bb.as_ptr().add((sy as u32 * fb_width + sx) as usize);
-                put_fb_scanline_fast(fb_phys_base, ppsl, sx, sy as u32, src_ptr, count);
-                damaged_scanlines += 1;
-                damaged_pixels += count as usize;
+        }
+
+        let n_content = DamageRect::compute_visible_rects(&content_rect, occluders, &mut vis);
+        for k in 0..n_content {
+            let r = vis[k];
+            if let Some(rc) = r.intersect(&screen_rect) {
+                damaged_rects += 1;
+                for sy in rc.y..rc.bottom() {
+                    let src_ptr = bb.as_ptr().add((sy as u32 * fb_width + rc.x as u32) as usize);
+                    put_fb_scanline_fast(fb_phys_base, ppsl, rc.x as u32, sy as u32, src_ptr, rc.width);
+                    damaged_scanlines += 1;
+                    damaged_pixels += rc.width as usize;
+                }
             }
         }
     }
@@ -502,8 +540,9 @@ pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
     crate::compositor_metrics::record_frame(&metrics);
 }
 
-/// Partial present for typing/scrolling: blits only the modified scanlines
-/// into BACKBUFFER and the physical GOP framebuffer.
+/// Partial present for typing/scrolling with occlusion culling (Phase 5.4):
+/// Blits only the visible, un-occluded slices into BACKBUFFER and GOP framebuffer.
+/// Never falls back to full-screen redraw when partially or fully occluded!
 pub unsafe fn present_partial(
     fb_phys_base: u64,
     ppsl: u32,
@@ -520,24 +559,35 @@ pub unsafe fn present_partial(
     };
     let w = &windows[w_idx];
     let end_y = (local_y + local_height).min(w.height);
+    if local_y >= end_y {
+        return false;
+    }
+    let actual_h = end_y - local_y;
 
-    let dirty_x0 = w.x;
-    let dirty_x1 = w.x + w.width as i32;
-    let dirty_y0 = w.y + local_y as i32;
-    let dirty_y1 = w.y + end_y as i32;
+    // Collect occluders from higher-z windows
+    let mut occluders = [DamageRect::default(); 16];
+    let mut occ_count = 0;
+    for higher in &windows[w_idx + 1..] {
+        if occ_count < 16 {
+            let bar_y = higher.y - TITLE_BAR_HEIGHT as i32;
+            let total_h = higher.height + TITLE_BAR_HEIGHT;
+            occluders[occ_count] = DamageRect::new(higher.x, bar_y, higher.width, total_h);
+            occ_count += 1;
+        }
+    }
+    let occ_slice = &occluders[..occ_count];
+
+    // Compute visible sub-rectangles for the damaged local rows
+    let damage_rect = DamageRect::new(w.x, w.y + local_y as i32, w.width, actual_h);
+    let screen_rect = DamageRect::new(0, 0, fb_width, fb_height);
 
     let t_damage_start = crate::compositor_metrics::read_tsc();
-    let is_occluded = windows[w_idx + 1..].iter().any(|other| {
-        let other_x0 = other.x;
-        let other_x1 = other.x + other.width as i32;
-        let other_y0 = other.y - TITLE_BAR_HEIGHT as i32;
-        let other_y1 = other.y + other.height as i32;
-        !(dirty_x1 <= other_x0 || dirty_x0 >= other_x1 || dirty_y1 <= other_y0 || dirty_y0 >= other_y1)
-    });
+    let mut vis = [DamageRect::default(); 32];
+    let n_vis = DamageRect::compute_visible_rects(&damage_rect, occ_slice, &mut vis);
     let t_damage_end = crate::compositor_metrics::read_tsc();
 
-    if is_occluded {
-        present(fb_phys_base, ppsl, fb_width, fb_height);
+    if n_vis == 0 {
+        // Completely occluded! Content is already preserved in w.buffer. Zero MMIO writes needed!
         return true;
     }
 
@@ -549,32 +599,29 @@ pub unsafe fn present_partial(
     let mut damaged_pixels = 0usize;
 
     let t_flush_start = crate::compositor_metrics::read_tsc();
-    for py in local_y..end_y {
-        let sy = w.y + py as i32;
-        if sy < 0 || sy as u32 >= fb_height {
-            continue;
-        }
-        let x_start = if w.x < 0 { (-w.x) as u32 } else { 0 };
-        let x_end = (w.width).min(fb_width.saturating_sub(w.x.max(0) as u32));
-        if x_end <= x_start {
-            continue;
-        }
-        let sx = (w.x + x_start as i32) as u32;
-        let count = x_end - x_start;
-        let src_offset = (py * w.width + x_start) as usize;
-        let src_ptr = w.buffer.as_ptr().add(src_offset);
+    for i in 0..n_vis {
+        let r = vis[i];
+        if let Some(rc) = r.intersect(&screen_rect) {
+            let count = rc.width;
+            for sy in rc.y..rc.bottom() {
+                let py = (sy - w.y) as u32;
+                let local_x = (rc.x - w.x) as u32;
+                let src_offset = (py * w.width + local_x) as usize;
+                let dst_offset = (sy as u32 * fb_width + rc.x as u32) as usize;
 
-        // Update RAM backbuffer
-        let bb_offset = (sy as u32 * fb_width + sx) as usize;
-        bb[bb_offset..bb_offset + count as usize].copy_from_slice(&w.buffer[src_offset..src_offset + count as usize]);
+                // Update RAM backbuffer
+                bb[dst_offset..dst_offset + count as usize].copy_from_slice(&w.buffer[src_offset..src_offset + count as usize]);
 
-        // Blit scanline to physical GOP framebuffer
-        put_fb_scanline_fast(fb_phys_base, ppsl, sx, sy as u32, src_ptr, count);
-        damaged_scanlines += 1;
-        damaged_pixels += count as usize;
+                // Flush scanline to physical GOP framebuffer
+                let src_ptr = bb.as_ptr().add(dst_offset);
+                put_fb_scanline_fast(fb_phys_base, ppsl, rc.x as u32, sy as u32, src_ptr, count);
+                damaged_scanlines += 1;
+                damaged_pixels += count as usize;
 
-        if sy >= cy && sy < cy + CURSOR_H as i32 && (sx as i32) < cx + CURSOR_W as i32 && (sx as i32 + count as i32) > cx {
-            cursor_affected = true;
+                if sy >= cy && sy < cy + CURSOR_H as i32 && (rc.x) < cx + CURSOR_W as i32 && (rc.x + count as i32) > cx {
+                    cursor_affected = true;
+                }
+            }
         }
     }
     core::arch::asm!("sfence", options(nomem, nostack));
@@ -594,7 +641,7 @@ pub unsafe fn present_partial(
         compose_time_cycles: 0,
         flush_time_cycles: t_flush_end.saturating_sub(t_flush_start),
         cursor_time_cycles: t_cursor_end.saturating_sub(t_cursor_start),
-        damaged_rects: 1,
+        damaged_rects: n_vis,
         damaged_scanlines,
         damaged_pixels,
     };
