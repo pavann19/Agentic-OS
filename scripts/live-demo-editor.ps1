@@ -91,7 +91,7 @@ try {
     # Wait an additional 3 seconds for UEFI boot services exit and ring-3 text editor launch
     Start-Sleep -Seconds 3
     Write-Host "`n>>> Connected to QEMU! Beginning live keystroke injection now... <<<" -ForegroundColor Green
-    Write-Host "Watch your QEMU window — typing live into Text Editor!`n" -ForegroundColor Magenta
+    Write-Host "Watch your QEMU window -- typing live into Text Editor!`n" -ForegroundColor Magenta
 
     $stream = $client.GetStream()
     $writer = New-Object System.IO.StreamWriter($stream)
