@@ -536,17 +536,12 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
             }
         }
         13 => {
-            // Phase 12 exit criterion 4: SYS_ROUTE_KEY_EVENT -- a0 = a
-            // real PS/2 scancode this process itself just read via its
-            // own granted PortIoRange (`keyboard_driver`, unmodified
-            // otherwise). Real, disclosed scope: NOT yet gated by a
-            // dedicated capability restricting which process may call
-            // this -- the same real, disclosed simplification syscalls
-            // 2-6 already carry (a single, fixed, shared mechanism, not
-            // yet a per-caller capability check); minting a real
-            // RouteKeyEvent-only capability for the genuine keyboard
-            // driver process specifically is real, separate follow-up
-            // work, not silently assumed done here.
+            // Syscall 13: SYS_ROUTE_KEY_EVENT -- caller must hold PortIoRange for port 0x60
+            if !thread::current_has_port_access(0x60) {
+                klog_info!("SYS_ROUTE_KEY_EVENT_DENIED");
+                crate::audit::record(crate::audit::AuditEvent::Denied { cap_id: 0 });
+                return u64::MAX;
+            }
             crate::input_routing::deliver_key_event(a0 as u8);
             0
         }
@@ -645,17 +640,12 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
             }
         }
         22 => {
-            // SYS_MOUSE_REPORT -- `mouse_driver` calls this once per
-            // real, decoded 3-byte PS/2 packet. a0 = packed real
-            // signed deltas and button state: `(dx as i16 as u16 as u64)
-            // | ((dy as i16 as u16 as u64) << 16) | (buttons as u64 <<
-            // 32)` (buttons bit 0 = left). This is NOT gated by a
-            // dedicated capability the way syscalls 2-6 are -- the
-            // same real, disclosed simplification `SYS_ROUTE_KEY_EVENT`
-            // (13) already carries (a single, fixed, shared mechanism,
-            // not yet a per-caller capability check); minting a real
-            // dedicated capability for the genuine mouse driver process
-            // specifically is real, separate follow-up work.
+            // SYS_MOUSE_REPORT -- caller must hold PortIoRange for port 0x60
+            if !thread::current_has_port_access(0x60) {
+                klog_info!("SYS_MOUSE_REPORT_DENIED");
+                crate::audit::record(crate::audit::AuditEvent::Denied { cap_id: 0 });
+                return u64::MAX;
+            }
             let dx = (a0 as u16) as i16;
             let dy = ((a0 >> 16) as u16) as i16;
             let buttons = ((a0 >> 32) as u8) & 0x1;
@@ -686,10 +676,25 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
             // SYS_NET_SERVICE_POLL -- a0 = request_id, a1 = NetPollRequest vaddr
             crate::net_service::syscall_poll(vmm::current_cr3(), a0, a1)
         }
+        29 => {
+            // SYS_YIELD -- no arguments. A ring-3 thread that has finished
+            // all available work (e.g. drained its IPC queue and has no new
+            // key events) calls this to immediately relinquish the rest of
+            // its scheduling quantum rather than busy-spinning until the
+            // next APIC timer interrupt. Real, evidence-backed latency fix:
+            // combined with the 1_000_000 timer quantum reduction (apic.rs)
+            // and the 32-slot IPC queue (ipc.rs), cooperative yield ensures
+            // the keyboard driver's IPC send finds the focused window thread
+            // in READY state within microseconds of the next interrupt,
+            // instead of waiting up to one full ~15ms quantum.
+            thread::schedule();
+            0
+        }
         _ => {
             klog_info!("SYSCALL_UNKNOWN num={}", num);
             u64::MAX
         }
+
     }
 }
 

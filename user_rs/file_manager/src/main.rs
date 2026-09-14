@@ -74,7 +74,7 @@ pub extern "C" fn _start() -> ! {
         loop {
             let r = syscall1(12, info.input_cap as u64);
             if r == u64::MAX {
-                core::hint::spin_loop();
+                surface::yield_now();
                 continue;
             }
             let scancode = r as u8;

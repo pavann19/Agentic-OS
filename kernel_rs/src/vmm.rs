@@ -46,13 +46,16 @@ pub const MMIO_VIRTUAL_BASE: u64 = 0xFFFF_FE00_0000_0000;
 const PAGE_PRESENT: u64 = 1 << 0;
 pub const PAGE_WRITABLE: u64 = 1 << 1;
 pub const PAGE_CACHE_DISABLE: u64 = 1 << 4;
-pub const PAGE_NO_EXECUTE: u64 = 1 << 63;
 /// PAT bit for a 4KB leaf PTE (bit 7) — selects PAT entry 4 when PCD/PWT
 /// are both 0 (the 3-bit PAT-table index is `PAT<<2 | PCD<<1 | PWT`).
 /// See `enable_pat_write_combining`'s own doc for why entry 4
 /// specifically, and why this is real, disclosed root-cause work for
 /// the reported input-lag/"still slow" follow-up, not another guess.
 const PAGE_PAT: u64 = 1 << 7;
+/// Global bit for leaf PTE (bit 8). When CR4.PGE is enabled, translations for
+/// pages with PAGE_GLOBAL set are not flushed on CR3 reload/context switch.
+pub const PAGE_GLOBAL: u64 = 1 << 8;
+pub const PAGE_NO_EXECUTE: u64 = 1 << 63;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 #[repr(C, align(4096))]
@@ -331,7 +334,7 @@ pub unsafe fn init(boot_info: &BootInfo, segments: &[KernelSegment], current_sta
     // permissions (never blanket RWX). Page 0 is never touched here or
     // anywhere else in this function — that omission IS the null-guard.
     for seg in segments {
-        let mut flags = PAGE_NO_EXECUTE;
+        let mut flags = PAGE_NO_EXECUTE | PAGE_GLOBAL;
         if seg.writable {
             flags |= PAGE_WRITABLE;
         }
@@ -356,7 +359,7 @@ pub unsafe fn init(boot_info: &BootInfo, segments: &[KernelSegment], current_sta
             pml4_phys,
             PHYS_MAP_BASE + paddr,
             paddr,
-            PAGE_WRITABLE | PAGE_NO_EXECUTE,
+            PAGE_WRITABLE | PAGE_NO_EXECUTE | PAGE_GLOBAL,
         );
         p += 1;
     }
@@ -396,12 +399,19 @@ pub unsafe fn init(boot_info: &BootInfo, segments: &[KernelSegment], current_sta
             pml4_phys,
             stack_region_base + off,
             stack_region_base + off,
-            PAGE_WRITABLE | PAGE_NO_EXECUTE,
+            PAGE_WRITABLE | PAGE_NO_EXECUTE | PAGE_GLOBAL,
         );
         off += pmm::PAGE_SIZE;
     }
 
-    klog_info!("VMM: kernel + direct-map window + stack region built, switching CR3");
+    // Enable Page Global Enable (PGE) in CR4 (bit 7) so kernel mappings with
+    // PAGE_GLOBAL remain resident in the TLB across CR3 reloads / context switches.
+    let mut cr4: u64;
+    core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+    cr4 |= 1 << 7;
+    core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
+
+    klog_info!("VMM: kernel + direct-map window + stack region built (PAGE_GLOBAL enabled), switching CR3");
 
     core::arch::asm!("mov cr3, {}", in(reg) pml4_phys, options(nostack, preserves_flags));
 
@@ -442,6 +452,66 @@ pub unsafe fn new_address_space() -> u64 {
     new_pml4_phys
 }
 
+/// Destroys a process address space: traverses all user-space mappings (indices 0..256
+/// of the PML4), freeing all leaf user physical pages and all intermediate page table
+/// frames (PT, PD, PDPT) back to the PMM allocator, then frees the PML4 frame itself.
+///
+/// Ensures KERNEL_PML4_PHYS and page 0 are never freed. If CR3 currently points to
+/// `pml4_phys`, switches to `KERNEL_PML4_PHYS` first to prevent executing/translating
+/// with a freed page hierarchy.
+pub unsafe fn destroy_address_space(pml4_phys: u64) {
+    if pml4_phys == 0 || pml4_phys == KERNEL_PML4_PHYS {
+        return;
+    }
+
+    // Safety: if the current core is running on this address space, switch back to the kernel PML4 first.
+    if current_cr3() == pml4_phys {
+        switch_address_space(KERNEL_PML4_PHYS);
+    }
+
+    let pml4 = pmm::p2v_pub(pml4_phys) as *mut u64;
+
+    // Traverse the lower half (user-space: entries 0..256).
+    // Entries 256..512 are shared kernel structures and must NEVER be freed!
+    for i4 in 0..256 {
+        let pml4e = *pml4.add(i4);
+        if pml4e & PAGE_PRESENT != 0 {
+            let pdpt_phys = pml4e & ADDR_MASK;
+            let pdpt = pmm::p2v_pub(pdpt_phys) as *mut u64;
+
+            for i3 in 0..512 {
+                let pdpte = *pdpt.add(i3);
+                if pdpte & PAGE_PRESENT != 0 {
+                    let pd_phys = pdpte & ADDR_MASK;
+                    let pd = pmm::p2v_pub(pd_phys) as *mut u64;
+
+                    for i2 in 0..512 {
+                        let pde = *pd.add(i2);
+                        if pde & PAGE_PRESENT != 0 {
+                            let pt_phys = pde & ADDR_MASK;
+                            let pt = pmm::p2v_pub(pt_phys) as *mut u64;
+
+                            for i1 in 0..512 {
+                                let pte = *pt.add(i1);
+                                if pte & PAGE_PRESENT != 0 {
+                                    let leaf_phys = pte & ADDR_MASK;
+                                    pmm::free_page(leaf_phys);
+                                }
+                            }
+                            pmm::free_page(pt_phys);
+                        }
+                    }
+                    pmm::free_page(pd_phys);
+                }
+            }
+            pmm::free_page(pdpt_phys);
+        }
+    }
+
+    // Free the PML4 table itself.
+    pmm::free_page(pml4_phys);
+}
+
 /// Maps one page into `pml4_phys`'s address space at `vaddr` -> `paddr`
 /// with the given flags — the general-purpose version of `map_page` for
 /// callers outside this module (process/user-space setup). `flags` should
@@ -475,7 +545,7 @@ pub fn current_cr3() -> u64 {
 /// kernel's OWN production tables (post-CR3-switch), not the bootstrap
 /// ones — callable only after `vmm::init()` has run.
 pub unsafe fn map_heap_page(vaddr: u64, paddr: u64) {
-    map_page(KERNEL_PML4_PHYS, vaddr, paddr, PAGE_WRITABLE | PAGE_NO_EXECUTE);
+    map_page(KERNEL_PML4_PHYS, vaddr, paddr, PAGE_WRITABLE | PAGE_NO_EXECUTE | PAGE_GLOBAL);
 }
 
 /// Real, disclosed fast-path fix for the input-typing-lag report: every
@@ -506,7 +576,7 @@ pub unsafe fn map_mmio_page(paddr: u64) -> u64 {
             KERNEL_PML4_PHYS,
             vaddr,
             page_paddr,
-            PAGE_WRITABLE | PAGE_NO_EXECUTE | PAGE_CACHE_DISABLE,
+            PAGE_WRITABLE | PAGE_NO_EXECUTE | PAGE_CACHE_DISABLE | PAGE_GLOBAL,
         );
         LAST_MMIO_PAGE_PADDR.store(page_paddr, core::sync::atomic::Ordering::Relaxed);
     }
@@ -574,8 +644,47 @@ pub unsafe fn map_framebuffer_page(paddr: u64) -> u64 {
     let page_paddr = paddr & !0xFFF;
     let vaddr = MMIO_VIRTUAL_BASE + page_paddr;
     if LAST_FB_PAGE_PADDR.load(core::sync::atomic::Ordering::Relaxed) != page_paddr {
-        map_page(KERNEL_PML4_PHYS, vaddr, page_paddr, PAGE_WRITABLE | PAGE_NO_EXECUTE | PAGE_PAT);
+        map_page(KERNEL_PML4_PHYS, vaddr, page_paddr, PAGE_WRITABLE | PAGE_NO_EXECUTE | PAGE_PAT | PAGE_GLOBAL);
         LAST_FB_PAGE_PADDR.store(page_paddr, core::sync::atomic::Ordering::Relaxed);
     }
     vaddr + (paddr & 0xFFF)
 }
+
+/// Bulk Write-Combining framebuffer range mapping — called ONCE at boot,
+/// before any window content is ever presented. Maps every page in the
+/// framebuffer's physical span [paddr, paddr+size) into the kernel's
+/// dedicated MMIO virtual window with PAT=WC. After this call:
+///
+///  1. `map_framebuffer_page` finds its LAST_FB_PAGE_PADDR cache warm on
+///     every call (no page-table walk, just an atomic load and branch),
+///     cutting the per-pixel overhead from a full 4-level walk to ~zero.
+///
+///  2. The stable `MMIO_VIRTUAL_BASE + page_paddr` addresses are contiguous
+///     for an entire scanline, letting `present_partial`'s per-scanline
+///     loop be replaced with a single `copy_nonoverlapping` (triggering
+///     CPU WC buffer coalescing) instead of QUEUE_DEPTH scalar stores.
+///
+/// Real, disclosed cost: only correct because the framebuffer's physical
+/// address is fixed at boot (UEFI GOP) and never moves. A driver that
+/// DMA-remaps its framebuffer at runtime would need to call this again
+/// after each remap — not applicable here.
+pub unsafe fn map_framebuffer_range(paddr: u64, size: u64) {
+    let start_page = paddr & !0xFFF;
+    let end_page = ((paddr + size).wrapping_add(0xFFF)) & !0xFFF;
+    let mut p = start_page;
+    while p < end_page {
+        let vaddr = MMIO_VIRTUAL_BASE + p;
+        map_page(KERNEL_PML4_PHYS, vaddr, p, PAGE_WRITABLE | PAGE_NO_EXECUTE | PAGE_PAT | PAGE_GLOBAL);
+        p += 0x1000;
+    }
+    // Warm the single-page cache to the first page so subsequent
+    // map_framebuffer_page calls never need to re-insert it.
+    LAST_FB_PAGE_PADDR.store(start_page, core::sync::atomic::Ordering::Relaxed);
+    crate::klog_info!(
+        "VMM_FB_RANGE_MAPPED paddr=0x{:x} size={} pages={}",
+        paddr,
+        size,
+        (end_page - start_page) / 0x1000
+    );
+}
+

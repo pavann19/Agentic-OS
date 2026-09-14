@@ -305,6 +305,15 @@ pub fn deny_port_bits(bitmap: &mut [u8; IOPB_BYTES], port: u16) {
     bitmap[p / 8] |= 1 << (p % 8);
 }
 
+/// Returns true if port `port` is permitted in `bitmap` (bit is 0).
+pub fn is_port_allowed(bitmap: &[u8; IOPB_BYTES], port: u16) -> bool {
+    let p = port as usize;
+    if p >= IOPB_PORTS {
+        return false;
+    }
+    (bitmap[p / 8] & (1 << (p % 8))) == 0
+}
+
 /// Sets TSS.RSP0 — the kernel stack the CPU switches to automatically on
 /// any ring3->ring0 transition (interrupt, exception, or a future syscall
 /// entry that relies on it). NOW wired into the scheduler per-thread

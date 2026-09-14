@@ -76,9 +76,9 @@ pm32_entry:
     # below) in 64-bit mode; this one only needs to survive that gap.
     mov esp, TRAMPOLINE_BASE + 0xF00
 
-    # CR4.PAE -- required before EFER.LME can take effect.
+    # CR4.PAE (bit 5) and CR4.PGE (bit 7) -- required before EFER.LME can take effect.
     mov eax, cr4
-    or eax, (1 << 5)
+    or eax, ((1 << 5) | (1 << 7))
     mov cr4, eax
 
     # CR3 = this kernel's REAL page tables (the SAME ones the BSP

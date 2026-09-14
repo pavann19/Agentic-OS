@@ -216,6 +216,8 @@ pub extern "C" fn _start() -> ! {
 
         let mut packet = [0u8; 3];
         let mut packet_len = 0usize;
+        let mut prev_left = false;
+        let mut report_count: u64 = 0;
         loop {
             syscall20_wait_mouse_interrupt(); // blocks (capability-gated) until a real IRQ12 fires
             let byte = inb(PS2_DATA); // real, unmediated port read -- this process's own PortIoRange grant
@@ -262,13 +264,24 @@ pub extern "C" fn _start() -> ! {
             }
 
             syscall22_mouse_report(dx, dy, left);
-            com1_write_str("[MOUSE_DRIVER] REPORT dx=");
-            write_dec_i16(dx);
-            com1_write_str(" dy=");
-            write_dec_i16(dy);
-            com1_write_str(" left=");
-            write_dec_u64(left as u64);
-            com1_write_str("\n");
+
+            // Throttle synchronous COM1 UART writes: logging ~50 bytes at 115200 baud
+            // takes ~4.35ms per packet, causing massive UI stutter at 100Hz packet rate.
+            // We log immediately on button state changes (clicks, drags) and periodically
+            // every 32 motion packets to keep test script observability intact.
+            let button_changed = left != prev_left;
+            let should_log = button_changed || (report_count % 32 == 0);
+            if should_log {
+                com1_write_str("[MOUSE_DRIVER] REPORT dx=");
+                write_dec_i16(dx);
+                com1_write_str(" dy=");
+                write_dec_i16(dy);
+                com1_write_str(" left=");
+                write_dec_u64(left as u64);
+                com1_write_str("\n");
+            }
+            prev_left = left;
+            report_count = report_count.wrapping_add(1);
         }
     }
 }

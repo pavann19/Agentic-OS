@@ -131,6 +131,41 @@ pub fn exists(surface_object: ObjectId) -> bool {
     windows_mut().iter().any(|w| w.surface_object == surface_object)
 }
 
+/// Reorders `WINDOWS` so that `surface_object` is at the end of the vector,
+/// giving it the highest visual Z-order (rendered on top of all other windows).
+pub fn raise_window(surface_object: ObjectId) -> bool {
+    let windows = windows_mut();
+    if let Some(pos) = windows.iter().position(|w| w.surface_object == surface_object) {
+        if pos + 1 < windows.len() {
+            let win = windows.remove(pos);
+            windows.push(win);
+            klog_info!("WINDOW_RAISED surface={}", surface_object);
+            return true;
+        }
+    }
+    false
+}
+
+/// Unregisters `surface_object`, removing it from the window list and
+/// repainting the desktop background and any underlying windows over
+/// the region it formerly occupied.
+pub fn unregister_window(surface_object: ObjectId, fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u32) -> bool {
+    let windows = windows_mut();
+    if let Some(pos) = windows.iter().position(|w| w.surface_object == surface_object) {
+        let w = windows.remove(pos);
+        let bar_y = w.y - TITLE_BAR_HEIGHT as i32;
+        let total_h = w.height + TITLE_BAR_HEIGHT;
+        unsafe {
+            redraw_rect(fb_phys_base, ppsl, fb_width, fb_height, w.x, bar_y, w.width, total_h);
+            draw_cursor(fb_phys_base, ppsl, fb_width, fb_height);
+        }
+        klog_info!("WINDOW_UNREGISTERED surface={}", surface_object);
+        true
+    } else {
+        false
+    }
+}
+
 /// Real, bounds-checked fill of a window's OWN backing buffer (never
 /// the real framebuffer) — the buffer-side counterpart of the old
 /// direct `syscall_fill_surface` framebuffer write.
@@ -229,6 +264,24 @@ unsafe fn put_fb_pixel(fb_phys_base: u64, ppsl: u32, x: u32, y: u32, color: u32)
     core::ptr::write_volatile(vaddr as *mut u32, color);
 }
 
+/// Fast scanline blit: computes the framebuffer virtual address for the
+/// leftmost pixel of row `sy` starting at column `sx`, then copies
+/// `pixel_count` u32 pixels in a single `copy_nonoverlapping`. After
+/// `vmm::map_framebuffer_range` has pre-mapped every framebuffer page
+/// at boot, this address is a stable `MMIO_VIRTUAL_BASE + phys_offset`
+/// arithmetic — no page-table walk, no per-pixel overhead.
+///
+/// Real, disclosed: `copy_nonoverlapping` on a WC-mapped region lets
+/// the CPU's WC buffers coalesce the stores before flushing to the
+/// display controller, which is faster than QUEUE_DEPTH individual
+/// write_volatile calls even in the QEMU emulated case (fewer VM-exits
+/// per scanline when stores are coalesced at the mmio-model level).
+unsafe fn put_fb_scanline_fast(fb_phys_base: u64, ppsl: u32, sx: u32, sy: u32, src: *const u32, pixel_count: u32) {
+    let byte_offset = (sy as u64 * ppsl as u64 + sx as u64) * 4;
+    let vaddr = crate::vmm::map_framebuffer_page(fb_phys_base + byte_offset) as *mut u32;
+    core::ptr::copy_nonoverlapping(src, vaddr, pixel_count as usize);
+}
+
 /// Real compositing pass: blits every registered window's own backing
 /// buffer onto the real framebuffer at its CURRENT (possibly just
 /// moved) position, plus a real title bar (solid fill + real PSF1
@@ -306,21 +359,49 @@ pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
 /// only use this when it KNOWS no other window's content or this
 /// window's own title bar could have changed.
 pub unsafe fn present_partial(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u32, surface_object: ObjectId, local_y: u32, local_height: u32) -> bool {
-    let Some(w) = find_mut(surface_object) else { return false };
+    let windows = windows_mut();
+    let Some(w_idx) = windows.iter().position(|w| w.surface_object == surface_object) else { return false };
+    let w = &windows[w_idx];
     let end_y = (local_y + local_height).min(w.height);
+
+    // Bounding box of the dirty vertical slice in screen coordinates
+    let dirty_x0 = w.x;
+    let dirty_x1 = w.x + w.width as i32;
+    let dirty_y0 = w.y + local_y as i32;
+    let dirty_y1 = w.y + end_y as i32;
+
+    // Check if any window higher in Z-order overlaps this dirty region
+    let is_occluded = windows[w_idx + 1..].iter().any(|other| {
+        let other_x0 = other.x;
+        let other_x1 = other.x + other.width as i32;
+        let other_y0 = other.y - TITLE_BAR_HEIGHT as i32;
+        let other_y1 = other.y + other.height as i32;
+        !(dirty_x1 <= other_x0 || dirty_x0 >= other_x1 || dirty_y1 <= other_y0 || dirty_y0 >= other_y1)
+    });
+
+    if is_occluded {
+        // Occluded by a higher-Z window: fallback to full compositing pass
+        // so overlapping window content and title bars do not suffer scanline bleed.
+        present(fb_phys_base, ppsl, fb_width, fb_height);
+        return true;
+    }
+
+    // Unoccluded fast path: replaced the old per-pixel put_fb_pixel loop with
+    // a per-scanline copy_nonoverlapping.
     for py in local_y..end_y {
         let sy = w.y + py as i32;
         if sy < 0 || sy as u32 >= fb_height {
             continue;
         }
-        for px in 0..w.width as i32 {
-            let sx = w.x + px;
-            if sx < 0 || sx as u32 >= fb_width {
-                continue;
-            }
-            let color = w.buffer[(py * w.width + px as u32) as usize];
-            put_fb_pixel(fb_phys_base, ppsl, sx as u32, sy as u32, color);
+        // Compute the visible x-range, clipping to screen edges.
+        let x_start = if w.x < 0 { (-w.x) as u32 } else { 0 };
+        let x_end = (w.width).min(fb_width.saturating_sub(w.x.max(0) as u32));
+        if x_end <= x_start {
+            continue;
         }
+        let sx = (w.x + x_start as i32) as u32;
+        let src_ptr = w.buffer.as_ptr().add((py * w.width + x_start) as usize);
+        put_fb_scanline_fast(fb_phys_base, ppsl, sx, sy as u32, src_ptr, x_end - x_start);
     }
     core::arch::asm!("sfence", options(nomem, nostack));
     draw_cursor(fb_phys_base, ppsl, fb_width, fb_height);
@@ -486,10 +567,16 @@ pub fn report_mouse(dx: i32, dy: i32, left_down: bool) {
     let was_down = LEFT_BUTTON_DOWN.swap(left_down, Ordering::SeqCst);
     let press_edge = left_down && !was_down;
     let mut window_moved = false;
+    let mut window_raised = false;
 
     unsafe {
         if press_edge {
             if let Some(target) = topmost_titlebar_at(new_x, new_y) {
+                klog_info!("WINDOW_CLICK_TITLEBAR_FOCUS surface={}", target);
+                crate::input_routing::set_focus(target);
+                if raise_window(target) {
+                    window_raised = true;
+                }
                 if let Some(w) = find_mut(target) {
                     klog_info!("WINDOW_DRAG_START surface={}", target);
                     DRAGGING = Some((target, new_x - w.x, new_y - w.y));
@@ -497,27 +584,37 @@ pub fn report_mouse(dx: i32, dy: i32, left_down: bool) {
             } else if let Some(target) = topmost_content_at(new_x, new_y) {
                 klog_info!("WINDOW_CLICK_FOCUS surface={}", target);
                 crate::input_routing::set_focus(target);
+                if raise_window(target) {
+                    window_raised = true;
+                }
             }
         }
         if !left_down {
             DRAGGING = None;
         }
+        let mut old_win_rect: Option<(i32, i32, u32, u32)> = None;
         if let Some((dragging_object, off_x, off_y)) = DRAGGING {
+            if let Some(w) = find_mut(dragging_object) {
+                let bar_y = w.y - TITLE_BAR_HEIGHT as i32;
+                let total_h = w.height + TITLE_BAR_HEIGHT;
+                old_win_rect = Some((w.x, bar_y, w.width, total_h));
+            }
             window_moved = move_window(dragging_object, new_x - off_x, new_y - off_y, fb_width, fb_height);
         }
 
-        if window_moved {
-            // The window itself moved -- a real, small cursor-only
-            // damage rect could leave a ghost of it at its old
-            // position, so this one real case still needs the full
-            // recomposite (which also redraws the cursor on top).
+        if window_moved || window_raised {
+            // Repaint the vacated window region so moving or raising never leaves ghost trails
+            if let Some((ox, oy, ow, oh)) = old_win_rect {
+                redraw_rect(fb_phys_base, ppsl, fb_width, fb_height, ox, oy, ow, oh);
+            }
+            // Recomposite the full desktop to preserve correct visual occlusion and draw cursor
             present(fb_phys_base, ppsl, fb_width, fb_height);
         } else {
             // The common case (plain cursor movement, or a click that
             // only changed FOCUS with no visible change): repaint just
             // the real rect the cursor's bitmap occupies at its old
             // AND new position, then draw the cursor at its new spot.
-            let pad = 1i32; // real, small margin so the very edge of the bitmap's own pixels never gets clipped by rounding
+            let pad = 2i32; // 2px margin so high-velocity cursor movements never tear or leave trails
             let rx = (old_x.min(new_x)) - pad;
             let ry = (old_y.min(new_y)) - pad;
             let rw = (old_x.max(new_x) - old_x.min(new_x)) as u32 + CURSOR_W as u32 + pad as u32 * 2;

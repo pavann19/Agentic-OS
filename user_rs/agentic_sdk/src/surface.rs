@@ -70,6 +70,19 @@ pub unsafe fn present_rect(surface_cap: u32, y: u32, height: u32) -> u64 {
     syscall2(16, surface_cap as u64, packed)
 }
 
+/// Cooperative yield: relinquishes the rest of this thread's current
+/// scheduling quantum by calling SYS_YIELD (syscall 29). Call this at
+/// the bottom of the event loop when the IPC key queue is empty and
+/// there is genuinely nothing left to do this iteration. Combined with
+/// the reduced APIC timer quantum (kernel_rs::apic, 1_000_000 count)
+/// and the 32-slot IPC queue (kernel_rs::ipc), this eliminates the
+/// busy-spin that caused the user-visible input latency.
+#[inline(always)]
+pub unsafe fn yield_now() {
+    crate::syscall::syscall0(29);
+}
+
+
 /// Draws `text` at `(x, y)` padded with spaces (`b' '`) up to `total_cols`.
 /// This prevents the recurring visual bug where unwritten or trailing cells
 /// in a fixed-width line render as PSF1 glyph 0 (which is not blank in PSF fonts).

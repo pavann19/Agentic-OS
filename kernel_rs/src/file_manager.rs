@@ -60,7 +60,10 @@ extern "C" fn file_manager_thread() {
 
 fn spawn_file_manager_inner(x: i32, y: i32) {
     unsafe {
-        let manifest = Manifest::NONE.allow(CapKind::Surface).allow(CapKind::PortIoRange);
+        let manifest = Manifest::NONE
+            .allow(CapKind::Surface)
+            .allow(CapKind::PortIoRange)
+            .allow(CapKind::FileObject);
         let requests = [
             CapRequest {
                 kind: CapKind::Surface,
@@ -73,6 +76,12 @@ fn spawn_file_manager_inner(x: i32, y: i32) {
                 object_kind: KernelObjectKind::PortIoRange { base: 0x3F8, count: 8 },
                 rights: Rights::PORT_IO,
                 label: "file_manager_com1",
+            },
+            CapRequest {
+                kind: CapKind::FileObject,
+                object_kind: KernelObjectKind::FileObject { inode: 11 },
+                rights: Rights::READ.union(Rights::WRITE),
+                label: "file_manager_file",
             },
         ];
         let Some((entry, space)) = installer::install_into_current_thread(FILE_MANAGER_ELF, STACK_VADDR, manifest, &requests) else {

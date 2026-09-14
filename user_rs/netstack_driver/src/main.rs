@@ -578,6 +578,7 @@ fn ipv4_build(buf: &mut [u8], src: [u8; 4], dst: [u8; 4], proto: u8, payload_len
     IPV4_HDR_LEN
 }
 
+#[allow(dead_code)]
 struct Ipv4Parsed {
     src: [u8; 4],
     dst: [u8; 4],
@@ -760,6 +761,7 @@ fn tcp_parse(seg: &[u8]) -> Option<TcpParsed<'_>> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
 enum TcpState {
     Closed,
     SynSent,
@@ -837,6 +839,7 @@ unsafe fn tcp_wait_for<F: Fn(&TcpParsed) -> bool>(
 /// is RFC 793's SYN_RECEIVED, but introducing a distinct enum value
 /// for a state no other code path needs to distinguish would be
 /// complexity this real, minimal server doesn't need.
+#[allow(dead_code)]
 unsafe fn tcp_accept(nic: &Nic, table: &mut ArpTable, next_rx: &mut u32, local_port: u16, max_spins: u64) -> Option<TcpConn> {
     let mut spins: u64 = 0;
     while spins < max_spins {
@@ -1639,9 +1642,9 @@ pub extern "C" fn _start() -> ! {
                     let reply_vaddr = &reply as *const NetReplyRequest as u64;
                     syscall_ret(27, 0, reply_vaddr);
                 }
+            } else {
+                syscall_ret(29, 0, 0); // SYS_YIELD -- cooperative quantum release
             }
-
-            core::hint::spin_loop();
         }
     }
 }

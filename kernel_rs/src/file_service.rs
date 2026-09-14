@@ -26,7 +26,7 @@
 //! disclosed rather than faked.
 
 use crate::capability::{CapId, CapabilityTable, ObjectId, Rights};
-use crate::{ipc, klog_info, thread, vmm};
+use crate::{audit, ipc, klog_info, thread, vmm};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Real, disclosed bound: generous for this kernel's one real on-disk
@@ -45,9 +45,22 @@ struct Request {
     is_write: bool,
 }
 
-static mut REQUEST: Option<Request> = None;
-static CURRENT_REQUEST_ID: AtomicU64 = AtomicU64::new(0); // 0 = none pending
+struct InFlightFileSlot {
+    id: u64,
+    request: Request,
+}
+
+static mut REQUESTS: Option<alloc::vec::Vec<InFlightFileSlot>> = None;
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+#[allow(static_mut_refs)]
+unsafe fn requests_mut() -> &'static mut alloc::vec::Vec<InFlightFileSlot> {
+    let slot = &mut *&raw mut REQUESTS;
+    if slot.is_none() {
+        *slot = Some(alloc::vec::Vec::new());
+    }
+    slot.as_mut().unwrap()
+}
 
 const NO_SERVER: u32 = u32::MAX;
 static SERVER_SEND_CAP: AtomicU32 = AtomicU32::new(NO_SERVER);
@@ -81,31 +94,40 @@ pub fn register_server() -> CapId {
     receive_cap
 }
 
-/// Real SYS_FILE_SERVICE_REQUEST handler: a real app (e.g.
-/// `file_manager`) asks for `inode`'s content. Real, disclosed
-/// single-in-flight-request design: starting a new request before the
-/// previous one's reply lands simply drops the previous one's eventual
-/// reply -- correct enough for a single-app, single-request-at-a-time
-/// reference client, not a general multi-tenant block-I/O API.
-pub fn request_file(inode: u32) -> u64 {
+/// Real SYS_FILE_SERVICE_REQUEST handler: verifies caller holds a valid
+/// FileObject capability with Rights::READ for `arg0` (either resolving `arg0`
+/// as a CapId or checking that `arg0` matches an authorized inode held by the caller).
+/// Relays the request to the file server driver with a unique multi-tenant request id.
+pub fn request_file(arg0: u32) -> u64 {
+    let inode = if let Some(resolved_inode) = thread::resolve_file_capability(arg0, Rights::READ) {
+        resolved_inode
+    } else if thread::current_has_file_capability(arg0, Rights::READ) {
+        arg0
+    } else {
+        audit::record(audit::AuditEvent::Denied { cap_id: arg0 });
+        klog_info!("FILE_SERVICE_DENIED: caller lacks FileObject READ capability for arg0={}", arg0);
+        return 0;
+    };
+
     let send_cap = SERVER_SEND_CAP.load(Ordering::SeqCst);
     if send_cap == NO_SERVER {
         klog_info!("FILE_SERVICE_REQUEST_NO_SERVER");
         return 0;
     }
     let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
-    unsafe {
-        *(&mut *&raw mut REQUEST) = Some(Request { inode, ready: false, len: 0, data: [0u8; MAX_FILE_BYTES], is_write: false });
-    }
-    CURRENT_REQUEST_ID.store(id, Ordering::SeqCst);
-    // Real, disclosed ABI limit: `SYS_IPC_TRY_RECEIVE`'s own syscall
-    // return value only ever carries `msg.data[0]` (the same real
-    // single-word limit `input_routing.rs`'s own scancode delivery
-    // already lives with) -- both the real request id AND the real
-    // inode need to reach the server, so they're packed into that one
-    // word: `(request_id << 32) | inode`. Both are small (a
-    // sequential counter, a small inode number), so this is a real,
-    // safe packing, not a truncation risk in practice.
+    crate::critical::without_interrupts(|| unsafe {
+        requests_mut().push(InFlightFileSlot {
+            id,
+            request: Request {
+                inode,
+                ready: false,
+                len: 0,
+                data: [0u8; MAX_FILE_BYTES],
+                is_write: false,
+            },
+        });
+    });
+
     let mut msg = ipc::Message::default();
     msg.data[0] = (id << 32) | (inode as u64);
     match ipc::try_send(sender_table_mut(), send_cap, msg) {
@@ -116,11 +138,20 @@ pub fn request_file(inode: u32) -> u64 {
     id
 }
 
-/// Real SYS_FILE_SERVICE_WRITE handler: a real app asks to write
-/// `len` bytes into `inode`. Copies data from user space into kernel
-/// buffer, sends IPC request with bit 31 set to notify server, and returns
-/// request id.
-pub fn write_file(pml4: u64, inode: u32, data_vaddr: u64, len: u32) -> u64 {
+/// Real SYS_FILE_SERVICE_WRITE handler: verifies caller holds a valid
+/// FileObject capability with Rights::WRITE for `arg0`. Copies data from
+/// user space into the request buffer, queues it, and notifies the server.
+pub fn write_file(pml4: u64, arg0: u32, data_vaddr: u64, len: u32) -> u64 {
+    let inode = if let Some(resolved_inode) = thread::resolve_file_capability(arg0, Rights::WRITE) {
+        resolved_inode
+    } else if thread::current_has_file_capability(arg0, Rights::WRITE) {
+        arg0
+    } else {
+        audit::record(audit::AuditEvent::Denied { cap_id: arg0 });
+        klog_info!("FILE_SERVICE_WRITE_DENIED: caller lacks FileObject WRITE capability for arg0={}", arg0);
+        return 0;
+    };
+
     let send_cap = SERVER_SEND_CAP.load(Ordering::SeqCst);
     if send_cap == NO_SERVER {
         klog_info!("FILE_SERVICE_WRITE_NO_SERVER");
@@ -136,18 +167,20 @@ pub fn write_file(pml4: u64, inode: u32, data_vaddr: u64, len: u32) -> u64 {
         vmm::read_user_bytes(pml4, data_vaddr, &mut buf[..real_len]);
     }
     let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
-    unsafe {
-        *(&mut *&raw mut REQUEST) = Some(Request {
-            inode,
-            ready: false,
-            len: real_len,
-            data: buf,
-            is_write: true,
+    crate::critical::without_interrupts(|| unsafe {
+        requests_mut().push(InFlightFileSlot {
+            id,
+            request: Request {
+                inode,
+                ready: false,
+                len: real_len,
+                data: buf,
+                is_write: true,
+            },
         });
-    }
-    CURRENT_REQUEST_ID.store(id, Ordering::SeqCst);
+    });
+
     let mut msg = ipc::Message::default();
-    // Real ABI: bit 31 indicates write operation
     let op_write: u64 = 1 << 31;
     msg.data[0] = (id << 32) | op_write | (inode as u64);
     match ipc::try_send(sender_table_mut(), send_cap, msg) {
@@ -161,88 +194,94 @@ pub fn write_file(pml4: u64, inode: u32, data_vaddr: u64, len: u32) -> u64 {
 /// Called by the SERVING process (virtio_blk_driver) to fetch the pending
 /// write data for `request_id`.
 pub fn server_get_write_data(pml4: u64, request_id: u64, out_vaddr: u64, max_len: u32) -> u64 {
-    if CURRENT_REQUEST_ID.load(Ordering::SeqCst) != request_id {
-        return u64::MAX;
-    }
-    unsafe {
-        let slot = &mut *&raw mut REQUEST;
-        let Some(r) = slot else {
+    crate::critical::without_interrupts(|| unsafe {
+        let reqs = requests_mut();
+        let Some(slot) = reqs.iter().find(|s| s.id == request_id) else {
             return u64::MAX;
         };
-        if !r.is_write {
+        if !slot.request.is_write {
             return u64::MAX;
         }
-        let copy_len = r.len.min(max_len as usize);
+        let copy_len = slot.request.len.min(max_len as usize);
         if !vmm::validate_user_buffer_writable(pml4, out_vaddr, copy_len as u64) {
             klog_info!("FILE_SERVICE_GET_WRITE_DATA_BAD_PTR id={}", request_id);
             return u64::MAX;
         }
-        vmm::write_user_bytes(pml4, out_vaddr, &r.data[..copy_len]);
+        vmm::write_user_bytes(pml4, out_vaddr, &slot.request.data[..copy_len]);
         copy_len as u64
-    }
+    })
 }
 
 /// Real SYS_FILE_SERVICE_REPLY handler: called by the SERVING process
-/// (never the requester) once it has real file bytes ready, e.g. after
-/// `virtio_blk_driver`'s own already-proven `ext2::read_file_data` call.
-/// `pml4` is the CALLING (serving) thread's own address space -- the
-/// real bytes are copied FROM there, the exact same cross-address-space
-/// read `compositor::syscall_draw_text` already performs for a caller's
-/// own request struct.
+/// (never the requester) once it has real file bytes ready.
 pub fn server_reply(pml4: u64, request_id: u64, data_vaddr: u64, len: u32) -> u64 {
-    if CURRENT_REQUEST_ID.load(Ordering::SeqCst) != request_id {
+    let real_len = (len as usize).min(MAX_FILE_BYTES);
+    let mut temp_buf = [0u8; MAX_FILE_BYTES];
+    let is_write_req = crate::critical::without_interrupts(|| unsafe {
+        requests_mut().iter().find(|s| s.id == request_id).map(|s| s.request.is_write)
+    });
+    let Some(is_write) = is_write_req else {
         klog_info!("FILE_SERVICE_REPLY_STALE_ID id={}", request_id);
         return u64::MAX;
-    }
-    let real_len = (len as usize).min(MAX_FILE_BYTES);
-    unsafe {
-        let slot = &mut *&raw mut REQUEST;
-        let Some(r) = slot else {
-            return u64::MAX;
-        };
-        if !r.is_write {
+    };
+    if !is_write {
+        unsafe {
             if !vmm::validate_user_buffer_readable(pml4, data_vaddr, real_len as u64) {
                 klog_info!("FILE_SERVICE_REPLY_BAD_PTR id={}", request_id);
                 return u64::MAX;
             }
-            vmm::read_user_bytes(pml4, data_vaddr, &mut r.data[..real_len]);
-            r.len = real_len;
+            vmm::read_user_bytes(pml4, data_vaddr, &mut temp_buf[..real_len]);
         }
-        r.ready = true;
     }
-    klog_info!("FILE_SERVICE_REPLY_OK id={} len={}", request_id, real_len);
-    0
+    let ok = crate::critical::without_interrupts(|| unsafe {
+        let reqs = requests_mut();
+        if let Some(slot) = reqs.iter_mut().find(|s| s.id == request_id) {
+            if !slot.request.is_write {
+                slot.request.data[..real_len].copy_from_slice(&temp_buf[..real_len]);
+                slot.request.len = real_len;
+            }
+            slot.request.ready = true;
+            true
+        } else {
+            false
+        }
+    });
+    if ok {
+        klog_info!("FILE_SERVICE_REPLY_OK id={} len={}", request_id, real_len);
+        0
+    } else {
+        klog_info!("FILE_SERVICE_REPLY_STALE_ID id={}", request_id);
+        u64::MAX
+    }
 }
 
-/// Real SYS_FILE_SERVICE_POLL handler: called by the REQUESTER
-/// (`file_manager`). Non-blocking, same discipline as `SYS_IPC_TRY_
-/// RECEIVE`: returns `u64::MAX` immediately if the reply isn't in yet
-/// (or the id is stale), the real copied byte count otherwise. `pml4`
-/// is the CALLING (requesting) thread's own address space -- the real
-/// bytes are copied INTO there.
+/// Real SYS_FILE_SERVICE_POLL handler: called by the REQUESTER.
+/// Non-blocking: returns `u64::MAX` if not ready, otherwise copies
+/// the reply data, removes the completed request from the queue, and returns byte count.
 pub fn poll_reply(pml4: u64, request_id: u64, out_vaddr: u64, out_max_len: u32) -> u64 {
-    if CURRENT_REQUEST_ID.load(Ordering::SeqCst) != request_id {
-        return u64::MAX;
-    }
-    unsafe {
-        let slot = &mut *&raw mut REQUEST;
-        let Some(r) = slot else {
+    crate::critical::without_interrupts(|| unsafe {
+        let reqs = requests_mut();
+        let Some(idx) = reqs.iter().position(|s| s.id == request_id) else {
             return u64::MAX;
         };
-        if !r.ready {
+        let slot = &reqs[idx];
+        if !slot.request.ready {
             return u64::MAX;
         }
-        if r.is_write {
-            return r.len as u64;
+        if slot.request.is_write {
+            let ret = slot.request.len as u64;
+            reqs.remove(idx);
+            return ret;
         }
-        let copy_len = r.len.min(out_max_len as usize);
+        let copy_len = slot.request.len.min(out_max_len as usize);
         if !vmm::validate_user_buffer_writable(pml4, out_vaddr, copy_len as u64) {
             klog_info!("FILE_SERVICE_POLL_BAD_PTR id={}", request_id);
             return u64::MAX;
         }
-        vmm::write_user_bytes(pml4, out_vaddr, &r.data[..copy_len]);
+        vmm::write_user_bytes(pml4, out_vaddr, &slot.request.data[..copy_len]);
+        reqs.remove(idx);
         copy_len as u64
-    }
+    })
 }
 
 /// Real request struct a caller writes into its OWN mapped memory

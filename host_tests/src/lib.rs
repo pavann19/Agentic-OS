@@ -1201,3 +1201,263 @@ mod supervision_tests {
         assert_eq!(decide_restart(0, 0), RestartDecision::Quarantine);
     }
 }
+
+#[cfg(test)]
+mod heap_coalescing_tests {
+    use core::ptr::null_mut;
+
+    struct FreeListNode {
+        size: usize,
+        next: *mut FreeListNode,
+    }
+
+    struct TestHeap {
+        head: *mut FreeListNode,
+    }
+
+    impl TestHeap {
+        fn new() -> Self {
+            TestHeap { head: null_mut() }
+        }
+
+        unsafe fn add_free_region(&mut self, addr: u64, size: usize) {
+            if size < core::mem::size_of::<FreeListNode>() {
+                return;
+            }
+
+            let mut prev: *mut FreeListNode = null_mut();
+            let mut curr = self.head;
+            while !curr.is_null() && (curr as u64) < addr {
+                prev = curr;
+                curr = (*curr).next;
+            }
+
+            // Case 1: Merge with prev
+            if !prev.is_null() && (prev as u64) + (*prev).size as u64 == addr {
+                (*prev).size += size;
+                // Also merge with curr if adjacent
+                if !curr.is_null() && (prev as u64) + (*prev).size as u64 == curr as u64 {
+                    (*prev).size += (*curr).size;
+                    (*prev).next = (*curr).next;
+                }
+                return;
+            }
+
+            // Case 2: Merge with curr
+            if !curr.is_null() && addr + size as u64 == curr as u64 {
+                let node = addr as *mut FreeListNode;
+                (*node).size = size + (*curr).size;
+                (*node).next = (*curr).next;
+                if prev.is_null() {
+                    self.head = node;
+                } else {
+                    (*prev).next = node;
+                }
+                return;
+            }
+
+            // Case 3: No merge, insert between prev and curr
+            let node = addr as *mut FreeListNode;
+            (*node).size = size;
+            (*node).next = curr;
+            if prev.is_null() {
+                self.head = node;
+            } else {
+                (*prev).next = node;
+            }
+        }
+
+        unsafe fn free_blocks_count(&self) -> usize {
+            let mut count = 0;
+            let mut curr = self.head;
+            while !curr.is_null() {
+                count += 1;
+                curr = (*curr).next;
+            }
+            count
+        }
+
+        unsafe fn total_free_bytes(&self) -> usize {
+            let mut total = 0;
+            let mut curr = self.head;
+            while !curr.is_null() {
+                total += (*curr).size;
+                curr = (*curr).next;
+            }
+            total
+        }
+    }
+
+    #[test]
+    fn sequential_blocks_coalesce_into_single_block() {
+        let mut heap = TestHeap::new();
+        let buffer = [0u8; 4096];
+        let base = buffer.as_ptr() as u64;
+
+        unsafe {
+            heap.add_free_region(base, 1024);
+            assert_eq!(heap.free_blocks_count(), 1);
+            assert_eq!(heap.total_free_bytes(), 1024);
+
+            heap.add_free_region(base + 1024, 1024);
+            assert_eq!(heap.free_blocks_count(), 1);
+            assert_eq!(heap.total_free_bytes(), 2048);
+
+            heap.add_free_region(base + 2048, 1024);
+            assert_eq!(heap.free_blocks_count(), 1);
+            assert_eq!(heap.total_free_bytes(), 3072);
+        }
+    }
+
+    #[test]
+    fn reverse_blocks_coalesce_into_single_block() {
+        let mut heap = TestHeap::new();
+        let buffer = [0u8; 4096];
+        let base = buffer.as_ptr() as u64;
+
+        unsafe {
+            heap.add_free_region(base + 2048, 1024);
+            heap.add_free_region(base + 1024, 1024);
+            heap.add_free_region(base, 1024);
+
+            assert_eq!(heap.free_blocks_count(), 1);
+            assert_eq!(heap.total_free_bytes(), 3072);
+        }
+    }
+
+    #[test]
+    fn middle_block_bridges_and_coalesces_both_sides() {
+        let mut heap = TestHeap::new();
+        let buffer = [0u8; 4096];
+        let base = buffer.as_ptr() as u64;
+
+        unsafe {
+            // Free left block [base, base + 1024)
+            heap.add_free_region(base, 1024);
+            // Free right block [base + 2048, base + 3072)
+            heap.add_free_region(base + 2048, 1024);
+            assert_eq!(heap.free_blocks_count(), 2);
+            assert_eq!(heap.total_free_bytes(), 2048);
+
+            // Free middle block [base + 1024, base + 2048)
+            heap.add_free_region(base + 1024, 1024);
+            // All three should merge into ONE contiguous 3072-byte block!
+            assert_eq!(heap.free_blocks_count(), 1);
+            assert_eq!(heap.total_free_bytes(), 3072);
+        }
+    }
+
+    #[test]
+    fn non_adjacent_blocks_remain_separate_and_sorted() {
+        let mut heap = TestHeap::new();
+        let buffer = [0u8; 4096];
+        let base = buffer.as_ptr() as u64;
+
+        unsafe {
+            heap.add_free_region(base, 512);
+            heap.add_free_region(base + 1024, 512);
+            heap.add_free_region(base + 2048, 512);
+
+            assert_eq!(heap.free_blocks_count(), 3);
+            assert_eq!(heap.total_free_bytes(), 1536);
+
+            let node0 = heap.head;
+            assert_eq!(node0 as u64, base);
+            let node1 = (*node0).next;
+            assert_eq!(node1 as u64, base + 1024);
+            let node2 = (*node1).next;
+            assert_eq!(node2 as u64, base + 2048);
+            assert!((*node2).next.is_null());
+        }
+    }
+}
+
+#[cfg(test)]
+mod request_queue_tests {
+    struct InFlightSlot<T> {
+        id: u64,
+        data: T,
+        ready: bool,
+    }
+
+    struct RequestQueue<T> {
+        slots: Vec<InFlightSlot<T>>,
+        next_id: u64,
+    }
+
+    impl<T> RequestQueue<T> {
+        fn new() -> Self {
+            Self { slots: Vec::new(), next_id: 1 }
+        }
+
+        fn enqueue(&mut self, data: T) -> u64 {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.slots.push(InFlightSlot { id, data, ready: false });
+            id
+        }
+
+        fn mark_ready(&mut self, id: u64) -> bool {
+            if let Some(slot) = self.slots.iter_mut().find(|s| s.id == id) {
+                slot.ready = true;
+                true
+            } else {
+                false
+            }
+        }
+
+        fn poll_reply(&mut self, id: u64) -> Option<T> {
+            let idx = self.slots.iter().position(|s| s.id == id)?;
+            if self.slots[idx].ready {
+                Some(self.slots.remove(idx).data)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn multi_slot_queue_does_not_overwrite_concurrent_requests() {
+        let mut queue = RequestQueue::<u32>::new();
+        let id1 = queue.enqueue(11); // e.g. inode 11
+        let id2 = queue.enqueue(12); // e.g. inode 12
+        let id3 = queue.enqueue(13); // e.g. inode 13
+
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(id3, 3);
+        assert_eq!(queue.slots.len(), 3);
+
+        // Polling before ready returns None
+        assert_eq!(queue.poll_reply(id1), None);
+        assert_eq!(queue.poll_reply(id2), None);
+
+        // Mark request 2 ready first (out of order completion)
+        assert!(queue.mark_ready(id2));
+        assert_eq!(queue.poll_reply(id2), Some(12));
+        assert_eq!(queue.slots.len(), 2);
+
+        // Requests 1 and 3 are still in-flight and unaffected
+        assert_eq!(queue.poll_reply(id1), None);
+        assert!(queue.mark_ready(id1));
+        assert_eq!(queue.poll_reply(id1), Some(11));
+        assert_eq!(queue.slots.len(), 1);
+
+        assert!(queue.mark_ready(id3));
+        assert_eq!(queue.poll_reply(id3), Some(13));
+        assert_eq!(queue.slots.len(), 0);
+    }
+
+    #[test]
+    fn unknown_or_stale_id_returns_none() {
+        let mut queue = RequestQueue::<u32>::new();
+        let id = queue.enqueue(11);
+        assert!(queue.mark_ready(id));
+        assert_eq!(queue.poll_reply(id), Some(11));
+        // Second poll for the already-retired slot returns None
+        assert_eq!(queue.poll_reply(id), None);
+        // Made-up id returns None
+        assert_eq!(queue.poll_reply(999), None);
+    }
+}
+

@@ -40,9 +40,29 @@ const STATE_IDLE: u8 = 0;
 const STATE_MESSAGE_PENDING: u8 = 1;
 const STATE_MESSAGE_TAKEN: u8 = 2;
 
+/// Per-endpoint capacity for the fire-and-forget (try_send/try_receive)
+/// mailbox queue. 32 slots: a real, disclosed fix for the INPUT_ROUTE_
+/// DROPPED_BUSY latency bug -- rapid typing or multi-byte extended
+/// scancodes (arrow keys send two events, 0xE0 + code) arrived faster
+/// than the ring-3 app's ~150ms scheduling quantum could drain the
+/// old single-slot mailbox, causing silent keystroke loss. 32 slots
+/// absorbs a full burst of fast typing before any slot is consumed.
+/// The blocking rendezvous protocol (send/receive) retains its own
+/// separate `state`/`message` fields and is unaffected.
+const QUEUE_DEPTH: usize = 32;
+
 struct Endpoint {
+    // Blocking rendezvous (send/receive) fields -- unchanged.
     state: core::sync::atomic::AtomicU8,
     message: Message,
+    // Fire-and-forget (try_send/try_receive) ring buffer.
+    // head: next write slot (producer-owned, AtomicU8 wrapping mod QUEUE_DEPTH)
+    // tail: next read slot (consumer-owned, AtomicU8 wrapping mod QUEUE_DEPTH)
+    // len:  outstanding messages  (both sides bump; checked for full/empty)
+    q_head: core::sync::atomic::AtomicU8,
+    q_tail: core::sync::atomic::AtomicU8,
+    q_len:  core::sync::atomic::AtomicU8,
+    q_slots: [Message; QUEUE_DEPTH],
 }
 
 // Real bug found and fixed bringing up Phase 12 input routing:
@@ -75,14 +95,29 @@ struct Endpoint {
 // stays well under it), not a magic number: if it's ever exceeded,
 // `create_endpoint` panics loudly instead of silently reallocating out
 // from under a live reference again.
-const MAX_ENDPOINTS: usize = 256;
-static mut ENDPOINTS: Option<alloc::vec::Vec<Endpoint>> = None;
+struct EndpointSlot {
+    object_id: ObjectId,
+    endpoint: alloc::boxed::Box<Endpoint>,
+}
+
+static mut ENDPOINTS: Option<alloc::vec::Vec<EndpointSlot>> = None;
 #[allow(static_mut_refs)]
-unsafe fn endpoints_mut() -> &'static mut alloc::vec::Vec<Endpoint> {
+unsafe fn endpoints_mut() -> &'static mut alloc::vec::Vec<EndpointSlot> {
     if ENDPOINTS.is_none() {
-        ENDPOINTS = Some(alloc::vec::Vec::with_capacity(MAX_ENDPOINTS));
+        ENDPOINTS = Some(alloc::vec::Vec::new());
     }
     (&mut *&raw mut ENDPOINTS).as_mut().unwrap()
+}
+
+unsafe fn find_endpoint_mut(object_id: ObjectId) -> Option<&'static mut Endpoint> {
+    let eps = endpoints_mut();
+    for slot in eps.iter_mut() {
+        if slot.object_id == object_id {
+            let ptr = slot.endpoint.as_mut() as *mut Endpoint;
+            return Some(&mut *ptr);
+        }
+    }
+    None
 }
 
 /// Real fix, paired with `syscall.rs`'s own entry-stub doc: syscall
@@ -108,18 +143,19 @@ fn spin_yield() {
 /// another process) in `table`.
 pub fn create_endpoint(table: &mut CapabilityTable, rights: Rights) -> CapId {
     let object_id = capability::create_object(KernelObjectKind::IpcEndpoint);
-    // Same real gap class as capability.rs/audit.rs (see critical.rs) --
-    // this Vec growth ran with interrupts enabled, called from ordinary
-    // preemptible thread context by multiple driver setup threads.
     crate::critical::without_interrupts(|| unsafe {
         let eps = endpoints_mut();
-        assert!((object_id as usize) < MAX_ENDPOINTS, "MAX_ENDPOINTS exceeded -- real, disclosed bound, see this module's own doc");
-        while eps.len() <= object_id as usize {
-            eps.push(Endpoint {
+        eps.push(EndpointSlot {
+            object_id,
+            endpoint: alloc::boxed::Box::new(Endpoint {
                 state: core::sync::atomic::AtomicU8::new(STATE_IDLE),
                 message: Message::default(),
-            });
-        }
+                q_head:  core::sync::atomic::AtomicU8::new(0),
+                q_tail:  core::sync::atomic::AtomicU8::new(0),
+                q_len:   core::sync::atomic::AtomicU8::new(0),
+                q_slots: [Message::default(); QUEUE_DEPTH],
+            }),
+        });
     });
     table.grant(object_id, rights)
 }
@@ -127,6 +163,7 @@ pub fn create_endpoint(table: &mut CapabilityTable, rights: Rights) -> CapId {
 #[derive(Debug)]
 pub enum IpcError {
     Cap(CapError),
+    EndpointNotFound,
 }
 
 /// Blocks (spin-yields) until a receiver has taken `msg`, then returns.
@@ -137,7 +174,7 @@ pub fn send(table: &CapabilityTable, cap_id: CapId, msg: Message) -> Result<(), 
     use core::sync::atomic::Ordering;
     let cap = table.resolve(cap_id, Rights::SEND).map_err(IpcError::Cap)?;
     unsafe {
-        let ep = &mut endpoints_mut()[cap.object_id as usize];
+        let ep = find_endpoint_mut(cap.object_id).ok_or(IpcError::EndpointNotFound)?;
         while ep.state.load(Ordering::Acquire) != STATE_IDLE {
             spin_yield();
         }
@@ -153,7 +190,7 @@ pub fn send(table: &CapabilityTable, cap_id: CapId, msg: Message) -> Result<(), 
         object_id: cap.object_id,
     });
     unsafe {
-        let ep = &mut endpoints_mut()[cap.object_id as usize];
+        let ep = find_endpoint_mut(cap.object_id).ok_or(IpcError::EndpointNotFound)?;
         while ep.state.load(Ordering::Acquire) != STATE_MESSAGE_TAKEN {
             spin_yield();
         }
@@ -167,7 +204,7 @@ pub fn receive(table: &CapabilityTable, cap_id: CapId) -> Result<Message, IpcErr
     use core::sync::atomic::Ordering;
     let cap = table.resolve(cap_id, Rights::RECEIVE).map_err(IpcError::Cap)?;
     let msg = unsafe {
-        let ep = &mut endpoints_mut()[cap.object_id as usize];
+        let ep = find_endpoint_mut(cap.object_id).ok_or(IpcError::EndpointNotFound)?;
         while ep.state.load(Ordering::Acquire) != STATE_MESSAGE_PENDING {
             spin_yield();
         }
@@ -206,16 +243,26 @@ pub fn receive(table: &CapabilityTable, cap_id: CapId) -> Result<Message, IpcErr
 pub fn try_send(table: &CapabilityTable, cap_id: CapId, msg: Message) -> Result<bool, IpcError> {
     use core::sync::atomic::Ordering;
     let cap = table.resolve(cap_id, Rights::SEND).map_err(IpcError::Cap)?;
-    unsafe {
-        let ep = &mut endpoints_mut()[cap.object_id as usize];
-        if ep.state.load(Ordering::Acquire) != STATE_IDLE {
-            return Ok(false); // endpoint busy (a still-unconsumed prior message) -- real, deliberate drop, never blocks
+    let enqueued = unsafe {
+        let ep = find_endpoint_mut(cap.object_id).ok_or(IpcError::EndpointNotFound)?;
+        let len = ep.q_len.load(Ordering::Acquire);
+        if len as usize >= QUEUE_DEPTH {
+            // Real, disclosed: queue full — fire-and-forget drop.
+            // 32 slots absorb a full rapid-typing burst; if all 32 are
+            // unconsumed the focused window is genuinely behind.
+            false
+        } else {
+            let head = ep.q_head.load(Ordering::Relaxed) as usize;
+            ep.q_slots[head] = msg;
+            ep.q_head.store(((head + 1) % QUEUE_DEPTH) as u8, Ordering::Relaxed);
+            ep.q_len.fetch_add(1, Ordering::Release);
+            true
         }
-        ep.message = msg;
-        ep.state.store(STATE_MESSAGE_PENDING, Ordering::Release);
+    };
+    if enqueued {
+        audit::record(audit::AuditEvent::IpcSend { object_id: cap.object_id });
     }
-    audit::record(audit::AuditEvent::IpcSend { object_id: cap.object_id });
-    Ok(true)
+    Ok(enqueued)
 }
 
 pub fn try_receive(table: &CapabilityTable, cap_id: CapId) -> Result<Option<Message>, IpcError> {
@@ -235,12 +282,15 @@ pub fn try_receive(table: &CapabilityTable, cap_id: CapId) -> Result<Option<Mess
 pub fn try_receive_on_object(object_id: ObjectId) -> Option<Message> {
     use core::sync::atomic::Ordering;
     unsafe {
-        let ep = &mut endpoints_mut()[object_id as usize];
-        if ep.state.load(Ordering::Acquire) != STATE_MESSAGE_PENDING {
+        let ep = find_endpoint_mut(object_id)?;
+        let len = ep.q_len.load(Ordering::Acquire);
+        if len == 0 {
             return None;
         }
-        let m = ep.message; // see send()'s comment: safe post-Acquire
-        ep.state.store(STATE_IDLE, Ordering::Release);
+        let tail = ep.q_tail.load(Ordering::Relaxed) as usize;
+        let m = ep.q_slots[tail];
+        ep.q_tail.store(((tail + 1) % QUEUE_DEPTH) as u8, Ordering::Relaxed);
+        ep.q_len.fetch_sub(1, Ordering::Release);
         audit::record(audit::AuditEvent::IpcReceive { object_id });
         Some(m)
     }

@@ -67,12 +67,49 @@ impl LockedHeap {
 
     unsafe fn add_free_region(&mut self, addr: u64, size: usize) {
         if size < core::mem::size_of::<FreeListNode>() {
-            return; // too small to track — a real (small) leak, acceptable for now.
+            return; // too small to track
         }
+
+        let mut prev: *mut FreeListNode = null_mut();
+        let mut curr = self.head;
+        while !curr.is_null() && (curr as u64) < addr {
+            prev = curr;
+            curr = (*curr).next;
+        }
+
+        // Case 1: Merge with prev
+        if !prev.is_null() && (prev as u64) + (*prev).size as u64 == addr {
+            (*prev).size += size;
+            // Also merge with curr if adjacent
+            if !curr.is_null() && (prev as u64) + (*prev).size as u64 == curr as u64 {
+                (*prev).size += (*curr).size;
+                (*prev).next = (*curr).next;
+            }
+            return;
+        }
+
+        // Case 2: Merge with curr
+        if !curr.is_null() && addr + size as u64 == curr as u64 {
+            let node = addr as *mut FreeListNode;
+            (*node).size = size + (*curr).size;
+            (*node).next = (*curr).next;
+            if prev.is_null() {
+                self.head = node;
+            } else {
+                (*prev).next = node;
+            }
+            return;
+        }
+
+        // Case 3: No merge, insert between prev and curr
         let node = addr as *mut FreeListNode;
         (*node).size = size;
-        (*node).next = self.head;
-        self.head = node;
+        (*node).next = curr;
+        if prev.is_null() {
+            self.head = node;
+        } else {
+            (*prev).next = node;
+        }
     }
 
     fn align_up(addr: usize, align: usize) -> usize {
@@ -99,12 +136,6 @@ impl LockedHeap {
 
                 let front_pad = alloc_start - node_addr;
                 if front_pad > 0 {
-                    // Region before the aligned start is still free —
-                    // re-add it (only reachable if front_pad is at least
-                    // large enough to hold a FreeListNode, guaranteed by
-                    // caller's minimum alignment/size expectations in
-                    // practice; a stray few unusable bytes if not is the
-                    // same acceptable small leak as the size check above).
                     self.add_free_region(node_addr, front_pad as usize);
                 }
                 let back_pad = node_end - alloc_end;
@@ -123,7 +154,7 @@ impl LockedHeap {
     /// Maps `pages` more pages onto the end of the heap window and adds
     /// them as one new free region. Called once at init with
     /// INITIAL_HEAP_PAGES; can be called again later if the heap runs out
-    /// (not wired to an automatic trigger yet — see alloc()'s OOM path).
+    /// (wired to an automatic trigger in alloc()).
     pub unsafe fn grow_by(&mut self, pages: u64) {
         let start = self.heap_end;
         for p in 0..pages {
@@ -147,7 +178,17 @@ unsafe impl GlobalAlloc for spin_shim::SpinMutex<LockedHeap> {
             let mut guard = self.lock();
             match unsafe { guard.find_and_remove(size, align) } {
                 Some((addr, _)) => addr as *mut u8,
-                None => null_mut(),
+                None => {
+                    // Out of contiguous space: dynamically expand the heap!
+                    let needed_bytes = size + align + pmm::PAGE_SIZE as usize;
+                    let pages = ((needed_bytes as u64 + pmm::PAGE_SIZE - 1) / pmm::PAGE_SIZE).max(256);
+                    unsafe { guard.grow_by(pages) };
+                    klog_info!("HEAP_EXPANDED pages={} new_end=0x{:x}", pages, guard.heap_end);
+                    match unsafe { guard.find_and_remove(size, align) } {
+                        Some((addr, _)) => addr as *mut u8,
+                        None => null_mut(),
+                    }
+                }
             }
         })
     }
@@ -242,11 +283,11 @@ pub fn init() {
 }
 
 #[alloc_error_handler]
-fn alloc_error(layout: Layout) -> ! {
+fn alloc_error(_layout: Layout) -> ! {
     crate::klog::panic("kernel heap allocation failed");
     #[allow(unreachable_code)]
     {
-        let _ = layout;
+        let _ = _layout;
         loop {}
     }
 }

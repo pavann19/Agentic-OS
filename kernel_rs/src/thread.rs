@@ -491,6 +491,13 @@ pub fn deny_port_for_current(port: u16) {
     });
 }
 
+/// Returns true if the currently running thread has IOPB permission for `port`.
+pub fn current_has_port_access(port: u16) -> bool {
+    crate::critical::without_interrupts(|| unsafe {
+        current_mut().as_ref().map_or(false, |t| crate::gdt::is_port_allowed(&t.iopb, port))
+    })
+}
+
 /// Real, direct grant into the CURRENTLY RUNNING thread's OWN
 /// `cap_table` — for kernel-side setup code that runs ON the exact
 /// thread that will enter ring 3 next (the `ahci_driver_thread`/
@@ -523,6 +530,30 @@ pub fn resolve_current_capability(
             None => Err(crate::capability::CapError::NoSuchCapability),
         }
     })
+}
+
+/// Checks if the current thread holds an authorized, valid FileObject capability for `inode` with `required` rights.
+pub fn current_has_file_capability(inode: u32, required: crate::capability::Rights) -> bool {
+    crate::critical::without_interrupts(|| unsafe {
+        match current_mut().as_ref() {
+            Some(t) => t.cap_table.find_file_capability(inode, required).is_some(),
+            None => false,
+        }
+    })
+}
+
+/// Attempts to resolve `cap_id` in the current thread's table into an authorized inode for FileObject with `required` rights.
+pub fn resolve_file_capability(cap_id: crate::capability::CapId, required: crate::capability::Rights) -> Option<u32> {
+    match resolve_current_capability(cap_id, required) {
+        Ok(cap) => {
+            if let Some(crate::capability::KernelObjectKind::FileObject { inode }) = crate::capability::object_kind(cap.object_id) {
+                Some(inode)
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    }
 }
 
 /// Raw asm: save callee-saved regs + RSP into `*old_rsp_slot`, load
@@ -712,6 +743,10 @@ unsafe fn schedule_locked(caller_flags: u64) {
         // thread's own (permanently abandoned) stack.
         if let Some(zombie) = zombie_mut().take() {
             let reaped_id = zombie.id;
+            let space = zombie.address_space;
+            if space != 0 && space != crate::vmm::kernel_pml4_phys() {
+                crate::vmm::destroy_address_space(space);
+            }
             drop(zombie);
             klog_info!("THREAD_REAPED id={}", reaped_id);
         }

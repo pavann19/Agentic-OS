@@ -123,6 +123,7 @@ fn vaddr_of(sym: &u8) -> u64 {
 /// driftable copy here) -- that module's own `redraw_rect` repaints
 /// this exact same chrome, per-pixel, whenever the cursor moves over
 /// bare desktop.
+#[allow(dead_code)]
 unsafe fn draw_desktop_chrome(fb_phys_base: u64, ppsl: u32, width: u32, height: u32) {
     // Real, disclosed fix for the reported "boot splash still visible"
     // bug (see this call site's own earlier history): a real,
@@ -424,6 +425,16 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             // forever. One real, whole-screen clear before anything else
             // draws.
             draw_desktop_chrome(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height);
+            // Real, evidence-backed latency fix (Phase 13 / latency plan
+            // step 3): bulk-map every page in the framebuffer's physical
+            // span once, with Write-Combining, BEFORE any window content
+            // is rendered. After this call map_framebuffer_page hits its
+            // LAST_FB_PAGE_PADDR cache on every subsequent call (no
+            // page-table walk), and window_manager::present_partial can
+            // use a single copy_nonoverlapping per scanline instead of
+            // per-pixel map+store. Logged in QEMU serial: see
+            // VMM_FB_RANGE_MAPPED in the boot log for verification.
+            vmm::map_framebuffer_range(fb.base_address as u64, fb.buffer_size as u64);
             mouse_driver::spawn();
             serial_input::spawn();
             compositor::spawn(compositor::FbParams {

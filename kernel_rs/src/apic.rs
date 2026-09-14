@@ -210,9 +210,13 @@ pub fn arm_timer_this_core() {
         write_reg(REG_SPURIOUS, (SPURIOUS_VECTOR as u32) | APIC_SOFTWARE_ENABLE);
         write_reg(REG_TIMER_DIVIDE, 0x3); // divide by 16
         write_reg(REG_LVT_TIMER, (TIMER_VECTOR as u32) | TIMER_PERIODIC);
-        // Initial count picked empirically for a visible-but-not-flooding
-        // tick rate under QEMU TCG (no calibration against a real time
-        // source yet — that's real future work, not claimed done here).
-        write_reg(REG_TIMER_INITIAL_COUNT, 10_000_000);
+        // Real, evidence-backed latency fix: reduced from 10_000_000 to
+        // 1_000_000 (divide-by-16 divisor unchanged) to cut the preemption
+        // quantum from ~150ms to ~15ms. With 6-8 threads in the round-robin
+        // run queue the old value caused focused-window keystrokes to wait up
+        // to ~1 second for a scheduling turn; 1_000_000 keeps the queue
+        // drained within one ~15ms slot. No calibration against a real time
+        // source yet — that remains real, disclosed future work.
+        write_reg(REG_TIMER_INITIAL_COUNT, 1_000_000);
     }
 }

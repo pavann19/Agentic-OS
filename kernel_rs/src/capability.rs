@@ -405,6 +405,24 @@ impl CapabilityTable {
             id
         }))
     }
+
+    /// Finds a valid, unrevoked FileObject capability naming `inode` that satisfies `required`.
+    pub fn find_file_capability(&self, inode: u32, required: Rights) -> Option<CapId> {
+        for (i, slot) in self.slots.iter().enumerate() {
+            if let Some(cap) = slot {
+                if cap.rights.contains(required) {
+                    if let Some(KernelObjectKind::FileObject { inode: obj_inode }) = object_kind(cap.object_id) {
+                        if obj_inode == inode {
+                            if self.resolve(i as CapId, required).is_ok() {
+                                return Some(i as CapId);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

@@ -265,11 +265,17 @@ unsafe fn submit_and_wait(
     // was read once at setup and folded into notify_base by the caller.
     mmio_write16(notify_base, 0, 0); // queue index 0
 
-    // Poll the used ring (real, stated simplification -- see module doc).
+    // Poll the used ring with a bounded timeout watchdog to prevent infinite hang if hardware stalls
     let used_idx_ptr = (dma + USED_OFF + 2) as *const u16;
     let target = cur_avail_idx.wrapping_add(1);
+    let mut spins: u64 = 0;
     while core::ptr::read_volatile(used_idx_ptr) != target {
         core::hint::spin_loop();
+        spins += 1;
+        if spins >= 10_000_000 {
+            com1_write_str("[VIRTIO_BLK_DRIVER] TIMEOUT waiting for used_idx\n");
+            return 0xFF;
+        }
     }
 
     let _ = common; // (kept for signature symmetry / future ISR-status reads)
@@ -640,7 +646,7 @@ pub extern "C" fn _start() -> ! {
         loop {
             let r = syscall_ret(12, info.file_service_cap as u64, 0); // SYS_IPC_TRY_RECEIVE
             if r == u64::MAX {
-                core::hint::spin_loop();
+                syscall_ret(29, 0, 0); // SYS_YIELD -- cooperative quantum release
                 continue;
             }
             // Real, disclosed ABI limit: `SYS_IPC_TRY_RECEIVE`'s own

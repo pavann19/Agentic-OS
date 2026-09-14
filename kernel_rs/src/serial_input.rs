@@ -16,53 +16,57 @@ enum EscState {
     SawBracket,
 }
 
-fn ascii_to_ps2_scancode(c: u8) -> Option<u8> {
-    let lower = if (b'A'..=b'Z').contains(&c) {
-        c + (b'a' - b'A')
-    } else {
-        c
-    };
-
-    match lower {
-        b'a' => Some(0x1E),
-        b'b' => Some(0x30),
-        b'c' => Some(0x2E),
-        b'd' => Some(0x20),
-        b'e' => Some(0x12),
-        b'f' => Some(0x21),
-        b'g' => Some(0x22),
-        b'h' => Some(0x23),
-        b'i' => Some(0x17),
-        b'j' => Some(0x24),
-        b'k' => Some(0x25),
-        b'l' => Some(0x26),
-        b'm' => Some(0x32),
-        b'n' => Some(0x31),
-        b'o' => Some(0x18),
-        b'p' => Some(0x19),
-        b'q' => Some(0x10),
-        b'r' => Some(0x13),
-        b's' => Some(0x1F),
-        b't' => Some(0x14),
-        b'u' => Some(0x16),
-        b'v' => Some(0x2F),
-        b'w' => Some(0x11),
-        b'x' => Some(0x2D),
-        b'y' => Some(0x15),
-        b'z' => Some(0x2C),
-        b'1' => Some(0x02),
-        b'2' => Some(0x03),
-        b'3' => Some(0x04),
-        b'4' => Some(0x05),
-        b'5' => Some(0x06),
-        b'6' => Some(0x07),
-        b'7' => Some(0x08),
-        b'8' => Some(0x09),
-        b'9' => Some(0x0A),
-        b'0' => Some(0x0B),
-        b' ' => Some(0x39),
-        b'\r' | b'\n' => Some(0x1C), // Enter
-        0x08 | 0x7F => Some(0x0E),   // Backspace / DEL
+fn ascii_to_ps2(c: u8) -> Option<(u8, bool)> {
+    match c {
+        b'a'..=b'z' => {
+            let scancode = match c {
+                b'a' => 0x1E, b'b' => 0x30, b'c' => 0x2E, b'd' => 0x20, b'e' => 0x12,
+                b'f' => 0x21, b'g' => 0x22, b'h' => 0x23, b'i' => 0x17, b'j' => 0x24,
+                b'k' => 0x25, b'l' => 0x26, b'm' => 0x32, b'n' => 0x31, b'o' => 0x18,
+                b'p' => 0x19, b'q' => 0x10, b'r' => 0x13, b's' => 0x1F, b't' => 0x14,
+                b'u' => 0x16, b'v' => 0x2F, b'w' => 0x11, b'x' => 0x2D, b'y' => 0x15,
+                b'z' => 0x2C, _ => return None,
+            };
+            Some((scancode, false))
+        }
+        b'A'..=b'Z' => {
+            let lower = c + (b'a' - b'A');
+            let scancode = match lower {
+                b'a' => 0x1E, b'b' => 0x30, b'c' => 0x2E, b'd' => 0x20, b'e' => 0x12,
+                b'f' => 0x21, b'g' => 0x22, b'h' => 0x23, b'i' => 0x17, b'j' => 0x24,
+                b'k' => 0x25, b'l' => 0x26, b'm' => 0x32, b'n' => 0x31, b'o' => 0x18,
+                b'p' => 0x19, b'q' => 0x10, b'r' => 0x13, b's' => 0x1F, b't' => 0x14,
+                b'u' => 0x16, b'v' => 0x2F, b'w' => 0x11, b'x' => 0x2D, b'y' => 0x15,
+                b'z' => 0x2C, _ => return None,
+            };
+            Some((scancode, true))
+        }
+        b'1' => Some((0x02, false)), b'!' => Some((0x02, true)),
+        b'2' => Some((0x03, false)), b'@' => Some((0x03, true)),
+        b'3' => Some((0x04, false)), b'#' => Some((0x04, true)),
+        b'4' => Some((0x05, false)), b'$' => Some((0x05, true)),
+        b'5' => Some((0x06, false)), b'%' => Some((0x06, true)),
+        b'6' => Some((0x07, false)), b'^' => Some((0x07, true)),
+        b'7' => Some((0x08, false)), b'&' => Some((0x08, true)),
+        b'8' => Some((0x09, false)), b'*' => Some((0x09, true)),
+        b'9' => Some((0x0A, false)), b'(' => Some((0x0A, true)),
+        b'0' => Some((0x0B, false)), b')' => Some((0x0B, true)),
+        b'-' => Some((0x0C, false)), b'_' => Some((0x0C, true)),
+        b'=' => Some((0x0D, false)), b'+' => Some((0x0D, true)),
+        b'[' => Some((0x1A, false)), b'{' => Some((0x1A, true)),
+        b']' => Some((0x1B, false)), b'}' => Some((0x1B, true)),
+        b';' => Some((0x27, false)), b':' => Some((0x27, true)),
+        b'\'' => Some((0x28, false)), b'"' => Some((0x28, true)),
+        b'`' => Some((0x29, false)), b'~' => Some((0x29, true)),
+        b'\\' => Some((0x2B, false)), b'|' => Some((0x2B, true)),
+        b',' => Some((0x33, false)), b'<' => Some((0x33, true)),
+        b'.' => Some((0x34, false)), b'>' => Some((0x34, true)),
+        b'/' => Some((0x35, false)), b'?' => Some((0x35, true)),
+        b' ' => Some((0x39, false)),
+        b'\t' => Some((0x0F, false)),
+        b'\r' | b'\n' => Some((0x1C, false)),
+        0x08 | 0x7F => Some((0x0E, false)),
+        0x1B => Some((0x01, false)),
         _ => None,
     }
 }
@@ -81,8 +85,14 @@ extern "C" fn serial_input_thread() {
                 EscState::Normal => {
                     if byte == 0x1B {
                         state = EscState::SawEsc;
-                    } else if let Some(scancode) = ascii_to_ps2_scancode(byte) {
-                        input_routing::deliver_key_event(scancode);
+                    } else if let Some((scancode, shifted)) = ascii_to_ps2(byte) {
+                        if shifted {
+                            input_routing::deliver_key_event(0x2A); // Shift make
+                            input_routing::deliver_key_event(scancode);
+                            input_routing::deliver_key_event(0xAA); // Shift break
+                        } else {
+                            input_routing::deliver_key_event(scancode);
+                        }
                     }
                 }
                 EscState::SawEsc => {

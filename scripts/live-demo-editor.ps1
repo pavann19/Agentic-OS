@@ -88,9 +88,24 @@ try {
         exit 1
     }
 
-    # Wait an additional 3 seconds for UEFI boot services exit and ring-3 text editor launch
-    Start-Sleep -Seconds 3
-    Write-Host "`n>>> Connected to QEMU! Beginning live keystroke injection now... <<<" -ForegroundColor Green
+    # Wait for UEFI boot services exit and ring-3 text editor launch
+    Write-Host "Waiting for Text Editor window and focus..." -ForegroundColor Yellow
+    $booted = $false
+    $timeoutSec = 30
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt $timeoutSec -and -not $booted) {
+        Start-Sleep -Milliseconds 400
+        if (Test-Path $serialLog) {
+            $logText = Get-Content $serialLog -Raw -ErrorAction SilentlyContinue
+            if ($logText -and ($logText.Contains("TEXT_EDITOR_READY") -or $logText.Contains("INPUT_FOCUS_SET"))) {
+                $booted = $true
+                break
+            }
+        }
+    }
+    Start-Sleep -Milliseconds 500
+
+    Write-Host "`n>>> Text Editor ready! Beginning live keystroke injection now... <<<" -ForegroundColor Green
     Write-Host "Watch your QEMU window -- typing live into Text Editor!`n" -ForegroundColor Magenta
 
     $stream = $client.GetStream()

@@ -79,9 +79,18 @@ static mut ROOT_TABLE_PHYS: u64 = 0;
 // assign_device's own doc comment for the real bug this fixes.
 static mut BUS_CONTEXT_PHYS: [u64; 256] = [0; 256];
 static mut NEXT_DOMAIN_ID: u16 = 0;
+static IOMMU_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 #[allow(static_mut_refs)]
 unsafe fn regs() -> &'static Regs {
+    let mut spins = 0;
+    while !IOMMU_READY.load(core::sync::atomic::Ordering::Acquire) {
+        crate::thread::schedule();
+        spins += 1;
+        if spins > 100_000 {
+            panic!("IOMMU REGS not initialized after yielding");
+        }
+    }
     (&*&raw const REGS).as_ref().unwrap()
 }
 
@@ -138,8 +147,7 @@ pub fn init(dmar_phys: u64) -> bool {
 
     unsafe {
         let vaddr = vmm::map_mmio_page(reg_base_phys);
-        REGS = Some(Regs { vaddr });
-        let r = regs();
+        let r = Regs { vaddr };
 
         let cap = r.read64(REG_CAP);
         let ecap = r.read64(REG_ECAP);
@@ -176,6 +184,9 @@ pub fn init(dmar_phys: u64) -> bool {
                 return false;
             }
         }
+
+        REGS = Some(r);
+        IOMMU_READY.store(true, core::sync::atomic::Ordering::Release);
     }
     klog_info!("IOMMU: translation enabled, root table live, every device denied by default");
     true

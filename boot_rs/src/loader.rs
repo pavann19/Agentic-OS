@@ -202,36 +202,91 @@ unsafe fn load_kernel_elf(bs: &BootServices, root: *mut FileProtocol) -> LResult
     })
 }
 
+static EMBEDDED_FONT: &[u8] = include_bytes!("../../font.psf");
+
 unsafe fn load_psf1_font(bs: &BootServices, root: *mut FileProtocol) -> LResult<*mut Psf1Font> {
-    let file = open_file(root, "font.psf")?;
+    match open_file(root, "font.psf") {
+        Ok(file) => {
+            let mut header_ptr: *mut c_void = ptr::null_mut();
+            let hdr_size = core::mem::size_of::<Psf1Header>();
+            let status = (bs.allocate_pool)(EFI_LOADER_DATA, hdr_size, &mut header_ptr);
+            if is_error(status) || header_ptr.is_null() {
+                return Err(err("AllocatePool(font header) failed"));
+            }
+            read_exact(file, header_ptr, hdr_size)?;
+            let header = header_ptr as *mut Psf1Header;
+            if (*header).magic != PSF1_MAGIC {
+                return Err(err("font magic invalid"));
+            }
+
+            let mut glyph_size = (*header).chars_size as usize * 256;
+            if (*header).mode == 1 {
+                glyph_size = (*header).chars_size as usize * 512;
+            }
+
+            let status = ((*file).set_position)(file, hdr_size as u64);
+            if is_error(status) {
+                return Err(err("SetPosition(glyphs) failed"));
+            }
+            let mut glyph_ptr: *mut c_void = ptr::null_mut();
+            let status = (bs.allocate_pool)(EFI_LOADER_DATA, glyph_size, &mut glyph_ptr);
+            if is_error(status) || glyph_ptr.is_null() {
+                return Err(err("AllocatePool(font glyphs) failed"));
+            }
+            read_exact(file, glyph_ptr, glyph_size)?;
+
+            let mut font_ptr: *mut c_void = ptr::null_mut();
+            let status = (bs.allocate_pool)(
+                EFI_LOADER_DATA,
+                core::mem::size_of::<Psf1Font>(),
+                &mut font_ptr,
+            );
+            if is_error(status) || font_ptr.is_null() {
+                return Err(err("AllocatePool(font obj) failed"));
+            }
+            let font = font_ptr as *mut Psf1Font;
+            (*font).header = header;
+            (*font).glyph_buffer = glyph_ptr;
+            Ok(font)
+        }
+        Err(_) => {
+            crate::serial::write_str("[BOOT] font.psf not found on ESP; using embedded font fallback\n");
+            load_embedded_font(bs)
+        }
+    }
+}
+
+unsafe fn load_embedded_font(bs: &BootServices) -> LResult<*mut Psf1Font> {
+    let hdr_size = core::mem::size_of::<Psf1Header>();
+    if EMBEDDED_FONT.len() < hdr_size {
+        return Err(err("embedded font too small"));
+    }
+    let header_src = EMBEDDED_FONT.as_ptr() as *const Psf1Header;
+    if (*header_src).magic != PSF1_MAGIC {
+        return Err(err("embedded font magic invalid"));
+    }
+
+    let mut glyph_size = (*header_src).chars_size as usize * 256;
+    if (*header_src).mode == 1 {
+        glyph_size = (*header_src).chars_size as usize * 512;
+    }
+    if EMBEDDED_FONT.len() < hdr_size + glyph_size {
+        return Err(err("embedded font truncated glyphs"));
+    }
 
     let mut header_ptr: *mut c_void = ptr::null_mut();
-    let hdr_size = core::mem::size_of::<Psf1Header>();
     let status = (bs.allocate_pool)(EFI_LOADER_DATA, hdr_size, &mut header_ptr);
     if is_error(status) || header_ptr.is_null() {
-        return Err(err("AllocatePool(font header) failed"));
+        return Err(err("AllocatePool(embedded font header) failed"));
     }
-    read_exact(file, header_ptr, hdr_size)?;
-    let header = header_ptr as *mut Psf1Header;
-    if (*header).magic != PSF1_MAGIC {
-        return Err(err("font magic invalid"));
-    }
+    core::ptr::copy_nonoverlapping(EMBEDDED_FONT.as_ptr(), header_ptr as *mut u8, hdr_size);
 
-    let mut glyph_size = (*header).chars_size as usize * 256;
-    if (*header).mode == 1 {
-        glyph_size = (*header).chars_size as usize * 512;
-    }
-
-    let status = ((*file).set_position)(file, hdr_size as u64);
-    if is_error(status) {
-        return Err(err("SetPosition(glyphs) failed"));
-    }
     let mut glyph_ptr: *mut c_void = ptr::null_mut();
     let status = (bs.allocate_pool)(EFI_LOADER_DATA, glyph_size, &mut glyph_ptr);
     if is_error(status) || glyph_ptr.is_null() {
-        return Err(err("AllocatePool(font glyphs) failed"));
+        return Err(err("AllocatePool(embedded font glyphs) failed"));
     }
-    read_exact(file, glyph_ptr, glyph_size)?;
+    core::ptr::copy_nonoverlapping(EMBEDDED_FONT.as_ptr().add(hdr_size), glyph_ptr as *mut u8, glyph_size);
 
     let mut font_ptr: *mut c_void = ptr::null_mut();
     let status = (bs.allocate_pool)(
@@ -240,10 +295,10 @@ unsafe fn load_psf1_font(bs: &BootServices, root: *mut FileProtocol) -> LResult<
         &mut font_ptr,
     );
     if is_error(status) || font_ptr.is_null() {
-        return Err(err("AllocatePool(font obj) failed"));
+        return Err(err("AllocatePool(embedded font obj) failed"));
     }
     let font = font_ptr as *mut Psf1Font;
-    (*font).header = header;
+    (*font).header = header_ptr as *mut Psf1Header;
     (*font).glyph_buffer = glyph_ptr;
     Ok(font)
 }
@@ -292,6 +347,7 @@ const BOOTSTRAP_POOL_PAGES: usize = 3072;
 pub struct PreparedBoot {
     pub boot_info: *mut BootInfo,
     pub kernel_entry: u64,
+    #[allow(dead_code)]
     pub map_key: usize,
 }
 

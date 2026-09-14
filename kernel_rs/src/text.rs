@@ -151,8 +151,14 @@ unsafe fn blit_glyph_to_buffer(buf: &mut [u32], buf_width: u32, buf_height: u32,
 /// advance, bounds-checked against the buffer's own `buf_width` /
 /// `buf_height` instead of a framebuffer clip rect.
 pub unsafe fn draw_text_to_buffer(buf: &mut [u32], buf_width: u32, buf_height: u32, x: u32, y: u32, text: &[u8], fg: u32, bg: u32) {
+    if y >= buf_height {
+        return;
+    }
     for (i, &ch) in text.iter().enumerate() {
         let cx = x + (i as u32) * GLYPH_WIDTH;
+        if cx >= buf_width {
+            break;
+        }
         blit_glyph_to_buffer(buf, buf_width, buf_height, cx, y, ch, fg, bg);
     }
 }

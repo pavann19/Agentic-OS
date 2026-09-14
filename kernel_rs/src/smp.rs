@@ -289,6 +289,14 @@ extern "C" fn ap_entry() -> ! {
     crate::gdt::init_for_cpu(index);
     crate::idt::load_current_cpu();
 
+    // Ensure CR4.PGE is active on this AP so kernel PAGE_GLOBAL entries persist across CR3 switches
+    let mut cr4: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+        cr4 |= 1 << 7;
+        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
+    }
+
     serial::write_str("[SMP] AP_ONLINE apic_id=");
     serial::write_hex_raw(id as u64);
     serial::write_str(" cpu_index=");

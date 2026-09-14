@@ -155,6 +155,15 @@ unsafe fn ps2_wait_output_full() {
     syscall1(0xC3_0000 | status as u64); // timed out waiting for output-full; real status byte logged
 }
 
+unsafe fn ps2_flush_output() {
+    for _ in 0..100 {
+        if (inb(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT_FULL) == 0 {
+            break;
+        }
+        let _ = inb(PS2_DATA_PORT);
+    }
+}
+
 /// Real, standard PS/2 controller (8042) initialization this driver was
 /// previously entirely missing: reads the controller's own Configuration
 /// Byte, sets bit 0 (enable IRQ1 -- "generate an interrupt on port-1
@@ -168,17 +177,32 @@ unsafe fn ps2_wait_output_full() {
 /// Configuration Byte", each gated by the real busy-wait handshake on
 /// the status register.
 unsafe fn ps2_enable_irq1() -> (u8, u8) {
+    ps2_flush_output();
     ps2_wait_input_clear();
     outb(PS2_CMD_PORT, 0x20);
-    ps2_wait_output_full();
-    let old_config = inb(PS2_DATA_PORT);
 
-    let new_config = old_config | 0x01;
+    let mut old_config: u8 = 0x67;
+    for _ in 0..PS2_WAIT_ITERS {
+        let status = inb(PS2_STATUS_PORT);
+        if (status & PS2_STATUS_OUTPUT_FULL) != 0 {
+            let byte = inb(PS2_DATA_PORT);
+            if (status & 0x20) == 0 && byte != 0xFA {
+                old_config = byte;
+                break;
+            }
+        }
+        core::hint::spin_loop();
+    }
+
+    // Preserve translation (bit 6), ensure IRQ1 (bit 0) and IRQ12 (bit 1) are enabled,
+    // and explicitly keep keyboard (bit 4) and mouse (bit 5) clocks enabled (clear bits 4 & 5).
+    let new_config = (old_config | 0x43) & !0x30;
 
     ps2_wait_input_clear();
     outb(PS2_CMD_PORT, 0x60);
     ps2_wait_input_clear();
     outb(PS2_DATA_PORT, new_config);
+    ps2_flush_output();
 
     (old_config, new_config)
 }
@@ -195,11 +219,23 @@ pub extern "C" fn _start() -> ! {
     let (old_config, new_config) = unsafe { ps2_enable_irq1() };
     unsafe { syscall1(0xC0_0000 | old_config as u64) }; // "config-old" marker
     unsafe { syscall1(0xC1_0000 | new_config as u64) }; // "config-new" marker
+    unsafe { ps2_flush_output() };
 
     loop {
         unsafe {
             syscall5_wait_kbd_interrupt(); // blocks (capability-gated) until a real IRQ1 fires
-            let scancode = inb(PS2_DATA_PORT); // real, unmediated port read -- this process's own PortIoRange grant
+            let status = inb(PS2_STATUS_PORT);
+            if (status & PS2_STATUS_OUTPUT_FULL) == 0 {
+                syscall6_ack_kbd_interrupt();
+                continue;
+            }
+            let byte = inb(PS2_DATA_PORT); // real, unmediated port read -- this process's own PortIoRange grant
+            if (status & 0x20) != 0 || byte == 0xFA {
+                // Drop auxiliary (mouse) bytes or stray command ACKs
+                syscall6_ack_kbd_interrupt();
+                continue;
+            }
+            let scancode = byte;
             syscall1(0xB0_0000 | scancode as u64); // logs the real scancode via the kernel's own klog path
             syscall13_route_key_event(scancode as u64); // Phase 12 exit criterion 4: route to whichever window holds focus
             syscall6_ack_kbd_interrupt();

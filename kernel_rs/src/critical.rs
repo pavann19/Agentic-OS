@@ -93,14 +93,10 @@ use core::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 /// core currently holds the lock (real hardware-APIC-ID-resolved
 /// identity, not a guess).
 static KERNEL_LOCK_OWNER: AtomicI64 = AtomicI64::new(-1);
-/// Valid and meaningful ONLY while `KERNEL_LOCK_OWNER != -1` — the
-/// owning core's own reentry depth. Only the owner ever reads OR writes
-/// this (any other core is, by construction, still spinning on
-/// `KERNEL_LOCK_OWNER`'s compare-exchange below, never touching depth),
-/// so a plain atomic with `Relaxed` ordering is enough; it's not
-/// providing cross-core exclusion by itself, `KERNEL_LOCK_OWNER`'s
-/// acquire/release pair is.
-static KERNEL_LOCK_DEPTH: AtomicU32 = AtomicU32::new(0);
+/// Per-CPU reentry depth: each core tracks its own nesting depth independently.
+/// This prevents cross-core races where depth drops to 0 before owner is cleared,
+/// and eliminates multi-core de-synchronization during reentrant lock acquisition.
+static PER_CPU_DEPTH: [AtomicU32; crate::smp::MAX_CPUS] = [const { AtomicU32::new(0) }; crate::smp::MAX_CPUS];
 
 /// Runs `f` with interrupts disabled AND this core holding the one
 /// real, kernel-wide lock (see this module's own doc comment for the
@@ -151,53 +147,32 @@ where
 /// MUST have already disabled interrupts (`cli`) themselves — this
 /// function only ever touches the lock's owner/depth bookkeeping, never
 /// RFLAGS.
-///
-/// **Real bug this split was added to fix, found via an actual boot
-/// hang, not by inspection alone:** `schedule_locked`'s call to
-/// `switch_to` does not "return" in the normal Rust sense for the
-/// OUTGOING thread — `switch_to`'s own `ret` pops a return address off
-/// the INCOMING thread's stack, not the outgoing one's, so the outgoing
-/// thread's own suspended call frame (still lexically inside
-/// `without_interrupts`'s closure) does not resume, and therefore
-/// cannot run `without_interrupts`'s own release/depth-decrement code,
-/// until THAT SPECIFIC THREAD is scheduled back in again — which could
-/// be an arbitrarily long time later, on a DIFFERENT core, and (fatally)
-/// requires calling `schedule()` again, which itself needs this SAME
-/// lock. The very first context switch under the old, purely
-/// closure-scoped design left the kernel lock permanently marked
-/// "held", deadlocking every other core's own next `without_interrupts`
-/// call forever. The fix: `schedule_locked` calls `release()` manually,
-/// explicitly, immediately BEFORE calling `switch_to` — by the time
-/// control actually leaves this core, the lock is already genuinely
-/// free, exactly mirroring how `switch_to`'s own `sti` (not
-/// `without_interrupts`'s automatic RFLAGS restore) already had to
-/// handle interrupt re-enabling for the very same reason.
 #[inline]
 pub fn acquire() {
-    let me = crate::smp::current_cpu_index() as i64;
-    let already_mine =
-        KERNEL_LOCK_OWNER.load(Ordering::Relaxed) == me && KERNEL_LOCK_DEPTH.load(Ordering::Relaxed) > 0;
+    let me = crate::smp::current_cpu_index().min(crate::smp::MAX_CPUS - 1);
+    let me_i64 = me as i64;
+    let depth = PER_CPU_DEPTH[me].load(Ordering::Relaxed);
 
-    if !already_mine {
-        // Bounded, not infinite -- a genuinely stuck lock (a real bug
-        // holding it forever elsewhere) must produce a diagnosable
-        // signature, not a silent, traceless hang. Matches this
-        // codebase's own "bounded, not infinite" discipline for every
-        // other poll/wait (apic::busy_wait's own ICR-idle wait, every
-        // `_hw_fault_demo.rs` timeout, etc.).
-        let mut spins: u64 = 0;
-        while KERNEL_LOCK_OWNER
-            .compare_exchange_weak(-1, me, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            core::hint::spin_loop();
-            spins += 1;
-            if spins == 500_000_000 {
-                crate::klog_info!("KERNEL_LOCK_STUCK cpu_index={} -- contended far longer than normal, likely a real bug", me);
-            }
+    if depth > 0 {
+        // Already held by this core — simply increment our own nesting depth
+        PER_CPU_DEPTH[me].store(depth + 1, Ordering::Relaxed);
+        return;
+    }
+
+    // Lock not held by this core: spin bounded until we acquire KERNEL_LOCK_OWNER
+    let mut spins: u64 = 0;
+    while KERNEL_LOCK_OWNER
+        .compare_exchange_weak(-1, me_i64, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+        spins += 1;
+        if spins == 500_000_000 {
+            crate::klog_info!("KERNEL_LOCK_STUCK cpu_index={} -- contended far longer than normal, likely a real bug", me);
         }
     }
-    KERNEL_LOCK_DEPTH.fetch_add(1, Ordering::Relaxed);
+
+    PER_CPU_DEPTH[me].store(1, Ordering::Relaxed);
 }
 
 /// The release half — see `acquire`'s own doc comment for why
@@ -205,11 +180,15 @@ pub fn acquire() {
 /// on `without_interrupts`'s automatic closure-return cleanup.
 #[inline]
 pub fn release() {
-    // Release in the opposite order to acquire: drop our own reentry
-    // depth first, and only relinquish ownership (making the lock
-    // acquirable by another core) once OUR outermost call is exiting.
-    let depth_after_release = KERNEL_LOCK_DEPTH.fetch_sub(1, Ordering::Relaxed) - 1;
-    if depth_after_release == 0 {
+    let me = crate::smp::current_cpu_index().min(crate::smp::MAX_CPUS - 1);
+    let depth = PER_CPU_DEPTH[me].load(Ordering::Relaxed);
+    if depth == 0 {
+        return;
+    }
+    if depth == 1 {
+        PER_CPU_DEPTH[me].store(0, Ordering::Relaxed);
         KERNEL_LOCK_OWNER.store(-1, Ordering::Release);
+    } else {
+        PER_CPU_DEPTH[me].store(depth - 1, Ordering::Relaxed);
     }
 }

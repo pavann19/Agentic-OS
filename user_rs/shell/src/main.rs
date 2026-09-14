@@ -60,7 +60,16 @@ fn write_str(s: &str) {
     }
 }
 fn read_byte() -> u8 {
-    while !com1_rx_ready() {}
+    while !com1_rx_ready() {
+        unsafe {
+            core::arch::asm!(
+                "mov rax, 29", "syscall",
+                lateout("rax") _, lateout("rdx") _, lateout("rcx") _,
+                lateout("r8") _, lateout("r9") _, lateout("r10") _, lateout("r11") _,
+                options(nostack)
+            );
+        }
+    }
     unsafe { inb(COM1) }
 }
 

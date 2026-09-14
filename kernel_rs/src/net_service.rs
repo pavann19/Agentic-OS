@@ -17,9 +17,22 @@ struct Request {
     data: [u8; MAX_NET_BYTES],
 }
 
-static mut REQUEST: Option<Request> = None;
-static CURRENT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
+struct InFlightNetSlot {
+    id: u64,
+    request: Request,
+}
+
+static mut REQUESTS: Option<alloc::vec::Vec<InFlightNetSlot>> = None;
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+#[allow(static_mut_refs)]
+unsafe fn requests_mut() -> &'static mut alloc::vec::Vec<InFlightNetSlot> {
+    let slot = &mut *&raw mut REQUESTS;
+    if slot.is_none() {
+        *slot = Some(alloc::vec::Vec::new());
+    }
+    slot.as_mut().unwrap()
+}
 
 const NO_SERVER: u32 = u32::MAX;
 static SERVER_SEND_CAP: AtomicU32 = AtomicU32::new(NO_SERVER);
@@ -81,14 +94,16 @@ pub fn request_fetch(socket_cap_id: CapId) -> u64 {
     }
 
     let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
-    unsafe {
-        *(&mut *&raw mut REQUEST) = Some(Request {
-            ready: false,
-            len: 0,
-            data: [0u8; MAX_NET_BYTES],
+    crate::critical::without_interrupts(|| unsafe {
+        requests_mut().push(InFlightNetSlot {
+            id,
+            request: Request {
+                ready: false,
+                len: 0,
+                data: [0u8; MAX_NET_BYTES],
+            },
         });
-    }
-    CURRENT_REQUEST_ID.store(id, Ordering::SeqCst);
+    });
 
     let mut msg = ipc::Message::default();
     msg.data[0] = (id << 32) | 80; // default HTTP port 80
@@ -102,49 +117,55 @@ pub fn request_fetch(socket_cap_id: CapId) -> u64 {
 
 /// Called by netstack_driver to provide HTTP response bytes
 pub fn server_reply(pml4: u64, request_id: u64, data_vaddr: u64, len: u32) -> u64 {
-    if CURRENT_REQUEST_ID.load(Ordering::SeqCst) != request_id {
-        klog_info!("NET_SERVICE_REPLY_STALE_ID id={}", request_id);
-        return u64::MAX;
-    }
     let real_len = (len as usize).min(MAX_NET_BYTES);
+    let mut temp_buf = [0u8; MAX_NET_BYTES];
     unsafe {
         if !vmm::validate_user_buffer_readable(pml4, data_vaddr, real_len as u64) {
             klog_info!("NET_SERVICE_REPLY_BAD_PTR id={}", request_id);
             return u64::MAX;
         }
-        let slot = &mut *&raw mut REQUEST;
-        let Some(r) = slot else {
-            return u64::MAX;
-        };
-        vmm::read_user_bytes(pml4, data_vaddr, &mut r.data[..real_len]);
-        r.len = real_len;
-        r.ready = true;
+        vmm::read_user_bytes(pml4, data_vaddr, &mut temp_buf[..real_len]);
     }
-    klog_info!("NET_SERVICE_REPLY_OK id={} len={}", request_id, real_len);
-    0
+    let ok = crate::critical::without_interrupts(|| unsafe {
+        let reqs = requests_mut();
+        if let Some(slot) = reqs.iter_mut().find(|s| s.id == request_id) {
+            slot.request.data[..real_len].copy_from_slice(&temp_buf[..real_len]);
+            slot.request.len = real_len;
+            slot.request.ready = true;
+            true
+        } else {
+            false
+        }
+    });
+    if ok {
+        klog_info!("NET_SERVICE_REPLY_OK id={} len={}", request_id, real_len);
+        0
+    } else {
+        klog_info!("NET_SERVICE_REPLY_STALE_ID id={}", request_id);
+        u64::MAX
+    }
 }
 
-/// Called by net_client to poll for response
+/// Called by net_client to poll for response. If ready, copies data, removes slot, and returns length.
 pub fn poll_reply(pml4: u64, request_id: u64, out_vaddr: u64, out_max_len: u32) -> u64 {
-    if CURRENT_REQUEST_ID.load(Ordering::SeqCst) != request_id {
-        return u64::MAX;
-    }
-    unsafe {
-        let slot = &mut *&raw mut REQUEST;
-        let Some(r) = slot else {
+    crate::critical::without_interrupts(|| unsafe {
+        let reqs = requests_mut();
+        let Some(idx) = reqs.iter().position(|s| s.id == request_id) else {
             return u64::MAX;
         };
-        if !r.ready {
+        let slot = &reqs[idx];
+        if !slot.request.ready {
             return u64::MAX;
         }
-        let copy_len = r.len.min(out_max_len as usize);
+        let copy_len = slot.request.len.min(out_max_len as usize);
         if !vmm::validate_user_buffer_writable(pml4, out_vaddr, copy_len as u64) {
             klog_info!("NET_SERVICE_POLL_BAD_PTR id={}", request_id);
             return u64::MAX;
         }
-        vmm::write_user_bytes(pml4, out_vaddr, &r.data[..copy_len]);
+        vmm::write_user_bytes(pml4, out_vaddr, &slot.request.data[..copy_len]);
+        reqs.remove(idx);
         copy_len as u64
-    }
+    })
 }
 
 #[repr(C)]
