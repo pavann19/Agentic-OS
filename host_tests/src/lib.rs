@@ -1814,6 +1814,60 @@ mod virtio_gpu_tests {
     }
 }
 
+#[cfg(test)]
+mod animation_tests {
+    use kernel_common::animation::{ease_out_quad, interpolate_position, lerp_i32, SlideAnimation, Q16_ONE};
+
+    #[test]
+    fn lerp_i32_boundaries_and_midpoint() {
+        assert_eq!(lerp_i32(100, 200, 0), 100);
+        assert_eq!(lerp_i32(100, 200, Q16_ONE), 200);
+        assert_eq!(lerp_i32(100, 200, Q16_ONE / 2), 150);
+        assert_eq!(lerp_i32(200, 100, Q16_ONE / 2), 150);
+    }
+
+    #[test]
+    fn ease_out_quad_properties() {
+        assert_eq!(ease_out_quad(0), 0);
+        assert_eq!(ease_out_quad(Q16_ONE), Q16_ONE);
+
+        // Ease-out is faster initially than linear: at 50% progress, eased > 50%
+        let mid = ease_out_quad(Q16_ONE / 2);
+        assert!(mid > Q16_ONE / 2);
+        // Specifically for f(0.5) = 0.5 * (2 - 0.5) = 0.75
+        assert_eq!(mid, (Q16_ONE * 3) / 4);
+    }
+
+    #[test]
+    fn slide_animation_progression_and_completion() {
+        let mut slide = SlideAnimation::new();
+        assert!(!slide.active);
+
+        slide.start((50, 50), (250, 150), 1_000_000, 10_000);
+        assert!(slide.active);
+
+        // At t = 1_000_000 (t=0)
+        let (x0, y0, done0) = slide.step(1_000_000);
+        assert_eq!((x0, y0), (50, 50));
+        assert!(!done0);
+        assert!(slide.active);
+
+        // At t = 1_005_000 (t=50%, progress=75% due to ease-out)
+        let (x_mid, y_mid, done_mid) = slide.step(1_005_000);
+        // dx = 200 * 0.75 = 150 -> x = 200
+        // dy = 100 * 0.75 = 75  -> y = 125
+        assert_eq!((x_mid, y_mid), (200, 125));
+        assert!(!done_mid);
+
+        // At t = 1_010_000 (t=100%, complete)
+        let (x_end, y_end, done_end) = slide.step(1_010_000);
+        assert_eq!((x_end, y_end), (250, 150));
+        assert!(done_end);
+        assert!(!slide.active);
+    }
+}
+
+
 
 
 

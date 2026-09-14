@@ -19,6 +19,7 @@ pub mod authority; // research track -- real wiring, see authority.rs module doc
 pub mod authority_hw_fault_demo; // research track -- live-device fault-after-revocation demo, off by default (see Cargo.toml)
 pub mod ahci;
 pub mod agent;
+pub mod animation; // Phase 5.14 -- compositor-driven animation engine
 pub mod apic;
 pub mod audit;
 pub mod bootinfo;

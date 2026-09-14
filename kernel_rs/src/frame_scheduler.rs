@@ -96,18 +96,22 @@ pub unsafe fn request_presentation(
     }
 }
 
-/// Checks if a deferred frame is pending and presents it if the frame deadline has now passed.
+/// Checks if a deferred frame or compositor animation is pending and presents it if the frame deadline has now passed.
 pub unsafe fn try_present_pending(
     fb_phys_base: u64,
     ppsl: u32,
     fb_width: u32,
     fb_height: u32,
 ) -> bool {
-    if !is_frame_pending() {
+    let anim_active = crate::animation::has_active_animations();
+    if !is_frame_pending() && !anim_active {
         return false;
     }
     let now = crate::compositor_metrics::read_tsc();
     if can_present(now) {
+        if anim_active {
+            crate::animation::step_animations();
+        }
         request_presentation(fb_phys_base, ppsl, fb_width, fb_height, true)
     } else {
         false

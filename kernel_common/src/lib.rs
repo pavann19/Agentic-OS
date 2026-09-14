@@ -5,6 +5,7 @@
 //! caller-provided slices/values only.
 #![no_std]
 
+pub mod animation; // Phase 5.14 -- pure animation interpolation and easing curves
 pub mod audit_ring;
 pub mod authority_graph; // research track, docs/RESEARCH_TRACK.md -- pure logic, wired into kernel_rs::authority for IOMMU grant/revoke
 pub mod bitmap;
