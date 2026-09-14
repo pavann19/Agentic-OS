@@ -1710,6 +1710,71 @@ mod allocation_free_hotpath_tests {
     }
 }
 
+#[cfg(test)]
+mod vsync_and_display_timing_tests {
+    use kernel_common::frame_pacing::{DisplayTiming, PresentationFence};
+
+    const CYCLES_PER_US: u64 = 2500;
+
+    #[test]
+    fn display_timing_refresh_periods() {
+        let dt60 = DisplayTiming::new(60);
+        assert_eq!(dt60.refresh_period_us(), 16_666);
+        assert_eq!(dt60.refresh_period_cycles(CYCLES_PER_US), 16_666 * 2500);
+
+        let dt120 = DisplayTiming::new(120);
+        assert_eq!(dt120.refresh_period_us(), 8_333);
+
+        let dt144 = DisplayTiming::new(144);
+        assert_eq!(dt144.refresh_period_us(), 6_944);
+
+        let dt0 = DisplayTiming::new(0);
+        assert_eq!(dt0.refresh_period_us(), 0);
+        assert_eq!(dt0.refresh_period_cycles(CYCLES_PER_US), 0);
+    }
+
+    #[test]
+    fn display_timing_next_deadline_alignment() {
+        let mut dt = DisplayTiming::new(60);
+        let period_cycles = dt.refresh_period_cycles(CYCLES_PER_US);
+
+        // Before any vsync recorded, next deadline is now
+        assert_eq!(dt.next_deadline_tsc(1_000_000, CYCLES_PER_US), 1_000_000);
+
+        // VSync recorded at t = 100_000_000
+        dt.record_vsync(100_000_000);
+        assert_eq!(dt.total_vsync_events, 1);
+
+        // Midway through frame (5 ms in): next deadline is t + 1 frame
+        let t_mid = 100_000_000 + 5_000 * CYCLES_PER_US;
+        assert_eq!(dt.next_deadline_tsc(t_mid, CYCLES_PER_US), 100_000_000 + period_cycles);
+
+        // 25 ms in (> 1 frame, < 2 frames): next deadline is t + 2 frames
+        let t_late = 100_000_000 + 25_000 * CYCLES_PER_US;
+        assert_eq!(dt.next_deadline_tsc(t_late, CYCLES_PER_US), 100_000_000 + 2 * period_cycles);
+    }
+
+    #[test]
+    fn presentation_fence_advancement_and_ordering() {
+        let mut fence = PresentationFence::new();
+        assert_eq!(fence.sequence, 0);
+        assert!(fence.is_reached(0));
+        assert!(!fence.is_reached(1));
+
+        let s1 = fence.advance();
+        assert_eq!(s1, 1);
+        assert!(fence.is_reached(1));
+        assert!(!fence.is_reached(2));
+
+        let s2 = fence.advance();
+        assert_eq!(s2, 2);
+        assert!(fence.is_reached(1));
+        assert!(fence.is_reached(2));
+        assert!(!fence.is_reached(3));
+    }
+}
+
+
 
 
 

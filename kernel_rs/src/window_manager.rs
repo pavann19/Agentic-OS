@@ -519,6 +519,7 @@ pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
         damaged_pixels,
     };
     crate::compositor_metrics::record_frame(&metrics);
+    crate::vsync::advance_presentation_fence();
 }
 
 /// Partial present for typing/scrolling with occlusion culling (Phase 5.4):
@@ -631,6 +632,7 @@ pub unsafe fn present_partial(
         damaged_pixels,
     };
     crate::compositor_metrics::record_frame(&metrics);
+    crate::vsync::advance_presentation_fence();
     true
 }
 

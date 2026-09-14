@@ -78,10 +78,14 @@ pub unsafe fn request_presentation(
     let now = crate::compositor_metrics::read_tsc();
 
     if force || can_present(now) {
+        // Synchronize with display refresh cycle (Phase 5.12)
+        crate::vsync::sync_to_display(5_000 * CYCLES_PER_US);
+
         LAST_PRESENT_TSC.store(now, Ordering::Relaxed);
         FRAME_PENDING.store(false, Ordering::Release);
         FRAMES_PRESENTED.fetch_add(1, Ordering::Relaxed);
         crate::window_manager::flush_dirty_surfaces(fb_phys_base, ppsl, fb_width, fb_height);
+        crate::vsync::advance_presentation_fence();
         true
     } else {
         // Throttle this frame: accumulate damage in window manager and defer to next deadline

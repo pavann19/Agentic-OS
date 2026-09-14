@@ -92,6 +92,7 @@ pub mod usb_xhci; // Phase 11 -- real xHCI (USB) host controller discovery, see 
 pub mod virtio_blk;
 pub mod virtio_net;
 pub mod vmm;
+pub mod vsync; // Phase 5.12 -- VSync and presentation synchronization
 pub mod window_manager; // real window objects (movable, own backing buffer, title bar), see its own module doc
 
 use bootinfo::BootInfo;
