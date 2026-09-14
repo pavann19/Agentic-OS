@@ -1,5 +1,14 @@
-# Interactive Hardware-Accelerated GUI Launcher for Agentic OS
-# Runs QEMU with WHPX (Windows Hypervisor Platform) acceleration and native PS/2 Keyboard/Mouse!
+# Interactive GUI Launcher for Agentic OS.
+# Real, deliberate choice, not an oversight: this always uses TCG (software
+# emulation), never WHPX -- every mode here attaches a real intel-iommu
+# device (and launcher/files/net also attach virtio-blk-pci with
+# iommu_platform=on/ats=on), which needs kernel-irqchip=split. WHPX does not
+# support split irqchip (see kernel_rs's own WHPX work/docs for the exact
+# incompatibility), so this script cannot use it without dropping IOMMU
+# device assignment. For a fast, WHPX-accelerated single-app GUI session
+# with no disk/network device (terminal or editor content only, no IOMMU
+# needed), use `make run-qemu` with the matching *_demo kernel feature
+# staged instead -- see scripts/run-manual.ps1.
 
 param(
     [ValidateSet("launcher", "terminal", "editor", "files", "net")]
@@ -19,10 +28,10 @@ if (Test-Path $cargoBin) {
     $env:PATH = "$cargoBin;$env:PATH"
 }
 
-Write-Host "=== Agentic OS Hardware-Accelerated GUI Launcher ===" -ForegroundColor Cyan
+Write-Host "=== Agentic OS GUI Launcher ===" -ForegroundColor Cyan
 Write-Host "Mode:         $Mode" -ForegroundColor Green
 Write-Host "Architecture: x86_64 Long Mode (64-bit UEFI)" -ForegroundColor Gray
-Write-Host "Acceleration: WHPX (Windows Hypervisor Platform)" -ForegroundColor Gray
+Write-Host "Acceleration: TCG (required for IOMMU/virtio-blk device assignment; WHPX does not support kernel-irqchip=split)" -ForegroundColor Gray
 Write-Host "Input System: Native Intel 8042 PS/2 Keyboard + Mouse" -ForegroundColor Gray
 Write-Host ""
 
@@ -84,18 +93,29 @@ if ($Mode -eq "launcher" -or $Mode -eq "files") {
     $fs.Close()
 }
 
-# 4. Launch QEMU with WHPX acceleration and interactive GUI display
-Write-Host "`nLaunching QEMU interactive window with WHPX..." -ForegroundColor Cyan
+# 4. Set repo-local temp directory for QEMU vvfat
+$repoTemp = "$repoRoot\_evidence\qemu_tmp"
+New-Item -ItemType Directory -Force -Path $repoTemp | Out-Null
+$env:TMP = $repoTemp
+$env:TEMP = $repoTemp
+
+# 5. Launch QEMU with interactive SDL GUI display
+Write-Host "`nLaunching QEMU interactive window..." -ForegroundColor Cyan
+Write-Host "Display:      SDL Native Desktop Window" -ForegroundColor Gray
+Write-Host "Acceleration: TCG (split kernel-irqchip, needed for real IOMMU device assignment)" -ForegroundColor Gray
 Write-Host "Tip: Click inside the QEMU window to type and interact directly with the Desktop!" -ForegroundColor Magenta
 Write-Host "Press Ctrl + Alt + G to release mouse grab if captured.`n" -ForegroundColor Gray
 
 $qemuArgs = @(
-    "-machine", "q35,accel=whpx,kernel-irqchip=on",
+    "-machine", "q35,kernel-irqchip=split",
+    "-accel", "tcg,tb-size=128",
     "-vga", "std",
+    "-display", "sdl",
     "-m", "256M",
     "-device", "intel-iommu,intremap=on",
     "-drive", "if=pflash,format=raw,readonly=on,file=$OvmfCode",
-    "-drive", "file=fat:rw:$FatDir,format=raw"
+    "-drive", "file=fat:rw:$FatDir,format=raw",
+    "-name", "Agentic-OS-GUI"
 )
 
 if ($Mode -eq "launcher" -or $Mode -eq "files") {
@@ -117,34 +137,5 @@ $qemuArgs += @(
     "-no-reboot"
 )
 
-try {
-    & $QemuExe @qemuArgs
-} catch {
-    Write-Warning "WHPX execution encountered an issue. Falling back to TCG mode..."
-    $qemuArgsFallback = @(
-        "-machine", "q35,kernel-irqchip=split",
-        "-accel", "tcg,tb-size=128",
-        "-vga", "std",
-        "-m", "256M",
-        "-device", "intel-iommu,intremap=on",
-        "-drive", "if=pflash,format=raw,readonly=on,file=$OvmfCode",
-        "-drive", "file=fat:rw:$FatDir,format=raw"
-    )
-    if ($Mode -eq "launcher" -or $Mode -eq "files") {
-        $qemuArgsFallback += @(
-            "-device", "virtio-blk-pci,drive=disk0,disable-legacy=on,iommu_platform=on,ats=on",
-            "-drive", "file=$diskImg,if=none,id=disk0,format=raw"
-        )
-    }
-    if ($Mode -eq "launcher" -or $Mode -eq "net") {
-        $qemuArgsFallback += @(
-            "-netdev", "user,id=net0",
-            "-device", "e1000,netdev=net0"
-        )
-    }
-    $qemuArgsFallback += @(
-        "-serial", "stdio",
-        "-no-reboot"
-    )
-    & $QemuExe @qemuArgsFallback
-}
+& $QemuExe @qemuArgs
+

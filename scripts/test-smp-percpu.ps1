@@ -11,7 +11,20 @@ param(
     [string]$OvmfCode = "C:\Program Files\qemu\share\edk2-x86_64-code.fd",
     [string]$FatDir = "boot_rs\qemu_fatdir",
     [string]$SerialLog = "_evidence\latest\serial-smp-percpu.log",
-    [int]$BootWaitSeconds = 15
+    # Real bug found and fixed in the TEST, not the kernel: this used to
+    # default to 15s, which this session's own live investigation showed
+    # is NOT enough real wall-clock time under TCG (this test's own
+    # accelerator -- no WHPX here) for smp::bring_up_all's real, bounded
+    # (up to 200,000,000 iterations) spin-wait to actually reach the
+    # SECOND and THIRD AP, let alone finish and print
+    # SMP_BRINGUP_DONE -- the test was killing QEMU and reading the log
+    # BEFORE the kernel's own real, correct bring-up sequence had a
+    # chance to complete, producing a false "hang" that a raw real-mode
+    # COM1 port-I/O trampoline diagnostic (kept in smp_trampoline.s,
+    # confirmed all three APs genuinely reach long mode) and a 90s
+    # manual rerun both proved was never a real bug: given enough real
+    # time, all 3 APs come online cleanly, brought_up=3 timed_out=0.
+    [int]$BootWaitSeconds = 60
 )
 
 $ErrorActionPreference = "Stop"
