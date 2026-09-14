@@ -72,6 +72,9 @@ pub enum AuditEvent {
     /// granularity (declares KINDS of capability, never specific
     /// instances).
     ManifestDenied { kind: u8 },
+    /// Phase 12 exit criterion 2: an agent process manipulated a window
+    /// through the typed API (`SYS_AGENT_UI_ACTION`, syscall 25).
+    AgentUiAction { target_object: u32, action_type: u32 },
 }
 
 #[derive(Clone, Copy)]

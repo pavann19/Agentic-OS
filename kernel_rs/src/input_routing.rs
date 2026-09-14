@@ -82,6 +82,10 @@ pub fn set_focus(surface_object: ObjectId) {
     klog_info!("INPUT_FOCUS_SET surface={}", surface_object);
 }
 
+pub fn focused_surface() -> u32 {
+    FOCUSED_SURFACE.load(Ordering::SeqCst)
+}
+
 /// Real routing decision: deliver `scancode` to whichever window
 /// currently holds focus. A key event while a DIFFERENT (or no) window
 /// has focus is a real, disclosed no-op — dropped, never queued and

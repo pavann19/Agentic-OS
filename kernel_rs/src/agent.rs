@@ -56,6 +56,19 @@ const AGENT_STACK_VADDR: u64 = 0x0000_0000_0070_0000;
 /// themselves, the syscalls that check them, and the policy engine that
 /// gates what gets granted in the first place.
 pub fn spawn_agent_demo() {
+    #[cfg(not(any(
+        feature = "compositor_demo",
+        feature = "terminal_demo",
+        feature = "text_editor_demo",
+        feature = "file_manager_demo",
+        feature = "net_client_demo",
+        feature = "sample_app_demo",
+        feature = "phase13_all"
+    )))]
+    if !crate::window_manager::exists(1) {
+        crate::window_manager::register(1, 350, 350, 200, 200, b"Agent Workspace");
+    }
+
     let introspect_object = capability::create_object(KernelObjectKind::IntrospectionHandle);
     let audit_object = capability::create_object(KernelObjectKind::AuditQueryHandle);
 

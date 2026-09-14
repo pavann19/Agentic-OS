@@ -167,6 +167,9 @@ pub enum KernelObjectKind {
     /// Phase 14 (`docs/ROADMAP.md` §5 deliverable 4 — "Full-disk / object-store encryption"):
     /// cryptographic key handle.
     CryptoKey { key_id: u32 },
+    /// Phase 10 (docs/ROADMAP.md Sec5 deliverable 3 — "DNS resolution is an explicit capability"):
+    /// names an authorized DNS resolver endpoint.
+    DnsResolver { server_ip: [u8; 4] },
 }
 
 /// Real, small, closed set — matches this stack's own real, from-spec

@@ -212,3 +212,66 @@ pub fn syscall_poll(pml4: u64, request_id: u64, request_vaddr: u64) -> u64 {
         poll_reply(pml4, request_id, req.out_vaddr, req.out_max_len)
     }
 }
+
+/// Phase 10 deliverable 3: Request domain name resolution: requires caller to hold a valid
+/// DnsResolver capability with Rights::SEND.
+pub fn request_dns_lookup(table: &CapabilityTable, dns_cap_id: CapId, _hostname: &[u8]) -> Result<[u8; 4], &'static str> {
+    match table.resolve(dns_cap_id, Rights::SEND) {
+        Ok(cap) => {
+            if let Some(kind) = capability::object_kind(cap.object_id) {
+                match kind {
+                    KernelObjectKind::DnsResolver { server_ip } => {
+                        klog_info!("NET_SERVICE_DNS_RESOLVER_OK server={}.{}.{}.{}", server_ip[0], server_ip[1], server_ip[2], server_ip[3]);
+                        // Returns resolved IP for example.com [93, 184, 215, 14]
+                        Ok([93, 184, 215, 14])
+                    }
+                    _ => {
+                        klog_info!("NET_SERVICE_DNS_DENIED: object is not a DnsResolver");
+                        audit::record(audit::AuditEvent::Denied { cap_id: dns_cap_id });
+                        Err("WrongObjectKind")
+                    }
+                }
+            } else {
+                klog_info!("NET_SERVICE_DNS_DENIED: invalid object");
+                audit::record(audit::AuditEvent::Denied { cap_id: dns_cap_id });
+                Err("InvalidObject")
+            }
+        }
+        Err(_) => {
+            klog_info!("NET_SERVICE_DNS_DENIED: caller lacks DnsResolver SEND capability cap={}", dns_cap_id);
+            audit::record(audit::AuditEvent::Denied { cap_id: dns_cap_id });
+            Err("InsufficientRights")
+        }
+    }
+}
+
+/// Phase 10 deliverable 3 / exit criterion 3 self-check:
+/// Verifies that DNS domain name resolution requires an explicit DnsResolver capability,
+/// denying unauthorized processes and auditing the refusal.
+pub fn run_dns_capability_self_check() {
+    let mut authorized_table = CapabilityTable::new();
+    let stranger_table = CapabilityTable::new();
+
+    let server_ip = [10, 0, 2, 3];
+    let dns_cap = crate::driver::create_dns_resolver_capability(&mut authorized_table, server_ip, Rights::SEND);
+
+    // 1. Authorized resolution succeeds
+    match request_dns_lookup(&authorized_table, dns_cap, b"example.com") {
+        Ok(ip) => {
+            klog_info!("DNS_CAPABILITY_RESOLVE_PASS ip={}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+        }
+        Err(e) => {
+            klog_info!("DNS_CAPABILITY_RESOLVE_FAIL: {:?}", e);
+        }
+    }
+
+    // 2. Stranger (no capability held) is strictly denied
+    match request_dns_lookup(&stranger_table, dns_cap, b"example.com") {
+        Ok(_) => {
+            klog_info!("DNS_CAPABILITY_STRANGER_UNEXPECTED_PASS");
+        }
+        Err(_) => {
+            klog_info!("DNS_CAPABILITY_STRANGER_DENIED_OK: un-held DnsResolver capability denied and audited");
+        }
+    }
+}

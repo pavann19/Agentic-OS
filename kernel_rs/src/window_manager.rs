@@ -580,6 +580,7 @@ pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
                 damaged_rects += 1;
                 damaged_scanlines += renderer.present_rect(fb_phys_base, ppsl, fb_width, fb_height, bb, fb, rc);
                 damaged_pixels += (rc.width * rc.height) as usize;
+                crate::virtio_gpu::flush_rect(rc.x as u32, rc.y as u32, rc.width, rc.height);
             }
         }
 
@@ -590,6 +591,7 @@ pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
                 damaged_rects += 1;
                 damaged_scanlines += renderer.present_rect(fb_phys_base, ppsl, fb_width, fb_height, bb, fb, rc);
                 damaged_pixels += (rc.width * rc.height) as usize;
+                crate::virtio_gpu::flush_rect(rc.x as u32, rc.y as u32, rc.width, rc.height);
             }
         }
     }
@@ -701,6 +703,7 @@ pub unsafe fn present_partial(
                     cursor_affected = true;
                 }
             }
+            crate::virtio_gpu::flush_rect(rc.x as u32, rc.y as u32, rc.width, rc.height);
         }
     }
     core::arch::asm!("sfence", options(nomem, nostack));
@@ -1152,3 +1155,74 @@ pub fn dump_metrics(scenario: &str) {
 pub fn reset_metrics() {
     crate::compositor_metrics::reset_metrics();
 }
+
+/// Phase 12 Deliverable 5: Structured snapshot of active windows for agent introspection.
+pub fn get_windows_snapshot(max_entries: usize) -> alloc::vec::Vec<crate::introspect::WindowInfo> {
+    let mut list = alloc::vec::Vec::new();
+    let focused = crate::input_routing::focused_surface();
+    let windows = windows_mut();
+    for w in windows.iter().take(max_entries) {
+        let mut title = [0u8; 32];
+        let len = w.title_len.min(32);
+        title[..len].copy_from_slice(&w.title[..len]);
+        list.push(crate::introspect::WindowInfo {
+            surface_object: w.surface_object,
+            x: w.x,
+            y: w.y,
+            width: w.width,
+            height: w.height,
+            is_focused: if w.surface_object == focused { 1 } else { 0 },
+            title_len: len as u32,
+            title,
+        });
+    }
+    list
+}
+
+/// Phase 12 Exit Criterion 2: Typed agent manipulation without pixel scraping or OCR.
+pub fn inject_agent_ui_action(surface_object: ObjectId, action_type: u32, arg0: u32, arg1: u32) -> Result<(), &'static str> {
+    let windows = windows_mut();
+    let target = if surface_object == 0 && !windows.is_empty() {
+        windows[0].surface_object
+    } else {
+        surface_object
+    };
+    let Some(pos) = windows.iter().position(|w| w.surface_object == target) else {
+        return Err("NoSuchWindow");
+    };
+
+    match action_type {
+        1 => {
+            // Action 1: InjectKey { scancode: arg0 }
+            crate::input_routing::set_focus(surface_object);
+            crate::input_routing::deliver_key_event(arg0 as u8);
+            klog_info!("AGENT_UI_ACTION_INJECT_KEY surface={} scancode=0x{:x}", surface_object, arg0);
+            Ok(())
+        }
+        2 => {
+            // Action 2: InjectClick { x: arg0, y: arg1 }
+            let w = &windows[pos];
+            let click_x = w.x + arg0 as i32;
+            let click_y = w.y + arg1 as i32;
+            crate::input_routing::set_focus(surface_object);
+            klog_info!("AGENT_UI_ACTION_INJECT_CLICK surface={} click=({},{})", surface_object, click_x, click_y);
+            Ok(())
+        }
+        3 => {
+            // Action 3: FocusWindow
+            crate::input_routing::set_focus(surface_object);
+            let win = windows.remove(pos);
+            windows.push(win);
+            mark_window_dirty();
+            klog_info!("AGENT_UI_ACTION_FOCUS surface={}", surface_object);
+            Ok(())
+        }
+        4 => {
+            // Action 4: QueryLayout / Ping
+            klog_info!("AGENT_UI_ACTION_QUERY surface={}", surface_object);
+            Ok(())
+        }
+        _ => Err("UnknownActionType"),
+    }
+}
+

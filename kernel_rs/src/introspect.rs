@@ -108,6 +108,7 @@ fn event_discriminant(event: crate::audit::AuditEvent) -> (u32, u32, u32) {
         ProcessRestarted { bdf, attempt } => (11, bdf, attempt),
         ProcessQuarantined { bdf } => (12, bdf, 0),
         ManifestDenied { kind } => (13, kind as u32, 0),
+        AgentUiAction { target_object, action_type } => (14, target_object, action_type),
     }
 }
 
@@ -180,3 +181,44 @@ pub fn thread_info_bytes(info: &ThreadInfo) -> [u8; THREAD_INFO_SIZE as usize] {
     }
     out
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct WindowInfo {
+    pub surface_object: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub is_focused: u32,
+    pub title_len: u32,
+    pub title: [u8; 32],
+}
+
+pub const WINDOW_INFO_SIZE: u64 = 60; // 4*7 + 32 = 60 bytes
+
+pub fn snapshot_windows(max_entries: usize) -> alloc::vec::Vec<WindowInfo> {
+    crate::window_manager::get_windows_snapshot(max_entries)
+}
+
+pub fn window_info_bytes(info: &WindowInfo) -> [u8; WINDOW_INFO_SIZE as usize] {
+    let mut out = [0u8; WINDOW_INFO_SIZE as usize];
+    let so = info.surface_object.to_le_bytes();
+    let x = info.x.to_le_bytes();
+    let y = info.y.to_le_bytes();
+    let w = info.width.to_le_bytes();
+    let h = info.height.to_le_bytes();
+    let foc = info.is_focused.to_le_bytes();
+    let tl = info.title_len.to_le_bytes();
+
+    for j in 0..4 { out[j] = so[j]; }
+    for j in 0..4 { out[4 + j] = x[j]; }
+    for j in 0..4 { out[8 + j] = y[j]; }
+    for j in 0..4 { out[12 + j] = w[j]; }
+    for j in 0..4 { out[16 + j] = h[j]; }
+    for j in 0..4 { out[20 + j] = foc[j]; }
+    for j in 0..4 { out[24 + j] = tl[j]; }
+    for j in 0..32 { out[28 + j] = info.title[j]; }
+    out
+}
+

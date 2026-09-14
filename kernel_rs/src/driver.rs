@@ -79,6 +79,18 @@ pub fn create_surface_capability(table: &mut CapabilityTable, x: u32, y: u32, wi
     table.grant(object_id, rights)
 }
 
+/// Phase 10 deliverable 3: mints a real `DnsResolver` capability object
+/// and grants it into `table`. A process wishing to perform DNS domain name
+/// lookups must hold this explicit capability.
+pub fn create_dns_resolver_capability(
+    table: &mut CapabilityTable,
+    server_ip: [u8; 4],
+    rights: Rights,
+) -> CapId {
+    let object_id = crate::capability::create_object(KernelObjectKind::DnsResolver { server_ip });
+    table.grant(object_id, rights)
+}
+
 #[derive(Debug)]
 pub enum DriverError {
     Cap(CapError),

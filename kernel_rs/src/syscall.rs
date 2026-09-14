@@ -702,6 +702,66 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
             let height = (a1 & 0xFFFF) as u32;
             crate::compositor::syscall_commit_surface(a0 as capability::CapId, x, y, width, height)
         }
+        32 => {
+            // Phase 12 Deliverable 5: Typed window introspection (SYS_INTROSPECT_WINDOWS)
+            // a0 = buffer vaddr, a1 = capacity in WindowInfo-sized entries
+            match thread::resolve_current_capability(AGENT_INTROSPECT_CAP, capability::Rights::INTROSPECT) {
+                Ok(_) => {
+                    let max_entries = a1 as usize;
+                    let entries = crate::introspect::snapshot_windows(max_entries);
+                    let total_bytes = entries.len() as u64 * crate::introspect::WINDOW_INFO_SIZE;
+                    let pml4 = vmm::current_cr3();
+                    if total_bytes > 0 && !unsafe { vmm::validate_user_buffer_writable(pml4, a0, total_bytes) } {
+                        klog_info!("SYSCALL_INTROSPECT_WINDOWS_BAD_BUFFER");
+                        return u64::MAX;
+                    }
+                    for (i, info) in entries.iter().enumerate() {
+                        let bytes = crate::introspect::window_info_bytes(info);
+                        let dst = a0 + (i as u64) * crate::introspect::WINDOW_INFO_SIZE;
+                        unsafe { vmm::write_user_bytes(pml4, dst, &bytes) };
+                    }
+                    klog_info!("SYSCALL_INTROSPECT_WINDOWS_OK count={}", entries.len());
+                    entries.len() as u64
+                }
+                Err(_) => {
+                    klog_info!("SYSCALL_INTROSPECT_WINDOWS_DENIED");
+                    crate::audit::record(crate::audit::AuditEvent::Denied { cap_id: AGENT_INTROSPECT_CAP });
+                    u64::MAX
+                }
+            }
+        }
+        33 => {
+            // Phase 12 Exit Criterion 2: Typed agent manipulation without pixel scraping or OCR (SYS_AGENT_UI_ACTION)
+            // a0 = target surface ObjectId, a1 = packed action: (action_type << 32) | (arg0 << 16) | arg1
+            match thread::resolve_current_capability(AGENT_INTROSPECT_CAP, capability::Rights::INTROSPECT) {
+                Ok(_) => {
+                    let target_surface = a0 as u32;
+                    let action_type = (a1 >> 32) as u32;
+                    let arg0 = ((a1 >> 16) & 0xFFFF) as u32;
+                    let arg1 = (a1 & 0xFFFF) as u32;
+
+                    match crate::window_manager::inject_agent_ui_action(target_surface, action_type, arg0, arg1) {
+                        Ok(()) => {
+                            crate::audit::record(crate::audit::AuditEvent::AgentUiAction {
+                                target_object: target_surface,
+                                action_type,
+                            });
+                            klog_info!("SYSCALL_AGENT_UI_ACTION_OK target={} action={}", target_surface, action_type);
+                            0
+                        }
+                        Err(e) => {
+                            klog_info!("SYSCALL_AGENT_UI_ACTION_FAILED: {}", e);
+                            u64::MAX
+                        }
+                    }
+                }
+                Err(_) => {
+                    klog_info!("SYSCALL_AGENT_UI_ACTION_DENIED");
+                    crate::audit::record(crate::audit::AuditEvent::Denied { cap_id: AGENT_INTROSPECT_CAP });
+                    u64::MAX
+                }
+            }
+        }
         _ => {
             klog_info!("SYSCALL_UNKNOWN num={}", num);
             u64::MAX

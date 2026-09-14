@@ -93,6 +93,8 @@ pub fn spawn_if_present(devices: &[pci::PciDevice]) {
     // device's identity is known, so supervisor.rs can trace a later
     // real fault on this process back to this exact device.
     crate::supervisor::register(dev.bus, dev.device, dev.function, respawn);
+    // Phase 10 deliverable 3: DNS capability-object wiring verification
+    crate::net_service::run_dns_capability_self_check();
     thread::spawn(netstack_driver_thread);
 }
 

@@ -86,16 +86,36 @@ unsafe fn syscall_buf(num: u64, buf: u64, max_entries: u64) -> u64 {
     ret
 }
 
+fn write_dec_u64(v: u64) {
+    if v == 0 {
+        com1_write_str("0");
+        return;
+    }
+    let mut digits = [0u8; 20];
+    let mut n = 0usize;
+    let mut x = v;
+    while x > 0 && n < 20 {
+        digits[n] = b'0' + (x % 10) as u8;
+        x /= 10;
+        n += 1;
+    }
+    let mut i = n;
+    while i > 0 {
+        i -= 1;
+        if let Ok(s) = core::str::from_utf8(&digits[i..i + 1]) {
+            com1_write_str(s);
+        }
+    }
+}
+
 const MAX_ENTRIES: usize = 16;
 const THREAD_INFO_SIZE: usize = 16;
 const TOOL_DESCRIPTOR_SIZE: usize = 16;
 const AUDIT_ENTRY_SIZE: usize = 24;
+const WINDOW_INFO_SIZE: usize = 60;
 
-// One shared, generously-sized buffer for all three syscalls (used one
-// at a time, never concurrently) -- real `#[repr(C, align(8))]` so a
-// natural 8-byte alignment holds regardless of which fixed-layout
-// struct is currently being decoded out of it.
-const BUF_BYTES: usize = MAX_ENTRIES * AUDIT_ENTRY_SIZE; // the largest of the three entry sizes
+// One shared, generously-sized buffer for all syscalls
+const BUF_BYTES: usize = MAX_ENTRIES * 64; // 1024 bytes
 
 #[repr(C, align(8))]
 struct SharedBuf {
@@ -145,6 +165,20 @@ unsafe fn decode_tool_descriptor(index: usize) -> (u32, u32, u32) {
 unsafe fn decode_audit_entry(index: usize) -> (u64, u32, u32, u32) {
     let base = buf_base().add(index * AUDIT_ENTRY_SIZE);
     (read_u64_le(base, 0), read_u32_le(base, 8), read_u32_le(base, 12), read_u32_le(base, 16))
+}
+
+/// Real typed decode of one `WindowInfo` entry (60 bytes)
+unsafe fn decode_window_info(index: usize) -> (u32, i32, i32, u32, u32, u32, u32) {
+    let base = buf_base().add(index * WINDOW_INFO_SIZE);
+    (
+        read_u32_le(base, 0),
+        read_u32_le(base, 4) as i32,
+        read_u32_le(base, 8) as i32,
+        read_u32_le(base, 12),
+        read_u32_le(base, 16),
+        read_u32_le(base, 20),
+        read_u32_le(base, 24),
+    )
 }
 
 #[no_mangle]
@@ -198,6 +232,45 @@ pub extern "C" fn _start() -> ! {
             let (_seq, kind, a, b) = unsafe { decode_audit_entry(i) };
             let packed = 0xA9_000000u64 | ((kind as u64 & 0xFF) << 16) | ((a as u64 & 0xF) << 8) | (b as u64 & 0xFF);
             unsafe { syscall1(packed) };
+        }
+    }
+
+    // 4. Structured Window Introspection (syscall 32) -- capability-gated.
+    let win_result = unsafe { syscall_buf(32, buf_addr, MAX_ENTRIES as u64) };
+    if win_result == u64::MAX {
+        com1_write_str("[AGENT_DEMO] WINDOW_INTROSPECT_DENIED -- no Rights::INTROSPECT capability held\n");
+        // Also attempt direct UI action to verify denial:
+        let act_denied = unsafe { syscall_buf(33, 1, (1u64 << 32) | (0x1Eu64 << 16)) };
+        if act_denied == u64::MAX {
+            com1_write_str("[AGENT_DEMO] AGENT_UI_ACTION_DENIED_OK\n");
+        }
+    } else {
+        com1_write_str("[AGENT_DEMO] WINDOW_INTROSPECT_OK -- real typed WindowInfo entries follow\n");
+        let count = core::cmp::min(win_result as usize, MAX_ENTRIES);
+        for i in 0..count {
+            let (surf, x, y, w, h, foc, _tlen) = unsafe { decode_window_info(i) };
+            com1_write_str("[AGENT_DEMO] WINDOW_FOUND surface=");
+            write_dec_u64(surf as u64);
+            com1_write_str(" pos=(");
+            write_dec_u64(if x >= 0 { x as u64 } else { 0 });
+            com1_write_str(",");
+            write_dec_u64(if y >= 0 { y as u64 } else { 0 });
+            com1_write_str(") size=(");
+            write_dec_u64(w as u64);
+            com1_write_str("x");
+            write_dec_u64(h as u64);
+            com1_write_str(") focused=");
+            write_dec_u64(foc as u64);
+            com1_write_str("\n");
+        }
+
+        // 5. Typed UI Action (syscall 33) -- send typed key action
+        let target = if count > 0 { unsafe { decode_window_info(0) }.0 } else { 1 };
+        let act_result = unsafe { syscall_buf(33, target as u64, (1u64 << 32) | (0x1Eu64 << 16)) };
+        if act_result == 0 {
+            com1_write_str("[AGENT_DEMO] AGENT_UI_ACTION_PASS -- typed action dispatched without pixel scraping\n");
+        } else {
+            com1_write_str("[AGENT_DEMO] AGENT_UI_ACTION_FAILED\n");
         }
     }
 
