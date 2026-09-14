@@ -747,6 +747,32 @@ const CURSOR_INTERIOR: [u16; 18] = [
     0b0000_0000_0000,
 ];
 
+const fn build_cursor_sprite() -> [[u8; CURSOR_W as usize]; CURSOR_H as usize] {
+    let mut sprite = [[0u8; CURSOR_W as usize]; CURSOR_H as usize];
+    let mut r = 0;
+    while r < CURSOR_H as usize {
+        let outline = CURSOR_OUTLINE[r];
+        let interior = CURSOR_INTERIOR[r];
+        let mut c = 0;
+        while c < CURSOR_W as usize {
+            let shift = CURSOR_W - 1 - c as u32;
+            if (interior >> shift) & 1 != 0 {
+                sprite[r][c] = 2; // White body
+            } else if (outline >> shift) & 1 != 0 {
+                sprite[r][c] = 1; // Black outline
+            } else {
+                sprite[r][c] = 0; // Transparent
+            }
+            c += 1;
+        }
+        r += 1;
+    }
+    sprite
+}
+
+/// Precomputed 12x18 cursor sprite bitmap cache (Phase 5.8)
+const CURSOR_SPRITE: [[u8; CURSOR_W as usize]; CURSOR_H as usize] = build_cursor_sprite();
+
 /// Restores the rectangle under the cursor directly from the pristine RAM frontbuffer (Phase 5.6)
 unsafe fn restore_cursor_rect(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u32, cx: i32, cy: i32) {
     let fb = ensure_frontbuffer(fb_width, fb_height);
@@ -766,7 +792,7 @@ unsafe fn restore_cursor_rect(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_he
     }
 }
 
-/// Blits the cursor sprite over the underlying pixels at (cx, cy) using pristine FRONTBUFFER (Phase 5.6)
+/// Blits the cursor sprite over the underlying pixels at (cx, cy) using pristine FRONTBUFFER and cached sprite bitmap (Phase 5.6/5.8)
 unsafe fn draw_cursor_at(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u32, cx: i32, cy: i32) {
     let fb = ensure_frontbuffer(fb_width, fb_height);
     let mut line_buf = [0u32; CURSOR_W as usize];
@@ -785,24 +811,68 @@ unsafe fn draw_cursor_at(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height:
         let fb_off = (sy as u32 * fb_width + x_start) as usize;
         line_buf[..count as usize].copy_from_slice(&fb[fb_off..fb_off + count as usize]);
 
-        let outline_bits = CURSOR_OUTLINE[row as usize];
-        let interior_bits = CURSOR_INTERIOR[row as usize];
+        let sprite_row = &CURSOR_SPRITE[row as usize];
+        let col_offset = (x_start as i32 - cx) as usize;
 
-        for col in 0..count {
-            let actual_col = (x_start as i32 - cx) as u32 + col;
-            if actual_col >= CURSOR_W {
-                continue;
-            }
-            let shift = CURSOR_W - 1 - actual_col;
-            if (interior_bits >> shift) & 1 != 0 {
-                line_buf[col as usize] = 0x00FF_FFFF; // Crisp White body
-            } else if (outline_bits >> shift) & 1 != 0 {
-                line_buf[col as usize] = 0x0000_0000; // Black outline
+        for col in 0..count as usize {
+            let actual_col = col_offset + col;
+            if actual_col < CURSOR_W as usize {
+                match sprite_row[actual_col] {
+                    2 => line_buf[col] = 0x00FF_FFFF, // Crisp White body
+                    1 => line_buf[col] = 0x0000_0000, // Black outline
+                    _ => {}
+                }
             }
         }
         put_fb_scanline_fast(fb_phys_base, ppsl, x_start, sy as u32, line_buf.as_ptr(), count);
     }
     core::arch::asm!("sfence", options(nomem, nostack));
+}
+
+/// Overlap-aware cursor movement overlay (Phase 5.8):
+/// Restores only the vacated sub-rectangles (old_rect \ new_rect) using FRONTBUFFER,
+/// and draws the new cursor sprite at (new_x, new_y).
+/// Guarantees that every pixel in physical GOP MMIO is written at most once per move!
+unsafe fn move_cursor_overlay(
+    fb_phys_base: u64,
+    ppsl: u32,
+    fb_width: u32,
+    fb_height: u32,
+    old_x: i32,
+    old_y: i32,
+    new_x: i32,
+    new_y: i32,
+) {
+    if old_x == new_x && old_y == new_y {
+        return;
+    }
+
+    let old_rect = DamageRect::new(old_x, old_y, CURSOR_W, CURSOR_H);
+    let new_rect = DamageRect::new(new_x, new_y, CURSOR_W, CURSOR_H);
+
+    // Compute vacated slices = old_rect - new_rect (at most 4 non-overlapping sub-rects)
+    let mut vacated = [DamageRect::default(); 4];
+    let n_vacated = old_rect.subtract(&new_rect, &mut vacated);
+
+    let fb = ensure_frontbuffer(fb_width, fb_height);
+    for k in 0..n_vacated {
+        let r = vacated[k];
+        let x_start = r.x.max(0) as u32;
+        let x_end = (r.x + r.width as i32).clamp(0, fb_width as i32) as u32;
+        if x_end <= x_start {
+            continue;
+        }
+        let count = x_end - x_start;
+        for sy in r.y..r.bottom() {
+            if sy < 0 || sy as u32 >= fb_height {
+                continue;
+            }
+            let src_ptr = fb.as_ptr().add((sy as u32 * fb_width + x_start) as usize);
+            put_fb_scanline_fast(fb_phys_base, ppsl, x_start, sy as u32, src_ptr, count);
+        }
+    }
+
+    draw_cursor_at(fb_phys_base, ppsl, fb_width, fb_height, new_x, new_y);
 }
 
 unsafe fn draw_cursor(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u32) {
@@ -1006,11 +1076,10 @@ pub fn report_mouse(dx: i32, dy: i32, left_down: bool) {
             // Check if any deferred drag frame has passed its deadline and is ready for presentation
             crate::frame_scheduler::try_present_pending(fb_phys_base, ppsl, fb_width, fb_height);
 
-            // Buttery-smooth mouse motion: restore old cursor 12x18 rect from RAM frontbuffer,
-            // then blit new cursor sprite at new coordinates. Zero window recomposition!
+            // Buttery-smooth mouse motion (Phase 5.8): Overlap-aware cursor overlay update with precomputed sprite caching
+            // Restores only the vacated slices and blits new cursor sprite. Zero window recomposition, zero GOP MMIO overdraw!
             let t_cursor_start = crate::compositor_metrics::read_tsc();
-            restore_cursor_rect(fb_phys_base, ppsl, fb_width, fb_height, old_x, old_y);
-            draw_cursor_at(fb_phys_base, ppsl, fb_width, fb_height, new_x, new_y);
+            move_cursor_overlay(fb_phys_base, ppsl, fb_width, fb_height, old_x, old_y, new_x, new_y);
             let t_cursor_end = crate::compositor_metrics::read_tsc();
 
             let t_end = crate::compositor_metrics::read_tsc();
