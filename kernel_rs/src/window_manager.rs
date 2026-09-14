@@ -964,6 +964,7 @@ pub fn report_mouse(dx: i32, dy: i32, left_down: bool) {
                 }
             }
         }
+        let release_edge = !left_down && was_down;
         if !left_down {
             DRAGGING = None;
         }
@@ -999,9 +1000,13 @@ pub fn report_mouse(dx: i32, dy: i32, left_down: bool) {
                 }
             }
             mark_window_dirty();
-            flush_dirty_surfaces(fb_phys_base, ppsl, fb_width, fb_height);
+            // Phase 5.7 Frame Scheduler: pace window dragging to target FPS (60 FPS deadline)
+            crate::frame_scheduler::request_presentation(fb_phys_base, ppsl, fb_width, fb_height, release_edge);
         } else {
-            // Buttery-smooth mouse motion: restore old cursor 12x18 rect from RAM backbuffer,
+            // Check if any deferred drag frame has passed its deadline and is ready for presentation
+            crate::frame_scheduler::try_present_pending(fb_phys_base, ppsl, fb_width, fb_height);
+
+            // Buttery-smooth mouse motion: restore old cursor 12x18 rect from RAM frontbuffer,
             // then blit new cursor sprite at new coordinates. Zero window recomposition!
             let t_cursor_start = crate::compositor_metrics::read_tsc();
             restore_cursor_rect(fb_phys_base, ppsl, fb_width, fb_height, old_x, old_y);

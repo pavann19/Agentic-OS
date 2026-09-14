@@ -15,6 +15,7 @@ pub mod discovered_envelope; // research track section 3 -- pure logic, NOT wire
 // not a merged change.
 pub mod driver_registry;
 pub mod ext2;
+pub mod frame_pacing;
 pub mod geometry;
 pub mod impossibility_certificate; // research track section 2 -- pure logic, NOT wired into kernel_rs
 pub mod madt;

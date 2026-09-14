@@ -1589,4 +1589,85 @@ mod geometry_tests {
     }
 }
 
+#[cfg(test)]
+mod frame_pacing_tests {
+    use kernel_common::frame_pacing::FramePacer;
+
+    const CYCLES_PER_US: u64 = 2500;
+
+    #[test]
+    fn target_fps_interval_calculations() {
+        let pacer60 = FramePacer::new(60);
+        assert_eq!(pacer60.frame_interval_us(), 16_666);
+        assert_eq!(pacer60.frame_interval_cycles(CYCLES_PER_US), 16_666 * 2500);
+
+        let pacer120 = FramePacer::new(120);
+        assert_eq!(pacer120.frame_interval_us(), 8_333);
+
+        let pacer0 = FramePacer::new(0);
+        assert_eq!(pacer0.frame_interval_us(), 0);
+        assert_eq!(pacer0.frame_interval_cycles(CYCLES_PER_US), 0);
+    }
+
+    #[test]
+    fn idle_desktop_never_presents() {
+        let mut pacer = FramePacer::new(60);
+        // Idle: no damage marked.
+        assert!(!pacer.request_presentation(100_000_000, CYCLES_PER_US, false));
+        assert!(!pacer.request_presentation(200_000_000, CYCLES_PER_US, false));
+        assert_eq!(pacer.presented_frames, 0);
+        assert_eq!(pacer.dropped_frames, 0);
+    }
+
+    #[test]
+    fn first_damage_after_idle_presents_immediately() {
+        let mut pacer = FramePacer::new(60);
+        pacer.mark_damage();
+        // Since last_present_tsc is 0, elapsed >= interval is true
+        assert!(pacer.request_presentation(50_000_000, CYCLES_PER_US, false));
+        assert_eq!(pacer.presented_frames, 1);
+        assert_eq!(pacer.last_present_tsc, 50_000_000);
+    }
+
+    #[test]
+    fn rapid_mouse_dragging_throttles_within_interval() {
+        let mut pacer = FramePacer::new(60);
+        let interval_cycles = pacer.frame_interval_cycles(CYCLES_PER_US); // ~41,665,000 cycles
+
+        // t = 0: first frame presents
+        pacer.mark_damage();
+        assert!(pacer.request_presentation(1_000_000_000, CYCLES_PER_US, false));
+        assert_eq!(pacer.presented_frames, 1);
+
+        // 1000 Hz mouse events arrive every 1 ms (2,500,000 cycles):
+        // 10 events within 10 ms (< 16.6ms) should all be throttled
+        for i in 1..=10 {
+            pacer.mark_damage();
+            let now = 1_000_000_000 + i * 2_500_000;
+            assert!(!pacer.request_presentation(now, CYCLES_PER_US, false), "event {} should be throttled", i);
+        }
+        assert_eq!(pacer.presented_frames, 1);
+        assert_eq!(pacer.dropped_frames, 10);
+
+        // Event at 17 ms (> 16.666 ms) reaches frame deadline!
+        pacer.mark_damage();
+        let now = 1_000_000_000 + interval_cycles + 1000;
+        assert!(pacer.request_presentation(now, CYCLES_PER_US, false));
+        assert_eq!(pacer.presented_frames, 2);
+    }
+
+    #[test]
+    fn force_presentation_bypasses_interval_deadline() {
+        let mut pacer = FramePacer::new(60);
+        pacer.mark_damage();
+        assert!(pacer.request_presentation(1_000_000, CYCLES_PER_US, false));
+
+        // Forced presentation (e.g. mouse drag release) presents immediately
+        pacer.mark_damage();
+        assert!(pacer.request_presentation(1_001_000, CYCLES_PER_US, true));
+        assert_eq!(pacer.presented_frames, 2);
+    }
+}
+
+
 

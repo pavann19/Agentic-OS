@@ -594,7 +594,13 @@ pub fn syscall_commit_surface(cap_id: capability::CapId, x: u32, y: u32, width: 
     if window_manager::commit_window_damage(cap.object_id, x, y, width, height) {
         unsafe {
             if let Some(params) = (&*(&raw const FB_PARAMS)).as_ref() {
-                window_manager::flush_dirty_surfaces(params.phys_base, params.pixels_per_scan_line, params.width, params.height);
+                crate::frame_scheduler::request_presentation(
+                    params.phys_base,
+                    params.pixels_per_scan_line,
+                    params.width,
+                    params.height,
+                    false,
+                );
             }
         }
         0
