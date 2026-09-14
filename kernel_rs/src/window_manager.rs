@@ -45,7 +45,7 @@ static mut BACKBUFFER: Option<Vec<u32>> = None;
 static mut BACKBUFFER_WIDTH: u32 = 0;
 static mut BACKBUFFER_HEIGHT: u32 = 0;
 
-// Phase 5.1: Decoupled presentation & dirty flags
+// Phase 5.1 & 5.2: Decoupled presentation & real damage region tracking
 static CURSOR_DIRTY: AtomicBool = AtomicBool::new(false);
 static WINDOW_DIRTY: AtomicBool = AtomicBool::new(false);
 
@@ -57,7 +57,24 @@ pub struct DamageRect {
     pub height: u32,
 }
 
-static mut PENDING_VACATED_RECT: Option<DamageRect> = None;
+static mut GLOBAL_DAMAGE: crate::damage::DamageRegion = crate::damage::DamageRegion::new();
+
+pub fn add_damage_rect(rect: DamageRect) {
+    unsafe {
+        #[allow(static_mut_refs)]
+        let slot = &mut *&raw mut GLOBAL_DAMAGE;
+        slot.add_rect(rect);
+        mark_window_dirty();
+    }
+}
+
+pub fn clear_damage_rects() {
+    unsafe {
+        #[allow(static_mut_refs)]
+        let slot = &mut *&raw mut GLOBAL_DAMAGE;
+        slot.clear();
+    }
+}
 
 #[inline(always)]
 pub fn mark_cursor_dirty() {
@@ -817,11 +834,24 @@ pub fn report_mouse(dx: i32, dy: i32, left_down: bool) {
         }
 
         if window_moved || window_raised {
-            // Decoupled window composition: mark dirty and flush scheduled damage
+            // Decoupled window composition with real damage region tracking (Phase 5.2):
+            // Add vacated rectangle + new window rectangle to damage accumulator.
+            // Overlapping regions are automatically merged into a minimal bounding box!
             if let Some((ox, oy, ow, oh)) = old_win_rect {
-                #[allow(static_mut_refs)]
-                let slot = &mut *&raw mut PENDING_VACATED_RECT;
-                *slot = Some(DamageRect { x: ox, y: oy, width: ow, height: oh });
+                add_damage_rect(DamageRect { x: ox, y: oy, width: ow, height: oh });
+            }
+            if let Some((dragging_object, _, _)) = DRAGGING {
+                if let Some(w) = find_mut(dragging_object) {
+                    let bar_y = w.y - TITLE_BAR_HEIGHT as i32;
+                    let total_h = w.height + TITLE_BAR_HEIGHT;
+                    add_damage_rect(DamageRect { x: w.x, y: bar_y, width: w.width, height: total_h });
+                }
+            } else {
+                for w in windows_mut().iter() {
+                    let bar_y = w.y - TITLE_BAR_HEIGHT as i32;
+                    let total_h = w.height + TITLE_BAR_HEIGHT;
+                    add_damage_rect(DamageRect { x: w.x, y: bar_y, width: w.width, height: total_h });
+                }
             }
             mark_window_dirty();
             flush_dirty_surfaces(fb_phys_base, ppsl, fb_width, fb_height);
@@ -850,15 +880,42 @@ pub fn report_mouse(dx: i32, dy: i32, left_down: bool) {
     }
 }
 
-/// Flushes pending presentations if any dirty flags are active (Phase 5.1).
+/// Flushes pending presentations using real damage region tracking (Phase 5.2).
 pub unsafe fn flush_dirty_surfaces(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u32) {
     if WINDOW_DIRTY.swap(false, Ordering::AcqRel) {
         #[allow(static_mut_refs)]
-        let vacated = (*&raw mut PENDING_VACATED_RECT).take();
-        if let Some(r) = vacated {
-            redraw_rect(fb_phys_base, ppsl, fb_width, fb_height, r.x, r.y, r.width, r.height);
+        let damage = &mut *&raw mut GLOBAL_DAMAGE;
+        if !damage.is_empty() {
+            let t_start = crate::compositor_metrics::read_tsc();
+            let rect_count = damage.count();
+            let mut total_scanlines = 0usize;
+            let mut total_pixels = 0usize;
+
+            for i in 0..rect_count {
+                let r = damage.rects()[i];
+                redraw_rect(fb_phys_base, ppsl, fb_width, fb_height, r.x, r.y, r.width, r.height);
+                total_scanlines += r.height as usize;
+                total_pixels += (r.width as usize) * (r.height as usize);
+            }
+            damage.clear();
+            draw_cursor(fb_phys_base, ppsl, fb_width, fb_height);
+
+            let t_end = crate::compositor_metrics::read_tsc();
+            let metrics = crate::compositor_metrics::FrameMetrics {
+                frame_time_cycles: t_end.saturating_sub(t_start),
+                input_time_cycles: 0,
+                damage_time_cycles: 0,
+                compose_time_cycles: 0,
+                flush_time_cycles: t_end.saturating_sub(t_start),
+                cursor_time_cycles: 0,
+                damaged_rects: rect_count,
+                damaged_scanlines: total_scanlines,
+                damaged_pixels: total_pixels,
+            };
+            crate::compositor_metrics::record_frame(&metrics);
+        } else {
+            present(fb_phys_base, ppsl, fb_width, fb_height);
         }
-        present(fb_phys_base, ppsl, fb_width, fb_height);
     } else if CURSOR_DIRTY.swap(false, Ordering::AcqRel) {
         draw_cursor(fb_phys_base, ppsl, fb_width, fb_height);
     }

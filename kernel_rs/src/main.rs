@@ -27,6 +27,7 @@ pub mod compositor; // Phase 12 -- minimal real compositor foundation, see its o
 pub mod compositor_metrics; // Phase 5.0 -- lightweight compositor performance telemetry
 pub mod critical;
 pub mod device_manager;
+pub mod damage; // Phase 5.2 -- damage region tracking system with non-allocating rect lists
 pub mod driver;
 pub mod e1000;
 pub mod elf;
