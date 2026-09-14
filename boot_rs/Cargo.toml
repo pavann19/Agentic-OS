@@ -8,6 +8,7 @@ edition = "2021"
 # an officially supported Rust target — it compiles straight to a PE32+ EFI
 # application, no ELF/objcopy step, no gnu-efi.
 [dependencies]
+kernel_common = { path = "../kernel_common" }
 
 [profile.dev]
 panic = "abort"

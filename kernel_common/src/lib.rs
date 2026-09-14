@@ -9,6 +9,7 @@ pub mod animation; // Phase 5.14 -- pure animation interpolation and easing curv
 pub mod audit_ring;
 pub mod authority_graph; // research track, docs/RESEARCH_TRACK.md -- pure logic, wired into kernel_rs::authority for IOMMU grant/revoke
 pub mod bitmap;
+pub mod crypto; // Phase 14 -- pure SHA-256, HMAC-SHA256, and ChaCha20 primitives
 pub mod discovered_envelope; // research track section 3 -- pure logic, NOT wired into kernel_rs
 // Experimental, isolated (see the module's own doc for the full
 // discipline this follows): real, verified via host_tests, NOT wired
@@ -30,6 +31,7 @@ pub mod madt;
 pub mod mem_intrinsics;
 pub mod pagetable;
 pub mod supervision; // Phase 9.5a -- pure restart-decision + BDF-packing logic, see its own module doc
+pub mod tpm; // Phase 14 -- pure TPM 2.0 TCG event log and measured-boot structures
 pub mod virtio_gpu_proto; // Phase 5.13 -- VirtIO-GPU wire protocol packets and commands
 
 /// Rounds `addr` up to the nearest multiple of `align` (`align` must be a

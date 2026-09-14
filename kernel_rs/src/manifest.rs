@@ -40,6 +40,8 @@ pub enum CapKind {
     AuditQueryHandle = 6,
     Socket = 7,
     Surface = 8,
+    UserSession = 9,
+    CryptoKey = 10,
 }
 
 pub(crate) fn kind_of(kind: &KernelObjectKind) -> CapKind {
@@ -54,6 +56,8 @@ pub(crate) fn kind_of(kind: &KernelObjectKind) -> CapKind {
         AuditQueryHandle => CapKind::AuditQueryHandle,
         Socket { .. } => CapKind::Socket,
         Surface { .. } => CapKind::Surface,
+        UserSession { .. } => CapKind::UserSession,
+        CryptoKey { .. } => CapKind::CryptoKey,
     }
 }
 

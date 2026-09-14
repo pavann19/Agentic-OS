@@ -45,6 +45,8 @@ typedef struct {
     uint64_t kernel_physical_start;
     uint64_t kernel_physical_end;
     uint64_t kernel_virtual_base;
+    uint8_t kernel_hash[32];
+    void* tpm_log;
 } BootInfoPayload;
 
 typedef struct {

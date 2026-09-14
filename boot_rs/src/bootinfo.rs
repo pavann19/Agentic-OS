@@ -52,6 +52,8 @@ pub struct BootInfoPayload {
     pub kernel_physical_start: u64,
     pub kernel_physical_end: u64,
     pub kernel_virtual_base: u64,
+    pub kernel_hash: [u8; 32],
+    pub tpm_log: *const c_void,
 }
 
 #[repr(C)]

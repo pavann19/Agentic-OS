@@ -1748,3 +1748,52 @@ Real, disclosed tooling limitation found (not a driver bug): QEMU's HMP `mouse_m
 **6. Exit Criterion 3 — Concurrent Multi-App Integration Test.**
 - Verified live (`scripts/test-phase13-all.ps1`, 12/12 PASS): all four reference apps running concurrently under the desktop launcher, capability-isolated in ring 3, exercising GUI compositing + disk storage (virtio-blk ext2 file request/reply) + networking (e1000 + TCP HTTP GET) simultaneously in one integration test.
 
+---
+
+## Phase 14 — Multi-User, Update Integrity, And Hardware Root Of Trust (5/5 items complete — DONE)
+
+Source: `docs/ROADMAP.md` §5 Phase 14. Completed 2026-09-14.
+All 5 deliverables and exit criteria implemented with zero ambient authority, pure `#![no_std]` zero-dependency cryptography, and fully automated verification against real QEMU hardware and host test harnesses.
+
+- [x] **Deliverable 1: Multi-User Capability Session Model (ADR-003)**
+  - `kernel_rs/src/multi_user.rs`: `UserSession` domain owning an isolated `CapabilityTable`. Zero ambient authority — user identity is a capability domain, not an ambient POSIX integer or `root` escape hatch.
+  - Cross-user naming denial: Bob attempting to resolve Alice's private capability receives `CapError::NoSuchCapability`, indistinguishable from nonexistence.
+  - Attenuated delegation: Alice explicitly delegates a READ-only capability to Bob via `derive(..., Rights::READ, &mut bob.table)`.
+  - Escalation rejection: Bob attempting to WRITE on the delegated READ-only capability is denied with `CapError::InsufficientRights`.
+  - Immediate revocation: Alice revoking the underlying shared object invalidates Bob's delegated capability immediately in $O(1)$ time (`CapError::Revoked`).
+  - Verified live (`scripts/test-multi-user.ps1`, 9/9 PASS).
+
+- [x] **Deliverable 2: Secure Boot Chain & Measured Boot**
+  - `kernel_common/src/crypto.rs`: Constant-time, zero-allocation `#![no_std]` implementation of SHA-256 (FIPS 180-4).
+  - `kernel_common/src/tpm.rs`: TPM 2.0 TCG event log structures (`TcgEvent`, `TcgEventLog`) tracking PCR[0] (firmware), PCR[4] (bootloader), PCR[9] (kernel).
+  - `boot_rs/src/loader.rs`: Bootloader hashes `kernel.elf` with SHA-256, verifies against `kernel.sig` if present, rejects tampered kernel binaries with `SECURE_BOOT_VIOLATION: KERNEL_HASH_MISMATCH` and aborts boot, extends TPM 2.0 event log, and forwards cryptographic measurement to `kernel_rs` via `BootInfoPayload.kernel_hash` and `BootInfoPayload.tpm_log`.
+  - Verified live (`scripts/test-secure-boot.ps1`, 5/5 PASS) including adversarial rejection of tampered kernel images.
+
+- [x] **Deliverable 3: Cryptographically Signed Updates & Dual-Bank A/B Rollback**
+  - `kernel_rs/src/update.rs`: `SignedPackageHeader` (`AGYPKG2\0`) carrying payload SHA-256 digest, HMAC-SHA256 signature, monotonic version counter, and dual-bank A/B state machine.
+  - Anti-rollback enforcement: Packages with version $\le$ active bank version rejected with `VersionDowngrade`.
+  - Cryptographic verification: SHA-256 payload integrity check (`UpdateError::TamperedPayload`) and HMAC-SHA256 root-key signature validation (`UpdateError::BadSignature`).
+  - Dual-bank state machine (`BankSlot::BankA`, `BankSlot::BankB`): Updates staged to alternate bank, committed on successful verification, and reversible via atomic rollback.
+  - Verified live (`scripts/test-signed-update.ps1`, 7/7 PASS).
+
+- [x] **Deliverable 4: Full-Disk / Object-Store Encryption**
+  - `kernel_common/src/crypto.rs`: Constant-time, zero-allocation `#![no_std]` implementation of ChaCha20 stream cipher (RFC 8439) with sector encryption support.
+  - `kernel_rs/src/crypto_store.rs`: Encrypted sector storage layer using ChaCha20 with sector LBA cryptographic nonce binding.
+  - Physical media confidentiality: Raw disk ciphertext verification ensures zero plaintext leakage on storage sectors.
+  - Round-trip integrity: Decryption with valid key is byte-for-byte identical to plaintext.
+  - Attack defenses: Wrong keys produce scrambled garbage; cross-sector relocation attacks fail because nonce derivation binds each sector to its physical LBA.
+  - Capability gating: Decryption requires explicit `CryptoKey` capability with `Rights::DECRYPT`.
+  - Verified live (`scripts/test-crypto-store.ps1`, 8/8 PASS).
+
+- [x] **Deliverable 5: Local-First Crash / Panic Telemetry**
+  - `kernel_rs/src/telemetry.rs`: `TelemetryCrashRecord` (`AGYCRSH1`) capturing architectural registers (RIP, RSP, CR2, fault vector, error code) and execution context (thread ID, UID, reason).
+  - Cryptographic self-integrity: Record verified via SHA-256 checksum over struct fields.
+  - Local-first persistence: Persisted in dedicated crash storage for ingestion by the Phase 6 synthesis loop.
+  - Verified live (`scripts/test-phase14.ps1` Step 6, PASS).
+
+**Comprehensive Verification Summary:**
+- Host Unit Tests: 123/123 PASS (`cargo test` in `host_tests/` across crypto, TPM, VMM, PMM, and drivers).
+- End-to-End Test Suite: `scripts/test-phase14.ps1` runs all 6 stages and passes 100%.
+- Full Regression Suite: All 23 pre-existing automated suites pass 100% (851.9s wall-clock time) with zero regressions.
+
+

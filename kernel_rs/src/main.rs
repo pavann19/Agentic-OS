@@ -68,6 +68,10 @@ pub mod net_client_app; // Phase 13 deliverable 4 -- fourth real reference app
 pub mod sample_app_demo; // Phase 13 exit criterion 2 -- third-party SDK app demo
 pub mod package; // Phase 13 deliverable 5 -- package store & reproducible updates
 pub mod launcher; // Phase 13 deliverable 2 -- real app launcher
+pub mod multi_user; // Phase 14 deliverable 1 -- multi-user capability session model
+pub mod update; // Phase 14 deliverable 3 -- cryptographically signed updates and dual-bank A/B
+pub mod crypto_store; // Phase 14 deliverable 4 -- full-disk ChaCha20 encryption
+pub mod telemetry; // Phase 14 deliverable 5 -- local-first crash telemetry
 pub mod pci;
 pub mod pic;
 pub mod pmm;
@@ -221,6 +225,11 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     // other post-switch physical access), which stays valid for the rest
     // of the kernel's lifetime.
     let info: &BootInfo = unsafe { &*(pmm::p2v_pub(boot_info as u64) as *const BootInfo) };
+    let kh = info.payload.kernel_hash;
+    klog_info!(
+        "SECURE_BOOT_KERNEL_HASH_FORWARDED hash_prefix={:02x}{:02x}{:02x}{:02x} tpm_log_ptr=0x{:x}",
+        kh[0], kh[1], kh[2], kh[3], info.payload.tpm_log as usize
+    );
 
     #[cfg(any(
         feature = "fault_test_null_deref",
@@ -889,6 +898,18 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
 
     #[cfg(any(feature = "app_update_demo", feature = "phase13_all"))]
     package::run_app_update_demo();
+
+    #[cfg(any(feature = "phase14_multi_user", feature = "phase14_all"))]
+    multi_user::run_multi_user_demo();
+
+    #[cfg(any(feature = "phase14_signed_update", feature = "phase14_all"))]
+    update::run_signed_update_demo();
+
+    #[cfg(any(feature = "phase14_crypto_store", feature = "phase14_all"))]
+    crypto_store::run_crypto_store_demo();
+
+    #[cfg(any(feature = "phase14_telemetry", feature = "phase14_all"))]
+    telemetry::run_telemetry_demo();
 
     // Phase 2: capability substrate. Real proof of every exit criterion
     // from docs/ROADMAP.md's Phase 2 section, not just "it compiles":

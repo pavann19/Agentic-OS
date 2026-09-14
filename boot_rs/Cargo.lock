@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "agentic_bootloader"
 version = "0.1.0"
+dependencies = [
+ "kernel_common",
+]
+
+[[package]]
+name = "kernel_common"
+version = "0.1.0"

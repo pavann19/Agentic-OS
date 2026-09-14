@@ -68,6 +68,10 @@ impl Rights {
     // Phase 13: file read and write rights for FileObject capabilities.
     pub const READ: Rights = Rights(1 << 9);
     pub const WRITE: Rights = Rights(1 << 10);
+    // Phase 14: cryptographic operations and multi-user session management
+    pub const ENCRYPT: Rights = Rights(1 << 11);
+    pub const DECRYPT: Rights = Rights(1 << 12);
+    pub const SESSION_SWITCH: Rights = Rights(1 << 13);
 
     pub fn contains(self, other: Rights) -> bool {
         (self.0 & other.0) == other.0
@@ -157,6 +161,12 @@ pub enum KernelObjectKind {
     /// checked against — a write outside them is refused by the
     /// compositor, not merely discouraged by convention.
     Surface { x: u32, y: u32, width: u32, height: u32 },
+    /// Phase 14 (`docs/ROADMAP.md` §5 deliverable 1 — "Multi-user capability session model"):
+    /// isolated user session capability domain.
+    UserSession { uid: u32 },
+    /// Phase 14 (`docs/ROADMAP.md` §5 deliverable 4 — "Full-disk / object-store encryption"):
+    /// cryptographic key handle.
+    CryptoKey { key_id: u32 },
 }
 
 /// Real, small, closed set — matches this stack's own real, from-spec

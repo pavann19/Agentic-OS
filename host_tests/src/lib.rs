@@ -1867,6 +1867,184 @@ mod animation_tests {
     }
 }
 
+#[cfg(test)]
+mod crypto_tests {
+    use kernel_common::crypto::{constant_time_eq, ChaCha20, HmacSha256, Sha256};
+
+    fn hex_to_bytes<const N: usize>(hex: &str) -> [u8; N] {
+        let mut out = [0u8; N];
+        for i in 0..N {
+            out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn sha256_nist_empty_string() {
+        let digest = Sha256::digest(b"");
+        let expected = hex_to_bytes::<32>("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(digest, expected);
+    }
+
+    #[test]
+    fn sha256_nist_abc() {
+        let digest = Sha256::digest(b"abc");
+        let expected = hex_to_bytes::<32>("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(digest, expected);
+    }
+
+    #[test]
+    fn sha256_nist_multi_block() {
+        let data = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+        let digest = Sha256::digest(data);
+        let expected = hex_to_bytes::<32>("248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+        assert_eq!(digest, expected);
+    }
+
+    #[test]
+    fn sha256_streaming_matches_one_shot() {
+        let mut stream = Sha256::new();
+        stream.update(b"abcd");
+        stream.update(b"bcde");
+        stream.update(b"cdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
+        let stream_digest = stream.finalize();
+
+        let one_shot = Sha256::digest(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
+        assert_eq!(stream_digest, one_shot);
+    }
+
+    #[test]
+    fn hmac_sha256_rfc4231_case1() {
+        let key = [0x0bu8; 20];
+        let data = b"Hi There";
+        let tag = HmacSha256::mac(&key, data);
+        let expected = hex_to_bytes::<32>("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+        assert_eq!(tag, expected);
+        assert!(HmacSha256::verify(&key, data, &expected));
+
+        // Tampered data must fail verification
+        assert!(!HmacSha256::verify(&key, b"Hi There!", &expected));
+    }
+
+    #[test]
+    fn chacha20_rfc8439_test_vector() {
+        let key: [u8; 32] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+        ];
+        let nonce: [u8; 12] = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4a,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        let plaintext = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+        let mut buffer = *plaintext;
+
+        ChaCha20::apply_keystream(&key, &nonce, 1, &mut buffer);
+
+        let expected_hex = concat!(
+            "6e2e359a2568f98041ba0728dd0d6981",
+            "e97e7aec1d4360c20a27afccfd9fae0b",
+            "f91b65c5524733ab8f593dabcd62b357",
+            "1639d624e65152ab8f530c359f0861d8",
+            "07ca0dbf500d6a6156a38e088a22b65e",
+            "52bc514d16ccf806818ce91ab7793736",
+            "5af90bbf74a35be6b40b8eedf2785e42",
+            "874d"
+        );
+        let expected = hex_to_bytes::<114>(expected_hex);
+        assert_eq!(&buffer[..], &expected[..]);
+
+        // Symmetric round-trip decrypts back to exact plaintext
+        ChaCha20::apply_keystream(&key, &nonce, 1, &mut buffer);
+        assert_eq!(&buffer[..], plaintext);
+    }
+
+    #[test]
+    fn chacha20_sector_encrypt_decrypt_round_trip() {
+        let key = [0x42u8; 32];
+        let sector_lba = 1024u64;
+
+        let mut sector = [0u8; 512];
+        for i in 0..512 {
+            sector[i] = (i % 256) as u8;
+        }
+        let original = sector;
+
+        // Encrypt sector
+        ChaCha20::transform_sector(&key, sector_lba, &mut sector);
+        assert_ne!(sector, original, "Ciphertext must not match plaintext");
+
+        // Decrypt sector with identical key and LBA
+        ChaCha20::transform_sector(&key, sector_lba, &mut sector);
+        assert_eq!(sector, original, "Decrypted sector must match original byte-identically");
+
+        // Decrypt with a different LBA produces garbage (ciphertext differs)
+        ChaCha20::transform_sector(&key, sector_lba, &mut sector);
+        ChaCha20::transform_sector(&key, sector_lba + 1, &mut sector);
+        assert_ne!(sector, original, "Decryption with incorrect LBA must not recover plaintext");
+    }
+
+    #[test]
+    fn constant_time_eq_behavior() {
+        assert!(constant_time_eq(b"password123", b"password123"));
+        assert!(!constant_time_eq(b"password123", b"password124"));
+        assert!(!constant_time_eq(b"password123", b"short"));
+    }
+}
+
+#[cfg(test)]
+mod tpm_tests {
+    use kernel_common::crypto::Sha256;
+    use kernel_common::tpm::{
+        TcgEventLog, EV_IPL, EV_POST_CODE, PCR_BOOTLOADER, PCR_KERNEL_PAYLOAD, PCR_PLATFORM_FIRMWARE,
+    };
+
+    #[test]
+    fn tpm_event_log_recording_and_pcr_extension() {
+        let mut log = TcgEventLog::new();
+        assert_eq!(log.count, 0);
+
+        let fw_digest = Sha256::digest(b"UEFI_FW_MEASUREMENT");
+        let boot_digest = Sha256::digest(b"BOOT_RS_MEASUREMENT");
+        let kernel_digest = Sha256::digest(b"KERNEL_ELF_MEASUREMENT");
+
+        assert!(log.record(PCR_PLATFORM_FIRMWARE, EV_POST_CODE, &fw_digest, b"UEFI_SECURE_INIT"));
+        assert!(log.record(PCR_BOOTLOADER, EV_IPL, &boot_digest, b"BOOTX64.EFI"));
+        assert!(log.record(PCR_KERNEL_PAYLOAD, EV_IPL, &kernel_digest, b"KERNEL.ELF"));
+        assert_eq!(log.count, 3);
+
+        // Compute PCR 9 (kernel payload)
+        let pcr9 = log.compute_pcr(PCR_KERNEL_PAYLOAD);
+
+        // Expected formula: SHA256(0[32] || kernel_digest)
+        let mut expected_pcr9 = Sha256::new();
+        expected_pcr9.update(&[0u8; 32]);
+        expected_pcr9.update(&kernel_digest);
+        let expected_hash = expected_pcr9.finalize();
+
+        assert_eq!(pcr9, expected_hash);
+
+        // Multi-event PCR extension on PCR 0
+        let fw_digest2 = Sha256::digest(b"UEFI_CONFIG_VARS");
+        assert!(log.record(PCR_PLATFORM_FIRMWARE, EV_POST_CODE, &fw_digest2, b"SECURE_BOOT_NVRAM"));
+
+        let mut expected_pcr0 = Sha256::new();
+        expected_pcr0.update(&[0u8; 32]);
+        expected_pcr0.update(&fw_digest);
+        let pcr0_step1 = expected_pcr0.finalize();
+
+        let mut expected_pcr0_step2 = Sha256::new();
+        expected_pcr0_step2.update(&pcr0_step1);
+        expected_pcr0_step2.update(&fw_digest2);
+        let expected_pcr0_final = expected_pcr0_step2.finalize();
+
+        assert_eq!(log.compute_pcr(PCR_PLATFORM_FIRMWARE), expected_pcr0_final);
+    }
+}
+
+
 
 
 
