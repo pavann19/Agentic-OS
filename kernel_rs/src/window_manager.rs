@@ -281,6 +281,55 @@ pub fn width_height(surface_object: ObjectId) -> Option<(u32, u32)> {
     find_mut(surface_object).map(|w| (w.width, w.height))
 }
 
+/// Base user-space virtual address assigned for mapped window shared surfaces.
+pub const USER_SURFACE_BASE: u64 = 0x0000_7000_0000_0000;
+
+/// Maps a window's backbuffer directly into a ring-3 process's address space (Phase 5.3).
+/// Allows zero-copy rendering directly into the surface memory.
+pub unsafe fn map_window_buffer_to_user(surface_object: ObjectId, user_pml4: u64) -> Option<(u64, u32, u32)> {
+    let w = find_mut(surface_object)?;
+    let user_base = USER_SURFACE_BASE + (surface_object as u64) * 0x0010_0000;
+    let size_bytes = (w.width as usize) * (w.height as usize) * 4;
+    let page_count = (size_bytes + 4095) / 4096;
+
+    let buf_ptr = w.buffer.as_ptr() as u64;
+    for p in 0..page_count {
+        let kern_vaddr = buf_ptr + (p as u64) * 4096;
+        let phys = crate::vmm::virt_to_phys(crate::vmm::kernel_pml4_phys(), kern_vaddr)?;
+        let user_vaddr = user_base + (p as u64) * 4096;
+        crate::vmm::map_page_in(
+            user_pml4,
+            user_vaddr,
+            phys,
+            crate::vmm::PAGE_USER | crate::vmm::PAGE_WRITABLE | crate::vmm::PAGE_NO_EXECUTE,
+        );
+    }
+    klog_info!("WINDOW_SURFACE_MAPPED surface={} user_vaddr=0x{:x} size={} pages={}", surface_object, user_base, size_bytes, page_count);
+    Some((user_base, w.width, w.height))
+}
+
+/// Commits a damaged rectangular region of a window surface (Phase 5.3).
+pub fn commit_window_damage(surface_object: ObjectId, x: u32, y: u32, width: u32, height: u32) -> bool {
+    let Some(w) = find_mut(surface_object) else {
+        return false;
+    };
+    let dirty_x = w.x + x as i32;
+    let dirty_y = w.y + y as i32;
+    let dirty_w = width.min(w.width.saturating_sub(x));
+    let dirty_h = height.min(w.height.saturating_sub(y));
+    if dirty_w > 0 && dirty_h > 0 {
+        add_damage_rect(DamageRect {
+            x: dirty_x,
+            y: dirty_y,
+            width: dirty_w,
+            height: dirty_h,
+        });
+        true
+    } else {
+        false
+    }
+}
+
 pub fn draw_text(surface_object: ObjectId, x: u32, y: u32, text: &[u8], fg: u32, bg: u32) -> bool {
     match find_mut(surface_object) {
         Some(w) => {

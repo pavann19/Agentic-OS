@@ -267,6 +267,33 @@ unsafe fn map_page(pml4_phys: u64, vaddr: u64, paddr: u64, flags: u64) {
     *pt.add(i1) = (paddr & ADDR_MASK) | flags | PAGE_PRESENT;
 }
 
+/// Translates a virtual address to its underlying physical address by walking `pml4_phys`.
+/// Returns `None` if any level of the translation is missing / not present.
+pub unsafe fn virt_to_phys(pml4_phys: u64, vaddr: u64) -> Option<u64> {
+    let (i4, i3, i2, i1) = indices(vaddr);
+    let pml4 = pmm::p2v_pub(pml4_phys) as *mut u64;
+    if *pml4.add(i4) & PAGE_PRESENT == 0 {
+        return None;
+    }
+    let pdpt_phys = *pml4.add(i4) & ADDR_MASK;
+    let pdpt = pmm::p2v_pub(pdpt_phys) as *mut u64;
+    if *pdpt.add(i3) & PAGE_PRESENT == 0 {
+        return None;
+    }
+    let pd_phys = *pdpt.add(i3) & ADDR_MASK;
+    let pd = pmm::p2v_pub(pd_phys) as *mut u64;
+    if *pd.add(i2) & PAGE_PRESENT == 0 {
+        return None;
+    }
+    let pt_phys = *pd.add(i2) & ADDR_MASK;
+    let pt = pmm::p2v_pub(pt_phys) as *mut u64;
+    let pte = *pt.add(i1);
+    if pte & PAGE_PRESENT == 0 {
+        return None;
+    }
+    Some((pte & ADDR_MASK) | (vaddr & 0xFFF))
+}
+
 /// Real unmap: clears the leaf PTE and invalidates the TLB entry. Does NOT
 /// free now-empty intermediate tables (page-table reclamation is a real
 /// future optimization, not a correctness requirement — an unmapped page

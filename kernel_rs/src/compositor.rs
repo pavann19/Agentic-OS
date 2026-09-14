@@ -544,6 +544,65 @@ pub fn syscall_present_window(cap_id: capability::CapId, dirty: Option<(u32, u32
     0
 }
 
+/// Phase 5.3: Maps the window's backing buffer directly into the calling process's address space.
+pub fn syscall_map_surface(cap_id: capability::CapId) -> u64 {
+    let cap = match thread::resolve_current_capability(cap_id, Rights::MAP) {
+        Ok(c) => c,
+        Err(_) => {
+            klog_info!("SYSCALL_SURFACE_MAP_DENIED cap={}", cap_id);
+            return u64::MAX;
+        }
+    };
+    match capability::object_kind(cap.object_id) {
+        Some(capability::KernelObjectKind::Surface { .. }) => {}
+        _ => {
+            klog_info!("SYSCALL_SURFACE_MAP_WRONG_KIND cap={}", cap_id);
+            return u64::MAX;
+        }
+    }
+    unsafe {
+        let pml4 = vmm::current_cr3();
+        match window_manager::map_window_buffer_to_user(cap.object_id, pml4) {
+            Some((user_vaddr, _, _)) => {
+                klog_info!("SYSCALL_SURFACE_MAP_OK cap={} vaddr=0x{:x}", cap_id, user_vaddr);
+                user_vaddr
+            }
+            None => {
+                klog_info!("SYSCALL_SURFACE_MAP_FAILED cap={}", cap_id);
+                u64::MAX
+            }
+        }
+    }
+}
+
+/// Phase 5.3: Commits a damaged rectangular region of a shared surface.
+pub fn syscall_commit_surface(cap_id: capability::CapId, x: u32, y: u32, width: u32, height: u32) -> u64 {
+    let cap = match thread::resolve_current_capability(cap_id, Rights::MAP) {
+        Ok(c) => c,
+        Err(_) => {
+            klog_info!("SYSCALL_SURFACE_COMMIT_DENIED cap={}", cap_id);
+            return u64::MAX;
+        }
+    };
+    match capability::object_kind(cap.object_id) {
+        Some(capability::KernelObjectKind::Surface { .. }) => {}
+        _ => {
+            klog_info!("SYSCALL_SURFACE_COMMIT_WRONG_KIND cap={}", cap_id);
+            return u64::MAX;
+        }
+    }
+    if window_manager::commit_window_damage(cap.object_id, x, y, width, height) {
+        unsafe {
+            if let Some(params) = (&*(&raw const FB_PARAMS)).as_ref() {
+                window_manager::flush_dirty_surfaces(params.phys_base, params.pixels_per_scan_line, params.width, params.height);
+            }
+        }
+        0
+    } else {
+        u64::MAX
+    }
+}
+
 extern "C" fn compositor_driver_thread() {
     unsafe {
         // Phase 9.5a: record THIS thread as the current owner of the

@@ -149,3 +149,32 @@ pub unsafe fn draw_bitmap(
     let req_vaddr = &req as *const SurfaceBitmapRequest as u64;
     syscall2(23, surface_cap as u64, req_vaddr)
 }
+
+/// Phase 5.3: Maps the window's backing pixel buffer directly into the calling
+/// process's virtual address space, enabling zero-copy rendering directly into
+/// surface RAM without IPC or kernel text-rendering overhead.
+///
+/// Returns a mutable pointer to the 32-bit ARGB/XRGB pixel array (stride = width),
+/// or null if mapping fails or capability is denied.
+pub unsafe fn map_surface(surface_cap: u32) -> *mut u32 {
+    let res = syscall1(30, surface_cap as u64);
+    if res == u64::MAX {
+        core::ptr::null_mut()
+    } else {
+        res as *mut u32
+    }
+}
+
+/// Phase 5.3: Submits a damaged rectangular region `(x, y, width, height)` of the
+/// mapped surface to the compositor. The compositor merges this damaged rect into
+/// its global damage tracker and schedules a presentation.
+///
+/// Pass `width = 0, height = 0` to mark the entire surface as damaged.
+pub unsafe fn commit_surface(surface_cap: u32, x: u32, y: u32, width: u32, height: u32) -> u64 {
+    let packed = ((x as u64 & 0xFFFF) << 48)
+        | ((y as u64 & 0xFFFF) << 32)
+        | ((width as u64 & 0xFFFF) << 16)
+        | (height as u64 & 0xFFFF);
+    syscall2(31, surface_cap as u64, packed)
+}
+

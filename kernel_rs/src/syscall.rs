@@ -690,11 +690,22 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
             thread::schedule();
             0
         }
+        30 => {
+            // Phase 5.3: SYS_SURFACE_MAP -- a0 = Surface CapId
+            crate::compositor::syscall_map_surface(a0 as capability::CapId)
+        }
+        31 => {
+            // Phase 5.3: SYS_SURFACE_COMMIT -- a0 = Surface CapId, a1 = packed rect: (x << 48) | (y << 32) | (width << 16) | height
+            let x = ((a1 >> 48) & 0xFFFF) as u32;
+            let y = ((a1 >> 32) & 0xFFFF) as u32;
+            let width = ((a1 >> 16) & 0xFFFF) as u32;
+            let height = (a1 & 0xFFFF) as u32;
+            crate::compositor::syscall_commit_surface(a0 as capability::CapId, x, y, width, height)
+        }
         _ => {
             klog_info!("SYSCALL_UNKNOWN num={}", num);
             u64::MAX
         }
-
     }
 }
 
