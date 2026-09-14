@@ -381,8 +381,13 @@ pub fn move_window(surface_object: ObjectId, new_x: i32, new_y: i32, fb_width: u
             let min_y = TITLE_BAR_HEIGHT as i32;
             let max_x = (fb_width as i32 - w.width as i32).max(0);
             let max_y = (fb_height as i32 - w.height as i32).max(0);
-            w.x = new_x.clamp(0, max_x);
-            w.y = new_y.clamp(min_y, max_y);
+            let clamped_x = new_x.clamp(0, max_x);
+            let clamped_y = new_y.clamp(min_y, max_y);
+            if w.x == clamped_x && w.y == clamped_y {
+                return false;
+            }
+            w.x = clamped_x;
+            w.y = clamped_y;
             klog_info!("WINDOW_MOVED surface={} pos=({},{})", surface_object, w.x, w.y);
             true
         }
@@ -821,44 +826,56 @@ unsafe fn redraw_rect(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
         crate::text::draw_text_to_buffer(bb, fb_width, fb_height, tip_x, footer_y + 2, tip, 0x0064_748B, DESKTOP_BG_COLOR);
     }
 
-    // 2. Re-blit overlapping windows in z-order
-    for w in windows_mut().iter() {
+    // 2. Re-blit overlapping windows in z-order with occlusion clipping (Phase 5.4/5.5)
+    let target_rect = DamageRect::new(rx0, ry0, (rx1 - rx0) as u32, (ry1 - ry0) as u32);
+    let windows = windows_mut();
+    let num_windows = windows.len();
+
+    let mut win_bounds = [DamageRect::default(); 16];
+    for (i, w) in windows.iter().enumerate().take(16) {
         let bar_y = w.y - TITLE_BAR_HEIGHT as i32;
-        let win_y0 = bar_y;
-        let win_y1 = w.y + w.height as i32;
-        let win_x0 = w.x;
-        let win_x1 = w.x + w.width as i32;
-        if rx1 <= win_x0 || rx0 >= win_x1 || ry1 <= win_y0 || ry0 >= win_y1 {
-            continue;
-        }
-        if bar_y >= 0 {
-            let by0 = ry0.max(bar_y);
-            let by1 = ry1.min(bar_y + TITLE_BAR_HEIGHT as i32);
-            let bx0 = rx0.max(w.x);
-            let bx1 = rx1.min(w.x + w.width as i32);
-            if bx1 > bx0 {
-                let slice_w = (bx1 - bx0) as usize;
-                for sy in by0..by1 {
+        let total_h = w.height + TITLE_BAR_HEIGHT;
+        win_bounds[i] = DamageRect::new(w.x, bar_y, w.width, total_h);
+    }
+
+    for i in 0..num_windows {
+        let w = &windows[i];
+        let occluders = &win_bounds[i + 1..num_windows.min(16)];
+
+        // Title bar inside target_rect
+        let bar_y = w.y - TITLE_BAR_HEIGHT as i32;
+        let title_rect = DamageRect::new(w.x, bar_y, w.width, TITLE_BAR_HEIGHT);
+        if let Some(t_target) = title_rect.intersect(&target_rect) {
+            let mut vis = [DamageRect::default(); 32];
+            let n = DamageRect::compute_visible_rects(&t_target, occluders, &mut vis);
+            for k in 0..n {
+                let rc = vis[k];
+                let slice_w = rc.width as usize;
+                for sy in rc.y..rc.bottom() {
                     let local_y = (sy - bar_y) as u32;
-                    let local_x = (bx0 - w.x) as u32;
+                    let local_x = (rc.x - w.x) as u32;
                     let src_off = (local_y * w.width + local_x) as usize;
-                    let dst_off = (sy as u32 * fb_width + bx0 as u32) as usize;
+                    let dst_off = (sy as u32 * fb_width + rc.x as u32) as usize;
                     bb[dst_off..dst_off + slice_w].copy_from_slice(&w.title_buffer[src_off..src_off + slice_w]);
                 }
             }
         }
-        let cy0 = ry0.max(w.y);
-        let cy1 = ry1.min(w.y + w.height as i32);
-        let cx0 = rx0.max(w.x);
-        let cx1 = rx1.min(w.x + w.width as i32);
-        if cx1 > cx0 {
-            let slice_w = (cx1 - cx0) as usize;
-            for sy in cy0..cy1 {
-                let local_y = (sy - w.y) as u32;
-                let local_x = (cx0 - w.x) as u32;
-                let src_off = (local_y * w.width + local_x) as usize;
-                let dst_off = (sy as u32 * fb_width + cx0 as u32) as usize;
-                bb[dst_off..dst_off + slice_w].copy_from_slice(&w.buffer[src_off..src_off + slice_w]);
+
+        // Content buffer inside target_rect
+        let content_rect = DamageRect::new(w.x, w.y, w.width, w.height);
+        if let Some(c_target) = content_rect.intersect(&target_rect) {
+            let mut vis = [DamageRect::default(); 32];
+            let n = DamageRect::compute_visible_rects(&c_target, occluders, &mut vis);
+            for k in 0..n {
+                let rc = vis[k];
+                let slice_w = rc.width as usize;
+                for sy in rc.y..rc.bottom() {
+                    let local_y = (sy - w.y) as u32;
+                    let local_x = (rc.x - w.x) as u32;
+                    let src_off = (local_y * w.width + local_x) as usize;
+                    let dst_off = (sy as u32 * fb_width + rc.x as u32) as usize;
+                    bb[dst_off..dst_off + slice_w].copy_from_slice(&w.buffer[src_off..src_off + slice_w]);
+                }
             }
         }
     }
