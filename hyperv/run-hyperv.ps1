@@ -37,8 +37,13 @@ if ($existingVM) {
 $newVhdx = "D:\Operating_System\hyperv\AgenticOS-new.vhdx"
 if (Test-Path $newVhdx) {
     Write-Host "Updating $VhdxPath with newly built image..."
-    Copy-Item $newVhdx $VhdxPath -Force
-    Remove-Item $newVhdx -Force
+    try {
+        Copy-Item $newVhdx $VhdxPath -Force
+        Remove-Item $newVhdx -Force
+        Write-Host "Successfully updated $VhdxPath with new image." -ForegroundColor Green
+    } catch {
+        Write-Host "Could not copy $newVhdx to $VhdxPath - Error: $_" -ForegroundColor Yellow
+    }
 }
 
 # Ensure VHDX file is NOT sparse (Hyper-V vhdmp driver fails with 0xC03A001A if sparse)
