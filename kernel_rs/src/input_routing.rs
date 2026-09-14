@@ -90,6 +90,64 @@ pub fn set_focus(surface_object: ObjectId) {
 /// is stronger, and easier to get right, than "eventually delivered to
 /// someone").
 pub fn deliver_key_event(scancode: u8) {
+    crate::compositor_metrics::record_keyboard_event();
+
+    // Hotkeys for automated benchmarking & telemetry
+    match scancode {
+        0x3B => {
+            // F1: Start baseline benchmark, reset metrics
+            crate::compositor_metrics::reset_metrics();
+            klog_info!("[BENCHMARK_SCENARIO_START] scenario=idle");
+            return;
+        }
+        0x3C => {
+            // F2: End idle, dump summary
+            crate::compositor_metrics::dump_summary("idle");
+            klog_info!("[BENCHMARK_SCENARIO_START] scenario=mouse_motion");
+            return;
+        }
+        0x3D => {
+            // F3: End mouse_motion, dump summary
+            crate::compositor_metrics::dump_summary("mouse_motion");
+            klog_info!("[BENCHMARK_SCENARIO_START] scenario=window_drag");
+            return;
+        }
+        0x3E => {
+            // F4: End window_drag, dump summary
+            crate::compositor_metrics::dump_summary("window_drag");
+            klog_info!("[BENCHMARK_SCENARIO_START] scenario=typing");
+            return;
+        }
+        0x3F => {
+            // F5: End typing, dump summary
+            crate::compositor_metrics::dump_summary("typing");
+            klog_info!("[BENCHMARK_SCENARIO_START] scenario=multi_window");
+            return;
+        }
+        0x40 => {
+            // F6: End multi_window, dump summary
+            crate::compositor_metrics::dump_summary("multi_window");
+            klog_info!("[BENCHMARK_SCENARIO_START] scenario=rapid_mouse");
+            return;
+        }
+        0x41 => {
+            // F7: End rapid_mouse, dump summary
+            crate::compositor_metrics::dump_summary("rapid_mouse");
+            klog_info!("[BENCHMARK_SCENARIO_END]");
+            return;
+        }
+        0x58 => {
+            // F12: Snapshot dump
+            crate::compositor_metrics::dump_summary("snapshot");
+            return;
+        }
+        // Consume break codes for F1..F7 and F12
+        0xBB..=0xC1 | 0xD8 => {
+            return;
+        }
+        _ => {}
+    }
+
     let focused = FOCUSED_SURFACE.load(Ordering::SeqCst);
     if focused == NO_FOCUS {
         klog_info!("INPUT_ROUTE_DROPPED_NO_FOCUS scancode=0x{:x}", scancode);

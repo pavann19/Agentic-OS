@@ -24,6 +24,7 @@ pub mod audit;
 pub mod bootinfo;
 pub mod capability;
 pub mod compositor; // Phase 12 -- minimal real compositor foundation, see its own module doc
+pub mod compositor_metrics; // Phase 5.0 -- lightweight compositor performance telemetry
 pub mod critical;
 pub mod device_manager;
 pub mod driver;

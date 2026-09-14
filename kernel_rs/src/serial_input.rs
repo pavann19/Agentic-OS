@@ -85,6 +85,12 @@ extern "C" fn serial_input_thread() {
                 EscState::Normal => {
                     if byte == 0x1B {
                         state = EscState::SawEsc;
+                    } else if byte == 0x14 {
+                        // Ctrl+T: dump telemetry summary
+                        crate::compositor_metrics::dump_summary("interactive");
+                    } else if byte == 0x12 {
+                        // Ctrl+R: reset telemetry counters
+                        crate::compositor_metrics::reset_metrics();
                     } else if let Some((scancode, shifted)) = ascii_to_ps2(byte) {
                         if shifted {
                             input_routing::deliver_key_event(0x2A); // Shift make

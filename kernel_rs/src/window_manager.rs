@@ -345,9 +345,22 @@ unsafe fn blit_window_to_backbuffer(w: &Window, bb: &mut [u32], fb_width: u32, f
 /// Full compositing pass: composites all windows into RAM BACKBUFFER,
 /// then flushes each window's bounding scanlines to the physical GOP framebuffer.
 pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u32) {
+    let t_start = crate::compositor_metrics::read_tsc();
     let bb = ensure_backbuffer(fb_width, fb_height);
+
+    let t_compose_start = crate::compositor_metrics::read_tsc();
     for w in windows_mut().iter() {
         blit_window_to_backbuffer(w, bb, fb_width, fb_height);
+    }
+    let t_compose_end = crate::compositor_metrics::read_tsc();
+
+    let mut damaged_rects = 0usize;
+    let mut damaged_scanlines = 0usize;
+    let mut damaged_pixels = 0usize;
+
+    let t_flush_start = crate::compositor_metrics::read_tsc();
+    for w in windows_mut().iter() {
+        damaged_rects += 1;
         let bar_y = w.y - TITLE_BAR_HEIGHT as i32;
         let total_h = w.height + TITLE_BAR_HEIGHT;
         for py in 0..total_h as i32 {
@@ -362,11 +375,31 @@ pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
                 let count = x_end - x_start;
                 let src_ptr = bb.as_ptr().add((sy as u32 * fb_width + sx) as usize);
                 put_fb_scanline_fast(fb_phys_base, ppsl, sx, sy as u32, src_ptr, count);
+                damaged_scanlines += 1;
+                damaged_pixels += count as usize;
             }
         }
     }
     core::arch::asm!("sfence", options(nomem, nostack));
+    let t_flush_end = crate::compositor_metrics::read_tsc();
+
+    let t_cursor_start = crate::compositor_metrics::read_tsc();
     draw_cursor(fb_phys_base, ppsl, fb_width, fb_height);
+    let t_cursor_end = crate::compositor_metrics::read_tsc();
+
+    let t_end = crate::compositor_metrics::read_tsc();
+    let metrics = crate::compositor_metrics::FrameMetrics {
+        frame_time_cycles: t_end.saturating_sub(t_start),
+        input_time_cycles: 0,
+        damage_time_cycles: 0,
+        compose_time_cycles: t_compose_end.saturating_sub(t_compose_start),
+        flush_time_cycles: t_flush_end.saturating_sub(t_flush_start),
+        cursor_time_cycles: t_cursor_end.saturating_sub(t_cursor_start),
+        damaged_rects,
+        damaged_scanlines,
+        damaged_pixels,
+    };
+    crate::compositor_metrics::record_frame(&metrics);
 }
 
 /// Partial present for typing/scrolling: blits only the modified scanlines
@@ -380,6 +413,7 @@ pub unsafe fn present_partial(
     local_y: u32,
     local_height: u32,
 ) -> bool {
+    let t_start = crate::compositor_metrics::read_tsc();
     let windows = windows_mut();
     let Some(w_idx) = windows.iter().position(|w| w.surface_object == surface_object) else {
         return false;
@@ -392,6 +426,7 @@ pub unsafe fn present_partial(
     let dirty_y0 = w.y + local_y as i32;
     let dirty_y1 = w.y + end_y as i32;
 
+    let t_damage_start = crate::compositor_metrics::read_tsc();
     let is_occluded = windows[w_idx + 1..].iter().any(|other| {
         let other_x0 = other.x;
         let other_x1 = other.x + other.width as i32;
@@ -399,6 +434,7 @@ pub unsafe fn present_partial(
         let other_y1 = other.y + other.height as i32;
         !(dirty_x1 <= other_x0 || dirty_x0 >= other_x1 || dirty_y1 <= other_y0 || dirty_y0 >= other_y1)
     });
+    let t_damage_end = crate::compositor_metrics::read_tsc();
 
     if is_occluded {
         present(fb_phys_base, ppsl, fb_width, fb_height);
@@ -409,7 +445,10 @@ pub unsafe fn present_partial(
     let cx = CURSOR_X.load(Ordering::SeqCst);
     let cy = CURSOR_Y.load(Ordering::SeqCst);
     let mut cursor_affected = false;
+    let mut damaged_scanlines = 0usize;
+    let mut damaged_pixels = 0usize;
 
+    let t_flush_start = crate::compositor_metrics::read_tsc();
     for py in local_y..end_y {
         let sy = w.y + py as i32;
         if sy < 0 || sy as u32 >= fb_height {
@@ -431,15 +470,35 @@ pub unsafe fn present_partial(
 
         // Blit scanline to physical GOP framebuffer
         put_fb_scanline_fast(fb_phys_base, ppsl, sx, sy as u32, src_ptr, count);
+        damaged_scanlines += 1;
+        damaged_pixels += count as usize;
 
         if sy >= cy && sy < cy + CURSOR_H as i32 && (sx as i32) < cx + CURSOR_W as i32 && (sx as i32 + count as i32) > cx {
             cursor_affected = true;
         }
     }
     core::arch::asm!("sfence", options(nomem, nostack));
+    let t_flush_end = crate::compositor_metrics::read_tsc();
+
+    let t_cursor_start = crate::compositor_metrics::read_tsc();
     if cursor_affected {
         draw_cursor_at(fb_phys_base, ppsl, fb_width, fb_height, cx, cy);
     }
+    let t_cursor_end = crate::compositor_metrics::read_tsc();
+
+    let t_end = crate::compositor_metrics::read_tsc();
+    let metrics = crate::compositor_metrics::FrameMetrics {
+        frame_time_cycles: t_end.saturating_sub(t_start),
+        input_time_cycles: 0,
+        damage_time_cycles: t_damage_end.saturating_sub(t_damage_start),
+        compose_time_cycles: 0,
+        flush_time_cycles: t_flush_end.saturating_sub(t_flush_start),
+        cursor_time_cycles: t_cursor_end.saturating_sub(t_cursor_start),
+        damaged_rects: 1,
+        damaged_scanlines,
+        damaged_pixels,
+    };
+    crate::compositor_metrics::record_frame(&metrics);
     true
 }
 
@@ -667,6 +726,9 @@ unsafe fn redraw_rect(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
 
 /// Real PS/2 mouse event handler with independent cursor overlay and zero window recomposition.
 pub fn report_mouse(dx: i32, dy: i32, left_down: bool) {
+    let t_start = crate::compositor_metrics::read_tsc();
+    crate::compositor_metrics::record_mouse_event();
+
     let Some((fb_phys_base, ppsl, fb_width, fb_height)) = crate::compositor::get_fb_params() else {
         return;
     };
@@ -726,8 +788,32 @@ pub fn report_mouse(dx: i32, dy: i32, left_down: bool) {
         } else {
             // Buttery-smooth mouse motion: restore old cursor 12x18 rect from RAM backbuffer,
             // then blit new cursor sprite at new coordinates. Zero window recomposition!
+            let t_cursor_start = crate::compositor_metrics::read_tsc();
             restore_cursor_rect(fb_phys_base, ppsl, fb_width, fb_height, old_x, old_y);
             draw_cursor_at(fb_phys_base, ppsl, fb_width, fb_height, new_x, new_y);
+            let t_cursor_end = crate::compositor_metrics::read_tsc();
+
+            let t_end = crate::compositor_metrics::read_tsc();
+            let metrics = crate::compositor_metrics::FrameMetrics {
+                frame_time_cycles: t_end.saturating_sub(t_start),
+                input_time_cycles: t_cursor_start.saturating_sub(t_start),
+                damage_time_cycles: 0,
+                compose_time_cycles: 0,
+                flush_time_cycles: 0,
+                cursor_time_cycles: t_cursor_end.saturating_sub(t_cursor_start),
+                damaged_rects: 1,
+                damaged_scanlines: (CURSOR_H * 2) as usize,
+                damaged_pixels: (CURSOR_W * CURSOR_H * 2) as usize,
+            };
+            crate::compositor_metrics::record_frame(&metrics);
         }
     }
+}
+
+pub fn dump_metrics(scenario: &str) {
+    crate::compositor_metrics::dump_summary(scenario);
+}
+
+pub fn reset_metrics() {
+    crate::compositor_metrics::reset_metrics();
 }
