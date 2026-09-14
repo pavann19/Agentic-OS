@@ -1502,9 +1502,20 @@ Real, disclosed scope: this proves the CAPABILITY lifecycle (mint, use, revoke, 
 
 **Not yet started (real follow-up work, not blocking Phase 10's own exit criteria):** DNS as a capability-scoped client wired through the `Socket` object (deliverable 3 — DNS itself works now; the capability-object wiring around it doesn't yet), loopback/multi-NIC routing (deliverable 5), binding the `Socket` capability's revocation to an actual live `netstack_driver` connection (the capability-lifecycle mechanism proven in `socket_demo.rs` generalizes directly), and generalizing the TCP server path beyond the fixed demo port/single-connection scope used to prove exit criterion 2.
 
+**In progress (as of the session that also targets Phase 12 exit criterion 2):** DNS capability-object wiring (`KernelObjectKind::DnsResolver`) and multi-NIC routing (a real `RoutingTable`/LPM in `netstack_driver`) are being actively implemented together with the Phase 12 introspection API — see that phase's own status for the combined plan.
+
 ---
 
-## Phase 11 — Hardware Breadth (Tier 3) And Power Management (deliverable 2 substantially advanced — IN PROGRESS)
+## Phase 11 — first increment (xHCI bring-up, Configure Endpoint investigation) — SUPERSEDED, see the later "Phase 11 — Hardware Breadth (Tier 3) And Power Management (4/4 items complete — DONE)" section below for final status
+
+Real historical narrative, kept for the record: this increment's own
+Configure Endpoint gap (documented below as open) was genuinely
+root-caused and fixed in a later session — see the later, authoritative
+Phase 11 section for the real fix and full verification
+(`scripts/test-xhci.ps1`, `scripts/test-power.ps1`). This section's own
+"Not yet started"/"gap remains open" language below is stale and
+describes this increment's own stopping point only, not the phase's
+final state.
 
 Real, disclosed scope for this increment: real xHCI (USB) host controller bring-up, the first slice of deliverable 2 ("USB host controller support (xHCI) plus HID class drivers"). Started 2026-09-12 per the user's own explicit direction to begin Phase 11/12 work now that Phase 10's remaining item (a TCP server/listen path) is real, separate, and non-blocking.
 
@@ -1564,7 +1575,7 @@ Verified live, reproducible, against the real `usb-kbd`:
 
 ---
 
-## Phase 12 — Display Server And Agent-Native Visual Surface (exit criteria 1, 3, and 4 met — IN PROGRESS)
+## Phase 12 — Display Server And Agent-Native Visual Surface (exit criteria 1, 3, 4 met; GPU accel + window manager + USB HID closed by later work — exit criterion 2, the typed agent introspection/input API, still open — IN PROGRESS)
 
 Real, disclosed scope for this increment: a minimal real compositor proving the `Surface` capability type (ADR-008: "window and surface objects are typed, capability-scoped") is real, its bounds are actually enforced, AND — as of this session's second increment — that two genuinely separate processes cannot reach each other's surfaces. Not the full compositor/GPU/input/UI-toolkit breadth of deliverables 2-5. Started 2026-09-12.
 
@@ -1638,11 +1649,13 @@ Ring-3 half lands in `agentic_sdk` (Track A.3's crate, extended rather than dupl
 ```
 First run clean. `docs/SDK.md` updated with the new `agentic_sdk` modules. Wired into `scripts/test-compositor.ps1`'s existing checks; full suite re-run clean.
 
-**Not yet started, real and substantially larger remaining scope, deliberately not attempted this pass:** an actual compositor SERVICE that composites multiple live client surfaces together on screen (this increment's clients each own a fixed, kernel-assigned region — there's no window manager, moving, resizing, or z-ordering yet), GPU 2D acceleration (deliverable 2), higher-level widgets beyond the one scrollable-text-region primitive (buttons, layout, etc. — real, separate follow-up once Track C's reference apps show what else they actually need), and the typed agent window-introspection/input API (deliverable 5, exit criterion 2 — reading window content and issuing input purely through a typed interface, never pixel-scraping), USB HID input (blocked on Phase 11's own open bug). Each is its own multi-session undertaking, not a small addition, so they are named here as open rather than attempted partially.
+**Update (later session):** several items below were closed by subsequent, separately-landed work not labeled "Phase 12" in its own commits, so this section's "not yet started" language is stale for these specific items — a real compositor SERVICE with a window manager (moving, resizing, z-ordering, occlusion culling) now exists (`kernel_rs/src/window_manager.rs`), GPU 2D acceleration now exists (`kernel_rs/src/virtio_gpu.rs`, `kernel_rs/src/renderer.rs`'s `CpuRenderer`/`GpuRenderer` abstraction), and USB HID input is no longer blocked (Phase 11's Configure Endpoint bug was fixed — see that phase's own final status).
+
+**Still genuinely open:** the typed agent window-introspection/input API (deliverable 5, exit criterion 2 — reading window content and issuing input purely through a typed interface, never pixel-scraping) and higher-level widgets beyond the one scrollable-text-region primitive. These remain real, separate follow-up work.
 
 ---
 
-## Phase 13 — Native Application Platform And Package Ecosystem (deliverables 1-3 substantially advanced, deliverable 4 started — IN PROGRESS)
+## Phase 13 — Native Application Platform And Package Ecosystem (5/5 deliverables, 4/4 exit criteria — DONE, see "Phase 13 Complete" note below)
 
 **Depends on:** Phase 12 (formally, fully) and Phase 10 (for network-capable apps). Phase 10 is complete. Phase 12 is at 2/4 exit criteria (surface isolation, compositor crash-restart) — GPU accel, input routing, a UI toolkit, and the typed agent UI API are all still open. Real, disclosed scope for this increment, planned explicitly to avoid pretending that gap doesn't exist: deliverable 1 (the capability manifest format) has no GUI dependency and is real, separate, useful groundwork regardless of Phase 12's own remaining state — started here rather than waiting, since nothing about it needs a compositor. Deliverables 2-5 (installer service, SDK, reference apps, update/versioning) are real follow-up work, sequenced in `docs/PROGRESS.md`'s own session-external planning notes to land AFTER a minimal Phase 12 input-routing/UI-toolkit slice, since the reference apps (deliverable 4) genuinely need one to be real rather than fabricated. Started 2026-09-12.
 
