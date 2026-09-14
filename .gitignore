@@ -68,5 +68,8 @@ user_rs/terminal_emulator/target/
 user_rs/text_editor/target/
 user_rs/file_manager/target/
 user_rs/mouse_driver/target/
-_evidence/disk-authority-revoke-test.img
-_evidence/disk-authority-revoke-ahci.img
+user_rs/net_client/target/
+user_rs/sample_app/target/
+hyperv/*.vhdx
+hyperv/*.log
+_evidence/latest/

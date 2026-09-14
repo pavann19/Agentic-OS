@@ -50,6 +50,7 @@ struct NetInfo {
     rx_buf_phys: [u64; RX_RING_ENTRIES],
     tx_buf_vaddr: u64,
     tx_buf_phys: u64,
+    net_service_cap: u32,
 }
 
 static NETSTACK_DRIVER_ELF: &[u8] =
@@ -215,6 +216,9 @@ extern "C" fn netstack_driver_thread() {
             p.bus, p.device, p.function, domain.0, iommu_ranges.len()
         );
 
+        let net_service_cap = crate::net_service::register_server();
+        klog_info!("NETSTACK_NET_SERVICE_CAP={}", net_service_cap);
+
         let info_phys = pmm::alloc_page();
         let info_ptr = pmm::p2v_pub(info_phys) as *mut NetInfo;
         core::ptr::write(info_ptr, NetInfo {
@@ -225,6 +229,7 @@ extern "C" fn netstack_driver_thread() {
             rx_buf_phys,
             tx_buf_vaddr: TX_BUF_VADDR,
             tx_buf_phys,
+            net_service_cap,
         });
         vmm::map_page_in(space, INFO_VADDR, info_phys, vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE | vmm::PAGE_WRITABLE);
 

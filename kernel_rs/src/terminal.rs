@@ -45,7 +45,25 @@ pub fn spawn(params: crate::compositor::FbParams) {
     thread::spawn(terminal_thread);
 }
 
+pub fn spawn_at(x: i32, y: i32) {
+    unsafe {
+        TERMINAL_POS = (x, y);
+    }
+    thread::spawn(terminal_thread_at);
+}
+
+static mut TERMINAL_POS: (i32, i32) = (20, 20);
+
+extern "C" fn terminal_thread_at() {
+    let (x, y) = unsafe { TERMINAL_POS };
+    spawn_terminal_inner(x, y);
+}
+
 extern "C" fn terminal_thread() {
+    spawn_terminal_inner(20, 20);
+}
+
+fn spawn_terminal_inner(x: i32, y: i32) {
     unsafe {
         // Real manifest for this app: declares Surface (for rendering)
         // and PortIoRange (COM1, for its own debug log -- the SAME
@@ -130,7 +148,7 @@ extern "C" fn terminal_thread() {
         // "turn the compositor's blocks into real windows" follow-up,
         // applied here too since the terminal is the first real
         // reference app to use a Surface at all).
-        crate::window_manager::register(surface_object, 20, 20, SURFACE_WIDTH, SURFACE_HEIGHT, b"Terminal");
+        crate::window_manager::register(surface_object, x, y, SURFACE_WIDTH, SURFACE_HEIGHT, b"Terminal");
 
         let info_phys = pmm::alloc_page();
         let info_ptr = pmm::p2v_pub(info_phys) as *mut TerminalInfo;

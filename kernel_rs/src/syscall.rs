@@ -666,6 +666,26 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
             // SYS_SURFACE_DRAW_BITMAP -- a0 = Surface CapId, a1 = SurfaceBitmapRequest vaddr
             crate::compositor::syscall_draw_bitmap(a0 as capability::CapId, a1)
         }
+        24 => {
+            // SYS_FILE_SERVICE_WRITE -- a0 = inode, a1 = FileWriteRequest vaddr
+            crate::file_service::syscall_write(vmm::current_cr3(), a0 as u32, a1)
+        }
+        25 => {
+            // SYS_FILE_SERVICE_GET_WRITE_DATA -- a0 = request_id, a1 = out_vaddr
+            crate::file_service::syscall_get_write_data(vmm::current_cr3(), a0, a1, 1024)
+        }
+        26 => {
+            // SYS_NET_SERVICE_REQUEST -- a0 = Socket CapId
+            crate::net_service::syscall_request(a0 as capability::CapId)
+        }
+        27 => {
+            // SYS_NET_SERVICE_REPLY -- a1 = NetReplyRequest vaddr
+            crate::net_service::syscall_reply(vmm::current_cr3(), a1)
+        }
+        28 => {
+            // SYS_NET_SERVICE_POLL -- a0 = request_id, a1 = NetPollRequest vaddr
+            crate::net_service::syscall_poll(vmm::current_cr3(), a0, a1)
+        }
         _ => {
             klog_info!("SYSCALL_UNKNOWN num={}", num);
             u64::MAX

@@ -40,7 +40,25 @@ pub fn spawn(params: crate::compositor::FbParams) {
     thread::spawn(file_manager_thread);
 }
 
+pub fn spawn_at(x: i32, y: i32) {
+    unsafe {
+        FILE_MANAGER_POS = (x, y);
+    }
+    thread::spawn(file_manager_thread_at);
+}
+
+static mut FILE_MANAGER_POS: (i32, i32) = (20, 20);
+
+extern "C" fn file_manager_thread_at() {
+    let (x, y) = unsafe { FILE_MANAGER_POS };
+    spawn_file_manager_inner(x, y);
+}
+
 extern "C" fn file_manager_thread() {
+    spawn_file_manager_inner(20, 20);
+}
+
+fn spawn_file_manager_inner(x: i32, y: i32) {
     unsafe {
         let manifest = Manifest::NONE.allow(CapKind::Surface).allow(CapKind::PortIoRange);
         let requests = [
@@ -82,7 +100,7 @@ extern "C" fn file_manager_thread() {
         };
         let input_cap = crate::input_routing::register_window_input(surface_object);
         crate::input_routing::set_focus(surface_object);
-        crate::window_manager::register(surface_object, 20, 20, SURFACE_WIDTH, SURFACE_HEIGHT, b"File Manager");
+        crate::window_manager::register(surface_object, x, y, SURFACE_WIDTH, SURFACE_HEIGHT, b"File Manager");
 
         let info_phys = pmm::alloc_page();
         let info_ptr = pmm::p2v_pub(info_phys) as *mut FileManagerInfo;

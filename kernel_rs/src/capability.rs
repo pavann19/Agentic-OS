@@ -65,6 +65,9 @@ impl Rights {
     // (`audit.rs::records_by_actor`, syscall 9) -- its own dedicated
     // right, same reasoning as INTROSPECT above.
     pub const AUDIT_QUERY: Rights = Rights(1 << 8);
+    // Phase 13: file read and write rights for FileObject capabilities.
+    pub const READ: Rights = Rights(1 << 9);
+    pub const WRITE: Rights = Rights(1 << 10);
 
     pub fn contains(self, other: Rights) -> bool {
         (self.0 & other.0) == other.0

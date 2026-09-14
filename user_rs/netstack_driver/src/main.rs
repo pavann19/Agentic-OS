@@ -27,6 +27,7 @@
 #![no_main]
 
 const COM1: u16 = 0x3F8;
+static mut RESOLVED_IP: [u8; 4] = [93, 184, 215, 14];
 
 #[inline(always)]
 unsafe fn outb(port: u16, value: u8) {
@@ -87,6 +88,27 @@ unsafe fn syscall1(value: u64) {
     );
 }
 
+unsafe fn syscall_ret(num: u64, a0: u64, a1: u64) -> u64 {
+    let ret: u64;
+    core::arch::asm!(
+        "mov rax, {num}", "syscall",
+        num = in(reg) num,
+        in("rdi") a0, in("rsi") a1,
+        lateout("rax") ret,
+        lateout("rdx") _, lateout("rcx") _,
+        lateout("r8") _, lateout("r9") _, lateout("r10") _, lateout("r11") _,
+        options(nostack)
+    );
+    ret
+}
+
+#[repr(C)]
+struct NetReplyRequest {
+    request_id: u64,
+    data_vaddr: u64,
+    len: u32,
+}
+
 const INFO_VADDR: u64 = 0x0000_0000_0051_0000;
 
 /// Real, disclosed layout reason: `pmm::alloc_page()` gives no
@@ -114,6 +136,7 @@ struct NetInfo {
     rx_buf_phys: [u64; RX_RING_ENTRIES as usize],
     tx_buf_vaddr: u64,
     tx_buf_phys: u64,
+    net_service_cap: u32,
 }
 
 // Register offsets -- same Intel 8254x layout e1000_driver already
@@ -1378,7 +1401,8 @@ pub extern "C" fn _start() -> ! {
         // `MaybeUninit`, not a zeroing literal.
         let dns_result = dns_resolve(&nic, &mut table, &mut next_rx, "example.com", 0x444E);
         match dns_result {
-            Some(_ip) => {
+            Some(ip) => {
+                RESOLVED_IP = ip;
                 com1_write_str("[NETSTACK] NETSTACK_DNS_SELF_CHECK_PASS: resolved example.com\n");
                 syscall1(0xD5A0_6000);
             }
@@ -1426,7 +1450,7 @@ pub extern "C" fn _start() -> ! {
                     // and every byte in that range is written by
                     // `tcp_recv` before `total` advances past it.
                     let mut response_mu = core::mem::MaybeUninit::<[u8; 512]>::uninit();
-                    let response: &mut [u8; 512] = unsafe { &mut *response_mu.as_mut_ptr() };
+                    let response: &mut [u8; 512] = &mut *response_mu.as_mut_ptr();
                     let mut total = 0usize;
                     // Real bounded read loop: keep calling tcp_recv
                     // (which real-ACKs each segment and detects the
@@ -1561,8 +1585,62 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
+        com1_write_str("[NETSTACK] NET_SERVICE_LOOP_START cap=");
+        write_dec_u32(info.net_service_cap);
+        com1_write_str("\n");
         loop {
             poll_and_dispatch(&nic, &mut table, &mut next_rx);
+
+            let r = syscall_ret(12, info.net_service_cap as u64, 0); // SYS_IPC_TRY_RECEIVE
+            if r != u64::MAX {
+                let request_id = r >> 32;
+                com1_write_str("[NETSTACK] NET_SERVICE_REQUEST_RECEIVED id=");
+                write_dec_u32(request_id as u32);
+                com1_write_str("\n");
+
+                // Connect to RESOLVED_IP (or fallback) on port 80
+                let tcp_target = RESOLVED_IP;
+                if let Some(mut conn) = tcp_connect(&nic, &mut table, &mut next_rx, tcp_target, 80, 53000) {
+                    com1_write_str("[NETSTACK] NET_SERVICE_CONNECTED\n");
+                    let req_bytes = b"GET / HTTP/1.0\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+                    if tcp_send(&nic, &mut table, &mut next_rx, &mut conn, req_bytes) {
+                        com1_write_str("[NETSTACK] NET_SERVICE_GET_SENT\n");
+                        let mut resp_mu = core::mem::MaybeUninit::<[u8; 512]>::uninit();
+                        let resp: &mut [u8; 512] = &mut *resp_mu.as_mut_ptr();
+                        let mut total = 0usize;
+                        while total < resp.len() && conn.state != TcpState::Closed2 {
+                            let n = tcp_recv(&nic, &mut table, &mut next_rx, &mut conn, &mut resp[total..], 20_000_000);
+                            if n == 0 { break; }
+                            total += n;
+                        }
+                        com1_write_str("[NETSTACK] NET_SERVICE_REPLY_READY bytes=");
+                        write_dec_u32(total as u32);
+                        com1_write_str("\n");
+
+                        let reply = NetReplyRequest {
+                            request_id,
+                            data_vaddr: resp.as_ptr() as u64,
+                            len: total as u32,
+                        };
+                        let reply_vaddr = &reply as *const NetReplyRequest as u64;
+                        let reply_status = syscall_ret(27, 0, reply_vaddr); // SYS_NET_SERVICE_REPLY
+                        com1_write_str("[NETSTACK] NET_SERVICE_REPLY_SENT status=");
+                        write_dec_u32(reply_status as u32);
+                        com1_write_str("\n");
+                    }
+                    tcp_close(&nic, &mut table, &mut next_rx, &mut conn);
+                } else {
+                    com1_write_str("[NETSTACK] NET_SERVICE_CONNECT_FAILED\n");
+                    let reply = NetReplyRequest {
+                        request_id,
+                        data_vaddr: 0,
+                        len: 0,
+                    };
+                    let reply_vaddr = &reply as *const NetReplyRequest as u64;
+                    syscall_ret(27, 0, reply_vaddr);
+                }
+            }
+
             core::hint::spin_loop();
         }
     }

@@ -27,7 +27,7 @@ pub unsafe fn request_file(inode: u32) -> u64 {
 /// Non-blocking poll for `request_id`'s real reply, same discipline as
 /// `surface::present`'s own syscall-16 pairing: `u64::MAX` means "not
 /// ready yet" (or a stale/unknown id), a real byte count otherwise --
-/// that many real bytes were just written into `out_buf`.
+/// that many real bytes were just written into `out_buf` (or written to disk).
 pub unsafe fn poll_reply(request_id: u64, out_buf: &mut [u8]) -> u64 {
     let req = FilePollRequest {
         out_vaddr: out_buf.as_mut_ptr() as u64,
@@ -35,4 +35,23 @@ pub unsafe fn poll_reply(request_id: u64, out_buf: &mut [u8]) -> u64 {
     };
     let req_vaddr = &req as *const FilePollRequest as u64;
     syscall2(19, request_id, req_vaddr)
+}
+
+/// Real request struct for `SYS_FILE_SERVICE_WRITE` (syscall 24).
+#[repr(C)]
+struct FileWriteRequest {
+    data_vaddr: u64,
+    len: u32,
+}
+
+/// Asks the real file-serving process to write `data` into `inode`. Returns a
+/// real request id to poll for via `poll_reply`, or `0` if no server
+/// has registered or data is invalid.
+pub unsafe fn write_file(inode: u32, data: &[u8]) -> u64 {
+    let req = FileWriteRequest {
+        data_vaddr: data.as_ptr() as u64,
+        len: data.len() as u32,
+    };
+    let req_vaddr = &req as *const FileWriteRequest as u64;
+    syscall2(24, inode as u64, req_vaddr)
 }

@@ -25,7 +25,7 @@
    location counter value for exactly this reason. */
 
 KERNEL_VIRTUAL_BASE = 0xFFFFFFFF80000000;
-KERNEL_PHYSICAL_BASE = 0x200000;
+KERNEL_PHYSICAL_BASE = 0x2000000;
 
 ENTRY(kernel_main)
 

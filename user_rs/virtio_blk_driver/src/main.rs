@@ -303,6 +303,7 @@ use kernel_common::ext2;
 macro_rules! zeroed_block {
     () => {{
         let mu = core::mem::MaybeUninit::<[u8; ext2::BLOCK_SIZE]>::uninit();
+        #[allow(unused_unsafe)]
         unsafe { mu.assume_init() }
     }};
 }
@@ -649,28 +650,66 @@ pub extern "C" fn _start() -> ! {
             // (`(request_id << 32) | inode`), unpacked here the same
             // way `SYS_WINDOW_MOVE`'s own packed x/y already does.
             let request_id = r >> 32;
-            let inode = r as u32;
-            com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_REQUEST_RECEIVED inode=");
-            write_dec_u64(inode as u64);
-            com1_write_str("\n");
+            let is_write = ((r >> 31) & 1) != 0;
+            let inode = (r as u32) & 0x7FFF_FFFF;
+            if is_write {
+                com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_WRITE_REQUEST_RECEIVED inode=");
+                write_dec_u64(inode as u64);
+                com1_write_str("\n");
 
-            let mut inode_table1 = zeroed_block!();
-            ext2_read_block(common, notify_base, dma, dma_phys, ext2::INODE_TABLE_START_BLOCK + 1, &mut inode_table1);
-            let mut file_data = zeroed_block!();
-            ext2_read_block(common, notify_base, dma, dma_phys, ext2::FILE_DATA_BLOCK, &mut file_data);
-            let mut out = zeroed_block!();
-            let n = ext2::read_file_data(&inode_table1, &file_data, &mut out);
+                let mut write_buf = zeroed_block!();
+                let bytes_len = syscall_ret(25, request_id, write_buf.as_mut_ptr() as u64); // SYS_FILE_SERVICE_GET_WRITE_DATA
+                if bytes_len != u64::MAX && bytes_len > 0 {
+                    com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_WRITE_DATA_FETCHED len=");
+                    write_dec_u64(bytes_len);
+                    com1_write_str("\n");
 
-            let reply = FileReplyRequest {
-                request_id,
-                data_vaddr: out.as_ptr() as u64,
-                len: n as u32,
-            };
-            let reply_vaddr = &reply as *const FileReplyRequest as u64;
-            let reply_status = syscall_ret(18, 0, reply_vaddr); // SYS_FILE_SERVICE_REPLY
-            com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_REPLY_SENT status=");
-            write_dec_u64(reply_status);
-            com1_write_str("\n");
+                    // 1. Write the data block to disk
+                    ext2_write_block(common, notify_base, dma, dma_phys, ext2::FILE_DATA_BLOCK, &write_buf);
+
+                    // 2. Read inode table block 1, update file inode size, write back
+                    let mut inode_table1 = zeroed_block!();
+                    ext2_read_block(common, notify_base, dma, dma_phys, ext2::INODE_TABLE_START_BLOCK + 1, &mut inode_table1);
+                    ext2::write_file_inode(&mut inode_table1, bytes_len as u32);
+                    ext2_write_block(common, notify_base, dma, dma_phys, ext2::INODE_TABLE_START_BLOCK + 1, &inode_table1);
+
+                    com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_WRITE_COMMITTED\n");
+
+                    // 3. Acknowledge write completion via SYS_FILE_SERVICE_REPLY
+                    let reply = FileReplyRequest {
+                        request_id,
+                        data_vaddr: 0,
+                        len: bytes_len as u32,
+                    };
+                    let reply_vaddr = &reply as *const FileReplyRequest as u64;
+                    let reply_status = syscall_ret(18, 0, reply_vaddr);
+                    com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_WRITE_REPLY_SENT status=");
+                    write_dec_u64(reply_status);
+                    com1_write_str("\n");
+                }
+            } else {
+                com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_REQUEST_RECEIVED inode=");
+                write_dec_u64(inode as u64);
+                com1_write_str("\n");
+
+                let mut inode_table1 = zeroed_block!();
+                ext2_read_block(common, notify_base, dma, dma_phys, ext2::INODE_TABLE_START_BLOCK + 1, &mut inode_table1);
+                let mut file_data = zeroed_block!();
+                ext2_read_block(common, notify_base, dma, dma_phys, ext2::FILE_DATA_BLOCK, &mut file_data);
+                let mut out = zeroed_block!();
+                let n = ext2::read_file_data(&inode_table1, &file_data, &mut out);
+
+                let reply = FileReplyRequest {
+                    request_id,
+                    data_vaddr: out.as_ptr() as u64,
+                    len: n as u32,
+                };
+                let reply_vaddr = &reply as *const FileReplyRequest as u64;
+                let reply_status = syscall_ret(18, 0, reply_vaddr); // SYS_FILE_SERVICE_REPLY
+                com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_REPLY_SENT status=");
+                write_dec_u64(reply_status);
+                com1_write_str("\n");
+            }
         }
     }
 }

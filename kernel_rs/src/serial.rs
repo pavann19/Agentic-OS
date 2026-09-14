@@ -33,6 +33,18 @@ fn is_ready() -> bool {
     unsafe { (inb(COM1 + 5) & 0x20) != 0 }
 }
 
+pub fn is_rx_ready() -> bool {
+    unsafe { (inb(COM1 + 5) & 0x01) != 0 }
+}
+
+pub fn read_char() -> Option<u8> {
+    if is_rx_ready() {
+        Some(unsafe { inb(COM1) })
+    } else {
+        None
+    }
+}
+
 pub fn write_char(c: u8) {
     while !is_ready() {}
     unsafe { outb(COM1, c) };

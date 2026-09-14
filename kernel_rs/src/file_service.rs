@@ -42,6 +42,7 @@ struct Request {
     ready: bool,
     len: usize,
     data: [u8; MAX_FILE_BYTES],
+    is_write: bool,
 }
 
 static mut REQUEST: Option<Request> = None;
@@ -94,7 +95,7 @@ pub fn request_file(inode: u32) -> u64 {
     }
     let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
     unsafe {
-        *(&mut *&raw mut REQUEST) = Some(Request { inode, ready: false, len: 0, data: [0u8; MAX_FILE_BYTES] });
+        *(&mut *&raw mut REQUEST) = Some(Request { inode, ready: false, len: 0, data: [0u8; MAX_FILE_BYTES], is_write: false });
     }
     CURRENT_REQUEST_ID.store(id, Ordering::SeqCst);
     // Real, disclosed ABI limit: `SYS_IPC_TRY_RECEIVE`'s own syscall
@@ -115,6 +116,72 @@ pub fn request_file(inode: u32) -> u64 {
     id
 }
 
+/// Real SYS_FILE_SERVICE_WRITE handler: a real app asks to write
+/// `len` bytes into `inode`. Copies data from user space into kernel
+/// buffer, sends IPC request with bit 31 set to notify server, and returns
+/// request id.
+pub fn write_file(pml4: u64, inode: u32, data_vaddr: u64, len: u32) -> u64 {
+    let send_cap = SERVER_SEND_CAP.load(Ordering::SeqCst);
+    if send_cap == NO_SERVER {
+        klog_info!("FILE_SERVICE_WRITE_NO_SERVER");
+        return 0;
+    }
+    let real_len = (len as usize).min(MAX_FILE_BYTES);
+    let mut buf = [0u8; MAX_FILE_BYTES];
+    unsafe {
+        if !vmm::validate_user_buffer_readable(pml4, data_vaddr, real_len as u64) {
+            klog_info!("FILE_SERVICE_WRITE_BAD_PTR inode={}", inode);
+            return 0;
+        }
+        vmm::read_user_bytes(pml4, data_vaddr, &mut buf[..real_len]);
+    }
+    let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
+    unsafe {
+        *(&mut *&raw mut REQUEST) = Some(Request {
+            inode,
+            ready: false,
+            len: real_len,
+            data: buf,
+            is_write: true,
+        });
+    }
+    CURRENT_REQUEST_ID.store(id, Ordering::SeqCst);
+    let mut msg = ipc::Message::default();
+    // Real ABI: bit 31 indicates write operation
+    let op_write: u64 = 1 << 31;
+    msg.data[0] = (id << 32) | op_write | (inode as u64);
+    match ipc::try_send(sender_table_mut(), send_cap, msg) {
+        Ok(true) => klog_info!("FILE_SERVICE_WRITE_SENT id={} inode={} len={}", id, inode, real_len),
+        Ok(false) => klog_info!("FILE_SERVICE_WRITE_DROPPED_BUSY id={} inode={}", id, inode),
+        Err(e) => klog_info!("FILE_SERVICE_WRITE_SEND_FAILED {:?}", e),
+    }
+    id
+}
+
+/// Called by the SERVING process (virtio_blk_driver) to fetch the pending
+/// write data for `request_id`.
+pub fn server_get_write_data(pml4: u64, request_id: u64, out_vaddr: u64, max_len: u32) -> u64 {
+    if CURRENT_REQUEST_ID.load(Ordering::SeqCst) != request_id {
+        return u64::MAX;
+    }
+    unsafe {
+        let slot = &mut *&raw mut REQUEST;
+        let Some(r) = slot else {
+            return u64::MAX;
+        };
+        if !r.is_write {
+            return u64::MAX;
+        }
+        let copy_len = r.len.min(max_len as usize);
+        if !vmm::validate_user_buffer_writable(pml4, out_vaddr, copy_len as u64) {
+            klog_info!("FILE_SERVICE_GET_WRITE_DATA_BAD_PTR id={}", request_id);
+            return u64::MAX;
+        }
+        vmm::write_user_bytes(pml4, out_vaddr, &r.data[..copy_len]);
+        copy_len as u64
+    }
+}
+
 /// Real SYS_FILE_SERVICE_REPLY handler: called by the SERVING process
 /// (never the requester) once it has real file bytes ready, e.g. after
 /// `virtio_blk_driver`'s own already-proven `ext2::read_file_data` call.
@@ -129,16 +196,18 @@ pub fn server_reply(pml4: u64, request_id: u64, data_vaddr: u64, len: u32) -> u6
     }
     let real_len = (len as usize).min(MAX_FILE_BYTES);
     unsafe {
-        if !vmm::validate_user_buffer_readable(pml4, data_vaddr, real_len as u64) {
-            klog_info!("FILE_SERVICE_REPLY_BAD_PTR id={}", request_id);
-            return u64::MAX;
-        }
         let slot = &mut *&raw mut REQUEST;
         let Some(r) = slot else {
             return u64::MAX;
         };
-        vmm::read_user_bytes(pml4, data_vaddr, &mut r.data[..real_len]);
-        r.len = real_len;
+        if !r.is_write {
+            if !vmm::validate_user_buffer_readable(pml4, data_vaddr, real_len as u64) {
+                klog_info!("FILE_SERVICE_REPLY_BAD_PTR id={}", request_id);
+                return u64::MAX;
+            }
+            vmm::read_user_bytes(pml4, data_vaddr, &mut r.data[..real_len]);
+            r.len = real_len;
+        }
         r.ready = true;
     }
     klog_info!("FILE_SERVICE_REPLY_OK id={} len={}", request_id, real_len);
@@ -162,6 +231,9 @@ pub fn poll_reply(pml4: u64, request_id: u64, out_vaddr: u64, out_max_len: u32) 
         };
         if !r.ready {
             return u64::MAX;
+        }
+        if r.is_write {
+            return r.len as u64;
         }
         let copy_len = r.len.min(out_max_len as usize);
         if !vmm::validate_user_buffer_writable(pml4, out_vaddr, copy_len as u64) {
@@ -190,6 +262,13 @@ struct FileReplyRequest {
 struct FilePollRequest {
     out_vaddr: u64,
     out_max_len: u32,
+}
+
+/// Real request struct for `SYS_FILE_SERVICE_WRITE` (syscall 24).
+#[repr(C)]
+pub struct FileWriteRequest {
+    pub data_vaddr: u64,
+    pub len: u32,
 }
 
 /// SYS_FILE_SERVICE_REPLY dispatch glue: `request_vaddr` is a vaddr in
@@ -224,4 +303,27 @@ pub fn syscall_poll(pml4: u64, request_id: u64, request_vaddr: u64) -> u64 {
         let req: FilePollRequest = core::ptr::read_unaligned(bytes.as_ptr() as *const FilePollRequest);
         poll_reply(pml4, request_id, req.out_vaddr, req.out_max_len)
     }
+}
+
+/// SYS_FILE_SERVICE_WRITE dispatch glue: `request_vaddr` is a vaddr in
+/// the CALLING (requesting) thread's own mapped memory holding a real
+/// `FileWriteRequest`.
+pub fn syscall_write(pml4: u64, inode: u32, request_vaddr: u64) -> u64 {
+    let req_size = core::mem::size_of::<FileWriteRequest>() as u64;
+    unsafe {
+        if !vmm::validate_user_buffer_readable(pml4, request_vaddr, req_size) {
+            klog_info!("FILE_SERVICE_WRITE_BAD_REQUEST_PTR");
+            return 0;
+        }
+        let mut bytes = [0u8; core::mem::size_of::<FileWriteRequest>()];
+        vmm::read_user_bytes(pml4, request_vaddr, &mut bytes);
+        let req: FileWriteRequest = core::ptr::read_unaligned(bytes.as_ptr() as *const FileWriteRequest);
+        write_file(pml4, inode, req.data_vaddr, req.len)
+    }
+}
+
+/// SYS_FILE_SERVICE_GET_WRITE_DATA dispatch glue: called by serving process
+/// to get pending write data.
+pub fn syscall_get_write_data(pml4: u64, request_id: u64, out_vaddr: u64, max_len: u32) -> u64 {
+    server_get_write_data(pml4, request_id, out_vaddr, max_len)
 }

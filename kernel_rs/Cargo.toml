@@ -82,6 +82,10 @@ installer_demo = []
 terminal_demo = []
 text_editor_demo = []
 file_manager_demo = []
+net_client_demo = ["network_stack"]
+sample_app_demo = []
+app_update_demo = []
+phase13_all = ["network_stack"]
 
 [profile.dev]
 panic = "abort"

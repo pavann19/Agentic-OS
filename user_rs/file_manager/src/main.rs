@@ -44,6 +44,10 @@ fn is_refresh_key(code: u8) -> bool {
     code == 0x13 // 'r' make code
 }
 
+fn is_write_key(code: u8) -> bool {
+    code == 0x11 // 'w' make code
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     unsafe {
@@ -84,6 +88,9 @@ pub extern "C" fn _start() -> ! {
             if is_refresh_key(scancode) {
                 com1::write_str("[FILE_MANAGER] REFRESH_REQUESTED\n");
                 request_and_show(info, history_ptr, GREETING_FILE_INODE);
+            } else if is_write_key(scancode) {
+                com1::write_str("[FILE_MANAGER] WRITE_KEY_PRESSED\n");
+                write_and_show(info, history_ptr, GREETING_FILE_INODE, b"AGENTIC_OS_FILE_WRITE_PERSISTED_OK");
             }
         }
     }
@@ -173,6 +180,34 @@ unsafe fn request_and_show(info: &FileManagerInfo, history_ptr: *mut TextRegion<
     }
     (*history_ptr).render(info.surface_cap, 16, FG, BG);
     surface::present(info.surface_cap);
+}
+
+unsafe fn write_and_show(info: &FileManagerInfo, history_ptr: *mut TextRegion<LINES, COLS>, inode: u32, data: &[u8]) {
+    com1::write_str("[FILE_MANAGER] FILE_WRITE_REQUEST_SENT inode=");
+    com1::write_dec_u64(inode as u64);
+    com1::write_str("\n");
+
+    let request_id = file_service::write_file(inode, data);
+    if request_id == 0 {
+        com1::write_str("[FILE_MANAGER] FILE_WRITE_NO_SERVER\n");
+        return;
+    }
+
+    let mut dummy = [0u8; 16];
+    const MAX_POLLS: u32 = 200_000;
+    for _ in 0..MAX_POLLS {
+        let n = file_service::poll_reply(request_id, &mut dummy);
+        if n != u64::MAX {
+            com1::write_str("[FILE_MANAGER] FILE_WRITE_CONFIRMED len=");
+            com1::write_dec_u64(n);
+            com1::write_str("\n");
+            // Re-read file to prove on-disk round-trip persistence!
+            request_and_show(info, history_ptr, inode);
+            return;
+        }
+        core::hint::spin_loop();
+    }
+    com1::write_str("[FILE_MANAGER] FILE_WRITE_TIMED_OUT\n");
 }
 
 #[panic_handler]

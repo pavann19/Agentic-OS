@@ -81,6 +81,7 @@ $qemuArgs = @(
     "-device", "virtio-blk-pci,drive=disk0,disable-legacy=on,iommu_platform=on,ats=on",
     "-drive", "file=$DiskImg,if=none,id=disk0,format=raw",
     "-serial", "file:$SerialLog",
+    "-monitor", "tcp:127.0.0.1:4456,server,nowait",
     "-display", "none",
     "-no-reboot"
 )
@@ -88,6 +89,21 @@ $qemuArgs = @(
 $proc = Start-Process -FilePath $QemuExe -ArgumentList $qemuArgs -PassThru -NoNewWindow
 try {
     Start-Sleep -Seconds $BootWaitSeconds
+
+    try {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $client.Connect("127.0.0.1", 4456)
+        $stream = $client.GetStream()
+        $writer = New-Object System.IO.StreamWriter($stream)
+        $writer.AutoFlush = $true
+        $writer.WriteLine("sendkey w")
+        Start-Sleep -Milliseconds 500
+        $writer.Close()
+        $client.Close()
+        Start-Sleep -Seconds 10
+    } catch {
+        Write-Warning "Monitor sendkey failed: $_"
+    }
 } finally {
     if (-not $proc.HasExited) {
         Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
@@ -112,7 +128,11 @@ $checks = @(
     @{ Name = "file_manager sent a real file-content request"; Pattern = "FILE_REQUEST_SENT inode=11" },
     @{ Name = "the file-serving driver actually received that real request"; Pattern = "FILE_SERVICE_REQUEST_RECEIVED inode=11" },
     @{ Name = "the driver replied over the real IPC round trip"; Pattern = "FILE_SERVICE_REPLY_SENT status=0" },
-    @{ Name = "file_manager received the real reply with the correct real length (35 bytes)"; Pattern = "FILE_REPLY_RECEIVED len=35" }
+    @{ Name = "file_manager received the real reply with the correct real length (35 bytes)"; Pattern = "FILE_REPLY_RECEIVED len=35" },
+    @{ Name = "file_manager handled 'w' keypress"; Pattern = "WRITE_KEY_PRESSED" },
+    @{ Name = "file_manager sent write request"; Pattern = "FILE_WRITE_REQUEST_SENT" },
+    @{ Name = "virtio_blk_driver executed ext2 write"; Pattern = "FILE_SERVICE_WRITE_REPLY_SENT status=0" },
+    @{ Name = "file_manager verified write completion"; Pattern = "FILE_WRITE_CONFIRMED len=34" }
 )
 foreach ($c in $checks) {
     $matched = $content.Contains($c.Pattern)

@@ -1,0 +1,19 @@
+[package]
+name = "net_client"
+version = "0.1.0"
+edition = "2021"
+
+# Phase 13 deliverable 4: the fourth real reference app -- a capability-isolated
+# ring-3 network client exercising Phase 10's real TCP stack via net_service.
+[dependencies]
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+agentic_sdk = { path = "../agentic_sdk" }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

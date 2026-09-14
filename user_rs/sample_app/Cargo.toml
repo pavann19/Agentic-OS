@@ -1,0 +1,20 @@
+[package]
+name = "sample_app"
+version = "0.1.0"
+edition = "2021"
+
+# Phase 13 exit criterion 2:
+# "The SDK builds and runs a genuinely new app (not one of the four reference apps)
+# with no kernel or platform-service change required."
+[dependencies]
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+agentic_sdk = { path = "../agentic_sdk" }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

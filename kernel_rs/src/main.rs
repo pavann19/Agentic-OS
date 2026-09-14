@@ -58,12 +58,18 @@ pub mod klog;
 pub mod object_store;
 pub mod nvme;
 pub mod netstack; // Phase 10 -- real network-stack process, see its own module doc
+pub mod net_service; // Phase 13 -- network service for ring-3 apps
+pub mod net_client_app; // Phase 13 deliverable 4 -- fourth real reference app
+pub mod sample_app_demo; // Phase 13 exit criterion 2 -- third-party SDK app demo
+pub mod package; // Phase 13 deliverable 5 -- package store & reproducible updates
+pub mod launcher; // Phase 13 deliverable 2 -- real app launcher
 pub mod pci;
 pub mod pic;
 pub mod pmm;
 pub mod policy;
 pub mod ring3;
 pub mod serial;
+pub mod serial_input;
 pub mod service_manager;
 pub mod shell;
 pub mod smp;
@@ -419,6 +425,7 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             // draws.
             draw_desktop_chrome(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height);
             mouse_driver::spawn();
+            serial_input::spawn();
             compositor::spawn(compositor::FbParams {
                 phys_base: fb.base_address as u64,
                 size: fb.buffer_size,
@@ -455,6 +462,7 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             // above for the full explanation.
             draw_desktop_chrome(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height);
             mouse_driver::spawn();
+            serial_input::spawn();
             terminal::spawn(compositor::FbParams {
                 phys_base: fb.base_address as u64,
                 size: fb.buffer_size,
@@ -470,6 +478,7 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             text::init(info.payload.font);
             draw_desktop_chrome(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height);
             mouse_driver::spawn();
+            serial_input::spawn();
             text_editor::spawn(compositor::FbParams {
                 phys_base: fb.base_address as u64,
                 size: fb.buffer_size,
@@ -489,6 +498,7 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             text::init(info.payload.font);
             draw_desktop_chrome(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height);
             mouse_driver::spawn();
+            serial_input::spawn();
             file_manager::spawn(compositor::FbParams {
                 phys_base: fb.base_address as u64,
                 size: fb.buffer_size,
@@ -497,7 +507,60 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
                 pixels_per_scan_line: fb.pixels_per_scan_line,
             });
         }
-        #[cfg(not(any(feature = "compositor_demo", feature = "terminal_demo", feature = "text_editor_demo", feature = "file_manager_demo")))]
+        // Phase 13 deliverable 4: the net_client reference app
+        #[cfg(feature = "net_client_demo")]
+        {
+            text::init(info.payload.font);
+            draw_desktop_chrome(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height);
+            mouse_driver::spawn();
+            serial_input::spawn();
+            net_client_app::spawn(compositor::FbParams {
+                phys_base: fb.base_address as u64,
+                size: fb.buffer_size,
+                width: fb.width,
+                height: fb.height,
+                pixels_per_scan_line: fb.pixels_per_scan_line,
+            });
+        }
+        // Phase 13 exit criterion 2: third-party SDK app demo
+        #[cfg(feature = "sample_app_demo")]
+        {
+            text::init(info.payload.font);
+            draw_desktop_chrome(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height);
+            mouse_driver::spawn();
+            serial_input::spawn();
+            sample_app_demo::spawn(compositor::FbParams {
+                phys_base: fb.base_address as u64,
+                size: fb.buffer_size,
+                width: fb.width,
+                height: fb.height,
+                pixels_per_scan_line: fb.pixels_per_scan_line,
+            });
+        }
+        // Phase 13 exit criterion 3: all four reference apps running concurrently
+        #[cfg(feature = "phase13_all")]
+        {
+            text::init(info.payload.font);
+            draw_desktop_chrome(fb.base_address as u64, fb.pixels_per_scan_line, fb.width, fb.height);
+            mouse_driver::spawn();
+            serial_input::spawn();
+            launcher::launch_all_apps(compositor::FbParams {
+                phys_base: fb.base_address as u64,
+                size: fb.buffer_size,
+                width: fb.width,
+                height: fb.height,
+                pixels_per_scan_line: fb.pixels_per_scan_line,
+            });
+        }
+        #[cfg(not(any(
+            feature = "compositor_demo",
+            feature = "terminal_demo",
+            feature = "text_editor_demo",
+            feature = "file_manager_demo",
+            feature = "net_client_demo",
+            feature = "sample_app_demo",
+            feature = "phase13_all"
+        )))]
         user_driver::spawn_framebuffer_driver(
             fb.base_address as u64,
             fb.buffer_size,
@@ -533,7 +596,17 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     agent::spawn_agent_demo();
     klog_info!("AGENT_DEMO_SPAWN_DONE");
 
-    // Phase 7's text shell -- see shell.rs's module doc.
+    // Phase 7's text shell -- see shell.rs's module doc. Only active when
+    // no graphical reference app owns sole interactive focus on COM1.
+    #[cfg(not(any(
+        feature = "compositor_demo",
+        feature = "terminal_demo",
+        feature = "text_editor_demo",
+        feature = "file_manager_demo",
+        feature = "net_client_demo",
+        feature = "sample_app_demo",
+        feature = "phase13_all"
+    )))]
     shell::spawn_shell();
 
     // Phase 3: ACPI table discovery -- the real RSDP boot_rs found via the
@@ -800,6 +873,9 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
 
     #[cfg(feature = "installer_demo")]
     installer_demo::start();
+
+    #[cfg(any(feature = "app_update_demo", feature = "phase13_all"))]
+    package::run_app_update_demo();
 
     // Phase 2: capability substrate. Real proof of every exit criterion
     // from docs/ROADMAP.md's Phase 2 section, not just "it compiles":
