@@ -18,6 +18,7 @@
 
 use crate::capability::ObjectId;
 use crate::klog_info;
+use crate::renderer::Renderer;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -194,17 +195,13 @@ pub unsafe fn init_desktop_chrome(fb_phys_base: u64, ppsl: u32, width: u32, heig
         crate::text::draw_text_to_buffer(bb, width, height, tip_x, footer_y + 2, tip, 0x0064_748B, DESKTOP_BG_COLOR);
     }
 
-    // Synchronize BACKBUFFER to FRONTBUFFER (Phase 5.6)
+    // Synchronize BACKBUFFER to FRONTBUFFER and flush to physical GOP via Renderer (Phase 5.6/5.11)
     let fb = ensure_frontbuffer(width, height);
-    fb.copy_from_slice(bb);
-
-    // Flush entire frontbuffer to physical GOP framebuffer using fast scanline blit!
-    for y in 0..height {
-        let src_ptr = fb.as_ptr().add((y * width) as usize);
-        put_fb_scanline_fast(fb_phys_base, ppsl, 0, y, src_ptr, width);
+    unsafe {
+        let r = crate::renderer::active_renderer();
+        r.present_rect(fb_phys_base, ppsl, width, height, bb, fb, DamageRect::new(0, 0, width, height));
+        draw_cursor(fb_phys_base, ppsl, width, height);
     }
-    core::arch::asm!("sfence", options(nomem, nostack));
-    draw_cursor(fb_phys_base, ppsl, width, height);
 }
 
 pub fn register(surface_object: ObjectId, x: i32, y: i32, width: u32, height: u32, title: &[u8]) {
@@ -415,7 +412,7 @@ pub fn move_window(surface_object: ObjectId, new_x: i32, new_y: i32, fb_width: u
 }
 
 /// Fast scanline blit: copies `pixel_count` u32 pixels in a single contiguous memory copy.
-unsafe fn put_fb_scanline_fast(fb_phys_base: u64, ppsl: u32, sx: u32, sy: u32, src: *const u32, pixel_count: u32) {
+pub(crate) unsafe fn put_fb_scanline_fast(fb_phys_base: u64, ppsl: u32, sx: u32, sy: u32, src: *const u32, pixel_count: u32) {
     if pixel_count == 0 {
         return;
     }
@@ -424,7 +421,7 @@ unsafe fn put_fb_scanline_fast(fb_phys_base: u64, ppsl: u32, sx: u32, sy: u32, s
     core::ptr::copy_nonoverlapping(src, vaddr, pixel_count as usize);
 }
 
-/// Blits a window's visible title bar and content into RAM BACKBUFFER after subtracting higher-z occluders (Phase 5.4).
+/// Blits a window's visible title bar and content into RAM BACKBUFFER after subtracting higher-z occluders (Phase 5.4/5.11).
 unsafe fn blit_window_clipped(
     w: &Window,
     occluders: &[DamageRect],
@@ -433,43 +430,10 @@ unsafe fn blit_window_clipped(
     fb_height: u32,
 ) {
     let screen_rect = DamageRect::new(0, 0, fb_width, fb_height);
-
-    // 1. Title bar visible pieces
+    let r = crate::renderer::active_renderer();
     let bar_y = w.y - TITLE_BAR_HEIGHT as i32;
-    let title_rect = DamageRect::new(w.x, bar_y, w.width, TITLE_BAR_HEIGHT);
-    let mut vis_title = [DamageRect::default(); 32];
-    let n_title = DamageRect::compute_visible_rects(&title_rect, occluders, &mut vis_title);
-
-    for i in 0..n_title {
-        if let Some(rc) = vis_title[i].intersect(&screen_rect) {
-            let slice_w = rc.width as usize;
-            for sy in rc.y..rc.bottom() {
-                let local_y = (sy - bar_y) as u32;
-                let local_x = (rc.x - w.x) as u32;
-                let src_off = (local_y * w.width + local_x) as usize;
-                let dst_off = (sy as u32 * fb_width + rc.x as u32) as usize;
-                bb[dst_off..dst_off + slice_w].copy_from_slice(&w.title_buffer[src_off..src_off + slice_w]);
-            }
-        }
-    }
-
-    // 2. Content buffer visible pieces
-    let content_rect = DamageRect::new(w.x, w.y, w.width, w.height);
-    let mut vis_content = [DamageRect::default(); 32];
-    let n_content = DamageRect::compute_visible_rects(&content_rect, occluders, &mut vis_content);
-
-    for i in 0..n_content {
-        if let Some(rc) = vis_content[i].intersect(&screen_rect) {
-            let slice_w = rc.width as usize;
-            for sy in rc.y..rc.bottom() {
-                let local_y = (sy - w.y) as u32;
-                let local_x = (rc.x - w.x) as u32;
-                let src_off = (local_y * w.width + local_x) as usize;
-                let dst_off = (sy as u32 * fb_width + rc.x as u32) as usize;
-                bb[dst_off..dst_off + slice_w].copy_from_slice(&w.buffer[src_off..src_off + slice_w]);
-            }
-        }
-    }
+    r.blit_surface_clipped(bb, fb_width, fb_height, &w.title_buffer, w.width, TITLE_BAR_HEIGHT, w.x, bar_y, screen_rect, occluders);
+    r.blit_surface_clipped(bb, fb_width, fb_height, &w.buffer, w.width, w.height, w.x, w.y, screen_rect, occluders);
 }
 
 /// Full compositing pass with Z-order occlusion culling and sub-rectangle clipping (Phase 5.4):
@@ -503,8 +467,9 @@ pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
     let mut damaged_scanlines = 0usize;
     let mut damaged_pixels = 0usize;
 
-    // Presentation pipeline (Phase 5.6): Commit visible rects from BACKBUFFER to FRONTBUFFER and flush to GOP
+    // Presentation pipeline (Phase 5.6/5.11): Commit visible rects from BACKBUFFER to FRONTBUFFER and flush to GOP via Renderer
     let t_flush_start = crate::compositor_metrics::read_tsc();
+    let renderer = crate::renderer::active_renderer();
     for i in 0..num_windows {
         let w = &windows[i];
         let occluders = &win_bounds[i + 1..num_windows.min(16)];
@@ -520,15 +485,8 @@ pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
             let r = vis[k];
             if let Some(rc) = r.intersect(&screen_rect) {
                 damaged_rects += 1;
-                let slice_w = rc.width as usize;
-                for sy in rc.y..rc.bottom() {
-                    let offset = (sy as u32 * fb_width + rc.x as u32) as usize;
-                    fb[offset..offset + slice_w].copy_from_slice(&bb[offset..offset + slice_w]);
-                    let src_ptr = fb.as_ptr().add(offset);
-                    put_fb_scanline_fast(fb_phys_base, ppsl, rc.x as u32, sy as u32, src_ptr, rc.width);
-                    damaged_scanlines += 1;
-                    damaged_pixels += slice_w;
-                }
+                damaged_scanlines += renderer.present_rect(fb_phys_base, ppsl, fb_width, fb_height, bb, fb, rc);
+                damaged_pixels += (rc.width * rc.height) as usize;
             }
         }
 
@@ -537,19 +495,11 @@ pub unsafe fn present(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
             let r = vis[k];
             if let Some(rc) = r.intersect(&screen_rect) {
                 damaged_rects += 1;
-                let slice_w = rc.width as usize;
-                for sy in rc.y..rc.bottom() {
-                    let offset = (sy as u32 * fb_width + rc.x as u32) as usize;
-                    fb[offset..offset + slice_w].copy_from_slice(&bb[offset..offset + slice_w]);
-                    let src_ptr = fb.as_ptr().add(offset);
-                    put_fb_scanline_fast(fb_phys_base, ppsl, rc.x as u32, sy as u32, src_ptr, rc.width);
-                    damaged_scanlines += 1;
-                    damaged_pixels += slice_w;
-                }
+                damaged_scanlines += renderer.present_rect(fb_phys_base, ppsl, fb_width, fb_height, bb, fb, rc);
+                damaged_pixels += (rc.width * rc.height) as usize;
             }
         }
     }
-    core::arch::asm!("sfence", options(nomem, nostack));
     let t_flush_end = crate::compositor_metrics::read_tsc();
 
     let t_cursor_start = crate::compositor_metrics::read_tsc();
@@ -774,6 +724,7 @@ const fn build_cursor_sprite() -> [[u8; CURSOR_W as usize]; CURSOR_H as usize] {
 const CURSOR_SPRITE: [[u8; CURSOR_W as usize]; CURSOR_H as usize] = build_cursor_sprite();
 
 /// Restores the rectangle under the cursor directly from the pristine RAM frontbuffer (Phase 5.6)
+#[allow(dead_code)]
 unsafe fn restore_cursor_rect(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u32, cx: i32, cy: i32) {
     let fb = ensure_frontbuffer(fb_width, fb_height);
     for row in 0..CURSOR_H {
@@ -893,6 +844,7 @@ unsafe fn redraw_rect(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
     }
     let count = (rx1 - rx0) as usize;
     let (bb, fb) = ensure_buffers(fb_width, fb_height);
+    let r = crate::renderer::active_renderer();
 
     // 1. Restore background in BACKBUFFER
     for py in ry0..ry1 {
@@ -926,7 +878,7 @@ unsafe fn redraw_rect(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
         crate::text::draw_text_to_buffer(bb, fb_width, fb_height, tip_x, footer_y + 2, tip, 0x0064_748B, DESKTOP_BG_COLOR);
     }
 
-    // 2. Re-blit overlapping windows in z-order with occlusion clipping (Phase 5.4/5.5)
+    // 2. Re-blit overlapping windows in z-order with occlusion clipping (Phase 5.4/5.5/5.11)
     let target_rect = DamageRect::new(rx0, ry0, (rx1 - rx0) as u32, (ry1 - ry0) as u32);
     let windows = windows_mut();
     let num_windows = windows.len();
@@ -941,53 +893,13 @@ unsafe fn redraw_rect(fb_phys_base: u64, ppsl: u32, fb_width: u32, fb_height: u3
     for i in 0..num_windows {
         let w = &windows[i];
         let occluders = &win_bounds[i + 1..num_windows.min(16)];
-
-        // Title bar inside target_rect
         let bar_y = w.y - TITLE_BAR_HEIGHT as i32;
-        let title_rect = DamageRect::new(w.x, bar_y, w.width, TITLE_BAR_HEIGHT);
-        if let Some(t_target) = title_rect.intersect(&target_rect) {
-            let mut vis = [DamageRect::default(); 32];
-            let n = DamageRect::compute_visible_rects(&t_target, occluders, &mut vis);
-            for k in 0..n {
-                let rc = vis[k];
-                let slice_w = rc.width as usize;
-                for sy in rc.y..rc.bottom() {
-                    let local_y = (sy - bar_y) as u32;
-                    let local_x = (rc.x - w.x) as u32;
-                    let src_off = (local_y * w.width + local_x) as usize;
-                    let dst_off = (sy as u32 * fb_width + rc.x as u32) as usize;
-                    bb[dst_off..dst_off + slice_w].copy_from_slice(&w.title_buffer[src_off..src_off + slice_w]);
-                }
-            }
-        }
-
-        // Content buffer inside target_rect
-        let content_rect = DamageRect::new(w.x, w.y, w.width, w.height);
-        if let Some(c_target) = content_rect.intersect(&target_rect) {
-            let mut vis = [DamageRect::default(); 32];
-            let n = DamageRect::compute_visible_rects(&c_target, occluders, &mut vis);
-            for k in 0..n {
-                let rc = vis[k];
-                let slice_w = rc.width as usize;
-                for sy in rc.y..rc.bottom() {
-                    let local_y = (sy - w.y) as u32;
-                    let local_x = (rc.x - w.x) as u32;
-                    let src_off = (local_y * w.width + local_x) as usize;
-                    let dst_off = (sy as u32 * fb_width + rc.x as u32) as usize;
-                    bb[dst_off..dst_off + slice_w].copy_from_slice(&w.buffer[src_off..src_off + slice_w]);
-                }
-            }
-        }
+        r.blit_surface_clipped(bb, fb_width, fb_height, &w.title_buffer, w.width, TITLE_BAR_HEIGHT, w.x, bar_y, target_rect, occluders);
+        r.blit_surface_clipped(bb, fb_width, fb_height, &w.buffer, w.width, w.height, w.x, w.y, target_rect, occluders);
     }
 
-    // 3. Commit to FRONTBUFFER and flush the damaged scanlines to physical GOP framebuffer (Phase 5.6)
-    for py in ry0..ry1 {
-        let row_off = (py as u32 * fb_width + rx0 as u32) as usize;
-        fb[row_off..row_off + count].copy_from_slice(&bb[row_off..row_off + count]);
-        let src_ptr = fb.as_ptr().add(row_off);
-        put_fb_scanline_fast(fb_phys_base, ppsl, rx0 as u32, py as u32, src_ptr, (rx1 - rx0) as u32);
-    }
-    core::arch::asm!("sfence", options(nomem, nostack));
+    // 3. Commit to FRONTBUFFER and flush the damaged scanlines to physical GOP framebuffer (Phase 5.6/5.11)
+    r.present_rect(fb_phys_base, ppsl, fb_width, fb_height, bb, fb, target_rect);
 }
 
 /// Real PS/2 mouse event handler with independent cursor overlay and zero window recomposition.

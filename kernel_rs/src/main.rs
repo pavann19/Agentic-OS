@@ -71,6 +71,7 @@ pub mod pci;
 pub mod pic;
 pub mod pmm;
 pub mod policy;
+pub mod renderer; // Phase 5.11 -- compositor renderer abstraction (CpuRenderer / GpuRenderer)
 pub mod ring3;
 pub mod serial;
 pub mod serial_input;
