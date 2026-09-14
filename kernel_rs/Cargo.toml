@@ -91,6 +91,8 @@ phase14_signed_update = []
 phase14_crypto_store = []
 phase14_telemetry = []
 phase14_all = ["phase14_multi_user", "phase14_signed_update", "phase14_crypto_store", "phase14_telemetry"]
+phase11_power = []
+phase11_all = ["phase11_power"]
 
 [profile.dev]
 panic = "abort"

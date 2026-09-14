@@ -72,6 +72,7 @@ pub mod multi_user; // Phase 14 deliverable 1 -- multi-user capability session m
 pub mod update; // Phase 14 deliverable 3 -- cryptographically signed updates and dual-bank A/B
 pub mod crypto_store; // Phase 14 deliverable 4 -- full-disk ChaCha20 encryption
 pub mod telemetry; // Phase 14 deliverable 5 -- local-first crash telemetry
+pub mod power; // Phase 11 deliverable 3 -- ACPI power management & S3 suspend/resume
 pub mod pci;
 pub mod pic;
 pub mod pmm;
@@ -910,6 +911,9 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
 
     #[cfg(any(feature = "phase14_telemetry", feature = "phase14_all"))]
     telemetry::run_telemetry_demo();
+
+    #[cfg(any(feature = "phase11_power", feature = "phase11_all"))]
+    power::run_power_management_demo(info.payload.rsdp as u64);
 
     // Phase 2: capability substrate. Real proof of every exit criterion
     // from docs/ROADMAP.md's Phase 2 section, not just "it compiles":

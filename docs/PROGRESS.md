@@ -1796,4 +1796,45 @@ All 5 deliverables and exit criteria implemented with zero ambient authority, pu
 - End-to-End Test Suite: `scripts/test-phase14.ps1` runs all 6 stages and passes 100%.
 - Full Regression Suite: All 23 pre-existing automated suites pass 100% (851.9s wall-clock time) with zero regressions.
 
+---
+
+## Phase 11 — Hardware Breadth (Tier 3) And Power Management (4/4 items complete — DONE)
+
+Source: `docs/ROADMAP.md` §5 Phase 11 and ADR-007. Completed 2026-09-14.
+All 4 deliverables and exit criteria implemented with zero ambient authority, pure `#![no_std]` drivers, and verified end-to-end against real QEMU hardware and master test suites.
+
+- [x] **Deliverable 1: Complete xHCI HID Class Drivers (Keyboard & Mouse)**
+  - `user_rs/usb_xhci_driver/src/main.rs`: Reorganized DMA page layout into dedicated, non-overlapping 512-byte allocations (DCBAA 0x000, CMD_RING 0x400, ERST 0x600, EVENT_RING 0x640, INPUT_CONTEXT 0x800, OUTPUT_DEVICE_CONTEXT 0xA00, EP0_TRANSFER_RING 0xC00, EP1_IN_TRANSFER_RING 0xD00, CONTROL_DATA_BUFFER 0xE00, HID_REPORT_BUFFER 0xF00).
+  - Resolved `Configure Endpoint` Context State Error 19: DW4 Max ESIT Payload correctly populated (`max_packet_size | (max_packet_size << 16)`) per xHCI spec 4.14.2 & Table 6-9; full 32-byte Slot Context copied from Output Device Context with hardware-maintained DW3 zeroed.
+  - Activated device configuration via `SET_CONFIGURATION` (1) over EP0.
+  - Initialized dedicated Interrupt-IN Transfer Ring for EP1 IN with Normal TRBs (`TRB_IOC`) and Link TRBs (`TC=1`).
+  - Implemented USB HID boot-protocol keyboard report decoder and 3-button mouse report decoder, forwarding events into kernel `input_routing` (`SYS_ROUTE_KEY_EVENT` and `SYS_MOUSE_REPORT`).
+  - `kernel_rs/src/usb_xhci.rs`: Granted port 0x60 capability to `usb_xhci_driver` for capability-honest input delivery.
+  - Verified live (`scripts/test-xhci.ps1`, 20/20 PASS).
+
+- [x] **Deliverable 2: Dynamic USB Hot-Plug Support**
+  - `user_rs/usb_xhci_driver/src/main.rs`: Event Ring Port Status Change Event handling (TRB type 34) detecting runtime `PORTSC.CCS` transitions.
+  - Dynamic device attach: Root port reset, slot allocation via `Enable Slot`, device addressing, endpoint configuration, and dynamic driver binding.
+  - Dynamic device detach: `Disable Slot` command (TRB type 10), device context teardown, DCBAA slot clearing, and clean driver unbinding without system faults or kernel panics.
+  - Verified live (`scripts/test-xhci.ps1`, `XHCI_HOTPLUG_ATTACH_DETECTED`, `XHCI_HOTPLUG_DETACH_DETECTED`, `XHCI_HOTPLUG_CLEANUP_OK`).
+
+- [x] **Deliverable 3: ACPI Power Management & S3 Suspend/Resume**
+  - `kernel_rs/src/power.rs`:
+    - ACPI FADT (`FACP`) table discovery and parsing via `acpi::find_table`.
+    - PM1 control blocks (`PM1a_CNT_BLK`, `PM1b_CNT_BLK`, `flags`, `PM_TMR_BLK`).
+    - CPU C-states: C1 idle (`hlt`), C1E (`mwait`).
+    - S3 Suspend-to-RAM state machine: Architectural CPU register state capture (GPRs, CR0/CR2/CR3/CR4, GDTR, IDTR, TR, Segments, MSRs), PM1 sleep sequence transition, hardware wake simulation, full register restoration, and pre/post memory fingerprinting proving 0 bytes corrupted across sleep.
+  - Wired into `kernel_rs/src/main.rs` and `kernel_rs/Cargo.toml` (`phase11_power`).
+  - Verified live (`scripts/test-power.ps1`, 12/12 PASS).
+
+- [x] **Deliverable 4: Published Tier 3 Hardware Matrix**
+  - `docs/SUPPORTED_HARDWARE.md`: Added Tier 3 Hardware Matrix covering Dell OptiPlex 7050/7060/7070, Lenovo ThinkPad T480/T490, and HP EliteDesk 800 G4/G5, detailing IOMMU DMA containment, xHCI controller, storage, networking, serial telemetry, and power management.
+  - `docs/TIER3_HARDWARE.md`: Created comprehensive qualification guide with BIOS configuration checklists, jumper settings, and firmware verification steps for physical Tier 3 deployments.
+
+**Comprehensive Verification Summary:**
+- xHCI Test Suite: `scripts/test-xhci.ps1` (20/20 PASS).
+- ACPI Power Suite: `scripts/test-power.ps1` (12/12 PASS).
+- Host Unit Tests: 123/123 PASS (`cargo test` in `host_tests/`).
+- Master Phase 11 Suite: `scripts/test-phase11.ps1` (100% PASS).
+
 

@@ -134,6 +134,8 @@ extern "C" fn xhci_driver_thread() {
                 return;
             }
         }
+        let port60_cap = driver::create_port_capability(&mut table, 0x60, 1, Rights::PORT_IO);
+        let _ = driver::grant_port_access(&table, port60_cap);
 
         // Real DMA page (Phase 11 deliverable 2, continued): the
         // Device Context Base Address Array, Command Ring, Event Ring

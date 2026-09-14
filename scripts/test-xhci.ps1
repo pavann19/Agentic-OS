@@ -92,7 +92,14 @@ $checks = @(
     "XHCI_ADDRESS_DEVICE_PASS",
     "XHCI_GET_DEVICE_DESCRIPTOR_PASS",
     "XHCI_GET_CONFIG_DESCRIPTOR_PASS",
-    "XHCI_HID_ENDPOINT_FOUND"
+    "XHCI_HID_ENDPOINT_FOUND",
+    "XHCI_CONFIGURE_ENDPOINT_PASS",
+    "XHCI_SET_CONFIGURATION_PASS",
+    "XHCI_HID_INTERRUPT_IN_ARMED",
+    "XHCI_HID_INPUT_REPORT_PASS",
+    "XHCI_HOTPLUG_ATTACH_DETECTED",
+    "XHCI_HOTPLUG_DETACH_DETECTED",
+    "XHCI_HOTPLUG_CLEANUP_OK"
 )
 foreach ($c in $checks) {
     if ($content.Contains($c)) {
@@ -109,4 +116,4 @@ if (-not $allPassed) {
 }
 
 Write-Output ""
-Write-Output "xHCI (USB) host controller verified end-to-end against a real attached USB keyboard, through real GET_DESCRIPTOR control transfers and real HID endpoint discovery: reset, Command Ring/Event Ring round trip, Enable Slot, port reset, Address Device (independently confirmed via the real Output Device Context), a real Device Descriptor read (real idVendor/idProduct), a real Configuration Descriptor read, and real parsing that found the device's actual Interrupt-IN HID endpoint (address/max-packet/interval). Configure Endpoint (adding that endpoint to the slot) is real, written, and issued, but returns a real, disclosed Context State Error (completion code 19) -- not yet resolved; see docs/PROGRESS.md."
+Write-Output "xHCI (USB) host controller and HID class drivers verified end-to-end against real attached USB keyboard & mouse, through Configure Endpoint (Context State Error resolved), SET_CONFIGURATION, Interrupt-IN transfer queueing, HID report decoding into input_routing, and dynamic hot-plug attach/detach lifecycle."
