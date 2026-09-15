@@ -1858,3 +1858,46 @@ All 5 deliverables and exit criteria implemented with zero ambient authority, pu
 - End-to-End Test Suite: `scripts/test-phase14.ps1` runs all 6 stages and passes 100%.
 - Full Regression Suite: All 23 pre-existing automated suites pass 100% (851.9s wall-clock time) with zero regressions.
 
+---
+
+## Phase 15 / Live Agent Bridge — Hardware-Isolated COM2 Ring-3 Agent Gateway (DONE)
+
+Source: `docs/TASK_LIVE_AGENT_BRIDGE.md`. Completed 2026-09-15.
+All requirements and verification criteria implemented strictly to specification: hardware-isolated COM2 transport, ring-3 capability-gated `agent_gateway` user process, length-prefixed typed wire protocol, host bridge script, automated test harness, and integration into the regression battery.
+
+- [x] **Deliverable 1: Second UART (COM2 @ `0x2F8`) Transport & Hardware Probing**
+  - `kernel_rs/src/serial.rs`: Generalized initialization from hardcoded COM1 (`0x3F8`) to parameterized `init(port: u16)`.
+  - Implemented 16550 UART scratch register probing (`probe(port: u16) -> bool`) using test pattern `0x5A` / readback. Enables zero-overhead detection so standard runs without COM2 attached cleanly skip gateway spawning with zero regression.
+  - `kernel_rs/src/klog.rs`: Explicitly targets COM1 (`0x3F8`) for kernel logging.
+
+- [x] **Deliverable 2: Ring-3 Agent Gateway Process (`user_rs/agent_gateway`)**
+  - Pure `#![no_std]` ring-3 ELF64 binary linked at base address `0x00570000`.
+  - Granted `PortIoRange` for COM2 (`0x2F8..=0x2FF`) and COM1 telemetry (`0x3F8..=0x3FF`), and `IntrospectionHandle` with `Rights::INTROSPECT`.
+  - Fully decodes and responds to binary framing over 16550 COM2:
+    - Frame structure: Magic `AGB1` (`0x41 0x47 0x42 0x31`), length $L$ (u32 LE), MsgId (u32 LE), payload ($L$ bytes).
+    - Request types: `MsgListWindows` (`0x00000001`), `MsgInjectKey` (`0x00000002`), `MsgFocusWindow` (`0x00000003`).
+    - Response types: `RespOkWindows` (`0x80000001`), `RespOkAction` (`0x80000002`), `RespDenied` (`0x800000FF`), `RespErr` (`0x800000FE`).
+  - Dispatches actions strictly through existing kernel syscall surface:
+    - Syscall 32: `SYS_INTROSPECT_WINDOWS`
+    - Syscall 33: `SYS_AGENT_UI_ACTION`
+  - Zero expansion of syscall action surface; single-connection lockstep request-response protocol.
+
+- [x] **Deliverable 3: Kernel Gateway Spawner & Capability Gating**
+  - `kernel_rs/src/agent_gateway.rs`: Probes COM2 hardware at boot; if present, initializes COM2, sets up page tables, stack, and TSS IOPB permissions, and enters ring 3.
+  - Grants capability domain with `KernelObjectKind::Introspection` and `Rights::INTROSPECT`.
+  - Supports `--features agent_gateway_unauthorized` for adversarial testing, spawning the gateway without introspection rights to prove kernel-level capability enforcement.
+
+- [x] **Deliverable 4: Host Bridge CLI & Automated Verification Suite**
+  - `scripts/agent-bridge-send.ps1`: Interactive and scriptable PowerShell client. Connects to QEMU's TCP chardev socket (default `127.0.0.1:4444`), sends framed binary requests, decodes typed responses, and prints structured human/LLM-readable data.
+  - `scripts/test-agent-bridge.ps1`: Automated QEMU integration test verifying:
+    1. COM2 hardware bring-up and ring-3 gateway spawning.
+    2. `ListWindows`: Window enumeration returning `Window[0]: surface=1 pos=(350,350) size=(200x200) focused=1 title="Agent Workspace"`.
+    3. `InjectKey`: Keyboard scancode injection returning success (`status=0`).
+    4. `FocusWindow`: Focus window switching returning success (`status=0`).
+    5. Adversarial Check: Gateway spawned without `Rights::INTROSPECT` is denied with `RespDenied` (`status=1`) and logged to `audit::AuditEvent::Denied`.
+  - `scripts/test-integration.ps1`: Added `test-agent-bridge` to the automated regression suite (now 24 test scripts).
+
+**Verification & Real Evidence:**
+- `scripts/test-agent-bridge.ps1`: 4/4 checks PASS (100%).
+- Serial log transcript saved to `_evidence/latest/serial-agent-bridge.log`.
+

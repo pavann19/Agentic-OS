@@ -48,6 +48,7 @@ pub mod installer_demo; // Phase 13 -- real adversarial installer demo against a
 pub mod ipc;
 pub mod manifest; // Phase 13 deliverable 1 -- per-app capability manifest, see its own module doc
 pub mod manifest_demo; // Phase 13 -- real adversarial manifest-enforcement demo, off by default (see Cargo.toml)
+pub mod agent_gateway; // Live Agent Bridge: external LLM/host over COM2
 #[cfg(any(
     feature = "fault_test_null_deref",
     feature = "fault_test_rodata_write",
@@ -618,6 +619,11 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     klog_info!("AGENT_DEMO_SPAWN_START");
     agent::spawn_agent_demo();
     klog_info!("AGENT_DEMO_SPAWN_DONE");
+
+    // Live Agent Bridge: dedicated ring-3 gateway process bridging external LLM/host over COM2
+    klog_info!("AGENT_GATEWAY_PROBE_START");
+    agent_gateway::spawn_if_present();
+    klog_info!("AGENT_GATEWAY_PROBE_DONE");
 
     // Phase 7's text shell -- see shell.rs's module doc. Only active when
     // no graphical reference app owns sole interactive focus on COM1.

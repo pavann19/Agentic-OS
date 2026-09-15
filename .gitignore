@@ -71,6 +71,7 @@ user_rs/file_manager/target/
 user_rs/mouse_driver/target/
 user_rs/net_client/target/
 user_rs/sample_app/target/
+user_rs/agent_gateway/target/
 hyperv/*.vhdx
 hyperv/*.log
 _evidence/latest/

@@ -59,6 +59,8 @@ socket_revoke_demo = []
 # for the same real framebuffer's contents. Off by default; see
 # compositor.rs's own module doc and scripts/test-compositor.ps1.
 compositor_demo = []
+# Live Agent Bridge: adversarial test feature where agent_gateway runs without Rights::INTROSPECT
+agent_gateway_unauthorized = []
 # Phase 13 deliverable 1's own exit criterion: real, adversarial proof
 # that an app is granted exactly its manifest's declared capabilities,
 # nothing ambient -- a grant for an undeclared capability kind is

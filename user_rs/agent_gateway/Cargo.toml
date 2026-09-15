@@ -1,0 +1,19 @@
+[package]
+name = "agent_gateway"
+version = "0.1.0"
+edition = "2021"
+
+# Live Agent Bridge: Freestanding ring-3 gateway process bridging external LLM/host
+# requests over COM2 (0x2F8) to typed in-guest syscalls (SYS_INTROSPECT_WINDOWS,
+# SYS_AGENT_UI_ACTION). Holds COM2 PortIoRange and Rights::INTROSPECT.
+[dependencies]
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

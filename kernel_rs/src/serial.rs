@@ -3,7 +3,8 @@
 //! a redesign, so the existing `_evidence/latest/serial.log` checkpoint
 //! format keeps working unchanged.
 
-const COM1: u16 = 0x3F8;
+pub const COM1: u16 = 0x3F8;
+pub const COM2: u16 = 0x2F8;
 
 #[inline(always)]
 unsafe fn outb(port: u16, value: u8) {
@@ -17,17 +18,32 @@ unsafe fn inb(port: u16) -> u8 {
     value
 }
 
-pub fn init() {
+pub fn init(port: u16) {
     unsafe {
-        outb(COM1 + 1, 0x00);
-        outb(COM1 + 3, 0x80);
-        outb(COM1 + 0, 0x03);
-        outb(COM1 + 1, 0x00);
-        outb(COM1 + 3, 0x03);
-        outb(COM1 + 2, 0xC7);
-        outb(COM1 + 4, 0x0B);
+        outb(port + 1, 0x00);
+        outb(port + 3, 0x80);
+        outb(port + 0, 0x03);
+        outb(port + 1, 0x00);
+        outb(port + 3, 0x03);
+        outb(port + 2, 0xC7);
+        outb(port + 4, 0x0B);
     }
 }
+
+pub fn probe(port: u16) -> bool {
+    unsafe {
+        outb(port + 7, 0x55);
+        if inb(port + 7) != 0x55 {
+            return false;
+        }
+        outb(port + 7, 0xAA);
+        if inb(port + 7) != 0xAA {
+            return false;
+        }
+        true
+    }
+}
+
 
 fn is_ready() -> bool {
     unsafe { (inb(COM1 + 5) & 0x20) != 0 }

@@ -11,7 +11,7 @@ use crate::serial::SerialWriter;
 use core::fmt::Write;
 
 pub fn init() {
-    crate::serial::init();
+    crate::serial::init(crate::serial::COM1);
     crate::serial::write_str("KLOG_INIT\n");
 }
 
