@@ -384,6 +384,40 @@ Two binding rules: the list may only be *extended* by a human editing this ADR, 
 
 ---
 
+### ADR-011 (Proposed, not yet gated): A Semantic OS Core above the capability substrate
+
+**Status:** Proposed, deliberately not signed off yet. Captured now so the direction is on record precisely, but explicitly sequenced *after* Phase 15's real-hardware validation, self-hosting, and soak-test work — not alongside it.
+
+**Context:** Phase 12 delivered the first real instance of a typed, capability-scoped interface for one subsystem — windows, via the introspection/action API. That's a real improvement over pixel-scraping, but it's still just one subsystem's own shape. The project has no first-class representation of *tasks*, *jobs*, *events*, or *causal provenance* distinct from raw processes and individual capability grants: `audit.rs`'s `AuditEvent` enum records individual grants, derives, revokes, and denials per capability invocation, but nothing groups a related sequence of them under one logical unit of agent work; `compositor.rs`, `file_service.rs`, and `net_service.rs` each define their own bespoke IPC request/reply shapes, with no shared object/query/action/event vocabulary across them. §1.3's permanent rule — intelligence stays entirely outside the kernel, the OS provides a typed surface for an external agent to act through — raises the natural next question: should that typed-surface idea become a *uniform, system-wide* contract, or should each subsystem go on defining its own shape indefinitely?
+
+#### Options Considered
+
+**Option A: Leave it subsystem-by-subsystem, as today.**
+Pros: zero new work, zero new risk to what already passes the full regression suite. Cons: the fragmentation gets more expensive to unify the more subsystems exist — every future phase (self-hosting, more reference apps, eventual multi-machine agent coordination) adds another bespoke protocol instead of reusing one. An agent driving this OS long-term has to learn N different IPC shapes instead of one.
+
+**Option B: A big-bang rewrite — design the full Semantic OS Core (objects, tasks, jobs, events, provenance) up front and retrofit every existing subsystem to it before doing anything else.**
+Pros: architecturally cleanest end state. Cons: no prior ADR in this roadmap has ever made a change this size in one step — every one scoped its adoption to what the *next* phase actually needed and left the rest for later gates. A retrofit this large, attempted before Phase 15's real-hardware/self-hosting work proves the current architecture under real conditions, risks discovering real-hardware issues that reshape the very foundation the new layer was just built on top of — rework, not progress.
+
+**Option C: Adopt the direction, but as an explicit, staged, post-Phase-15 phase (tentatively "Phase 16"), starting with the narrowest real slice — a shared object/query/action/event vocabulary applied to ONE existing subsystem, chosen by evidence of where the fragmentation cost is already highest — rather than every subsystem at once, the same incremental, evidence-gated discipline every phase in this roadmap has already used.**
+Pros: captures the real direction without betting the project's current stability on an unproven foundation; matches this document's own review discipline (§8) for any change this consequential; gives a concrete, falsifiable first step instead of an open-ended redesign. Cons: slower to reach the full vision than Option B; requires real discipline not to let "Phase 16" quietly start before Phase 15 actually closes.
+
+#### Decision
+
+**Option C**, gated on two things happening first, in order:
+
+1. **Phase 15 reaches its own real exit criteria** — self-hosted build reproducibility, the multi-day soak test, and a real fresh-install-to-usable-desktop transcript on physical Tier 2/3 hardware. This ADR does not get signed off before that, the same way ADR-007/008 required revisiting an earlier signed-off constraint with the same weight as the original decision, not as a routine phase-start.
+2. **A resolved answer to where the Semantic OS Core actually lives** — kernel space or a privileged ring-3 service. The microkernel discipline of ADR-001 exists because past decisions deliberately minimized kernel-resident code; a system-wide semantic layer is significant enough that "kernel or service" must be its own explicit sub-decision, argued with the same Options-Considered rigor ADR-005 used for "the audit log is a kernel primitive, not a service" — not defaulted into either shape by accident.
+
+The eventual Phase 16 scope, once gated: a stable primitive set (object, query, action, state, event, capability, task, result) applied uniformly in place of each subsystem's own bespoke IPC shape; first-class Task/Job objects distinct from Process, so a single logical piece of agent-initiated work spanning multiple processes and services can be queried, observed, and audited as one thing; the capability lifecycle (already real for grant/derive/revoke, proven in Phase 12's delegation work) completed with explicit expiration and cross-agent delegation chains; an event/subscription model so an agent reacts to state changes instead of polling; and causal provenance extending `audit.rs` so a state change can be traced back through the task/agent/action/capability chain that produced it. What still needs real scoping before any of this becomes a task, and is explicitly not decided by this ADR: which subsystem becomes the first real slice (chosen by measuring actual protocol overlap, not guessing), the kernel-vs-service placement sub-decision above, and whether Task/Job objects need their own `KernelObjectKind` variant or a user-space registry service instead.
+
+#### Consequences
+
+- **Easier (once adopted):** every future subsystem gets a real, reusable contract instead of inventing its own; the audit/provenance gap closes; an external agent's integration surface stops growing linearly with the number of subsystems.
+- **Harder:** real, substantial design and migration work across already-shipped subsystems; a second major kernel-shape decision (alongside ADR-001) that needs the same rigor, not a shortcut.
+- **Revisit:** this ADR itself should be revisited — not just its eventual implementation — if Phase 15's real-hardware work surfaces anything that changes the capability/IPC substrate it would be built on. That's the whole point of gating on Phase 15 first.
+
+---
+
 ## 3. Current State — Grounded Assessment
 
 Every claim below is traceable to a file in this repository. This section exists so that phase planning starts from what is true rather than what was intended.
