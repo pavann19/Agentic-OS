@@ -1024,10 +1024,12 @@ There is no parallel track that skips ahead. Phase 6 in particular cannot be pul
 
 ## 8. Review Discipline
 
-The acceptance and rejection rules already in `plans_to_implement/antigravity_prompts/13_ORCHESTRATOR_ACCEPTANCE_CHECKLIST.md` remain in force and apply to every phase gate here. Three additions specific to this roadmap:
+Every phase gate in this roadmap is reviewed against the same standing rules, not just the three below. A change is rejected outright if: the build fails; QEMU boot evidence is missing; required serial checkpoints are absent or out of order; a stage is reported done without real command output backing it; the implementation depends on host-OS behavior at runtime rather than the target's own; memory-safety issues are hidden behind an unrelated change; or a stage quietly expands into a later milestone's scope without evidence for the extra ground covered. A stage is accepted only when its diff is scoped to what was assigned, the required commands actually pass (or a failure is explicitly acknowledged and accepted rather than glossed over), evidence files are current — not stale logs from an earlier run — and the next milestone can start without guessing what changed.
+
+Three additions specific to this roadmap:
 
 - **Reject any change that reintroduces ambient authority.** A syscall that succeeds because of who the caller is rather than what capability it holds violates ADR-003, regardless of how convenient it is.
 - **Reject any driver code in ring 0** after Phase 3, other than the interrupt dispatch stub itself.
-- **Reject any agent-generated driver execution** — in QEMU or on hardware — before ADR-006 IOMMU support is complete and its containment has been demonstrated.
+- **Reject any automatically-generated driver execution** — in QEMU or on hardware — before ADR-006 IOMMU support is complete and its containment has been demonstrated.
 
 A phase gate passes on demonstrated evidence, not on a report that the work is done.
