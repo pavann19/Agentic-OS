@@ -1901,3 +1901,59 @@ All requirements and verification criteria implemented strictly to specification
 - `scripts/test-agent-bridge.ps1`: 4/4 checks PASS (100%).
 - Serial log transcript saved to `_evidence/latest/serial-agent-bridge.log`.
 
+---
+
+## Agent-Driven Internet Download — HTTP Fetch to ext2 Multi-Block Persistence (DONE)
+
+Source: `docs/TASK_AGENT_DOWNLOAD.md`. Completed 2026-09-15.
+Wired together `net_client`'s real HTTP GET and `file_service`'s real ext2 write path (syscalls 24/25) into a unified agent-driven internet download capability, with multi-block streaming, byte-for-byte cryptographic SHA-256 verification on disk readback, and adversarial capability enforcement.
+
+- [x] **Deliverable 1: Multi-Block Direct ext2 Inode & Storage Support**
+  - `kernel_common/src/ext2.rs`: Added `write_file_inode_blocks(sb, inode_table, inode_index, file_size, num_blocks)` and `read_file_inode_size`. Maps up to 12 direct ext2 blocks (`i_block[0..12]`, up to 12KB) and calculates correct sector count (`i_blocks = num_blocks * 2` sectors of 512 bytes).
+  - `host_tests/src/lib.rs`: Added unit test `multi_block_file_inode_and_size`. 124/124 host tests PASS (`cargo test`).
+
+- [x] **Deliverable 2: Kernel Multi-Block File & Network Service Expansion**
+  - `kernel_rs/src/file_service.rs`: Expanded `MAX_FILE_BYTES` from 1024 to 4096 bytes. Added `offset: usize` to request slots. Extended `SYS_FILE_SERVICE_WRITE` (syscall 24) and `SYS_FILE_SERVICE_GET_WRITE_DATA` (syscall 25) with backward-compatible buffer inspection (12-byte vs 16-byte `FileWriteRequest`), packing offset into high 32 bits: `((offset as u64) << 32) | copy_len`.
+  - `kernel_rs/src/net_service.rs`: Expanded `MAX_NET_BYTES` from 1024 to 4096 bytes.
+  - `user_rs/agentic_sdk/src/file_service.rs`: Updated `FileWriteRequest` struct with `offset: u32`, added `write_file_at(inode, offset, data)`, and maintained `write_file(inode, data)` delegating to offset 0.
+
+- [x] **Deliverable 3: Virtio-Blk & NetStack Driver Multi-Block Processing**
+  - `user_rs/virtio_blk_driver/src/main.rs`: Multi-block chunked disk write path. Unpacks `offset` and `bytes_len` from `syscall_ret(25, ...)` and writes data chunk-by-chunk across consecutive ext2 blocks starting at `ext2::FILE_DATA_BLOCK`. Updates the ext2 inode table via `write_file_inode_blocks`. Updated read path to read all spanned blocks up to file size into 4096-byte reply buffer. Updated `linker.ld` to place `.got*` into `.rodata` to resolve static symbol GOT relocations cleanly.
+  - `user_rs/netstack_driver/src/main.rs`: Expanded serving loop `resp_mu` from 512 to 4096 bytes to accommodate full multi-block HTTP payloads.
+
+- [x] **Deliverable 4: Ring-3 Agent Download Client (`user_rs/net_client`)**
+  - Updated `NetClientInfo` to receive `file_cap`, `save_to_disk`, and `target_inode`.
+  - Implemented `download_and_save(info, history_ptr)`:
+    1. Sends HTTP GET request via `net_service::request_fetch(info.socket_cap)`.
+    2. Polls and receives multi-block HTTP response via `net_service::poll_reply`.
+    3. Locates HTTP body past CRLF delimiters and computes in-memory SHA-256 hash using `kernel_common::crypto::Sha256::digest(body)`.
+    4. Writes body to disk via `file_service::write_file_at(info.file_cap, 0, body)` and polls for completion.
+    5. Reads file back from ext2 disk via `file_service::request_file(info.file_cap)`.
+    6. Computes readback SHA-256 hash and validates byte-for-byte equality using `kernel_common::crypto::constant_time_eq`.
+    7. Emits verification markers to COM1 and renders status lines to GUI surface.
+
+- [x] **Deliverable 5: Capability Enforcement & Adversarial Verification**
+  - Manifest and installer grant both `Socket` (`Rights::SEND`) and `FileObject` (`Rights::WRITE.union(Rights::READ)`) capabilities.
+  - Added feature `agent_download_unauthorized` to `kernel_rs/Cargo.toml`. When enabled, `FileObject` capability is omitted from manifest and spawner passes ungranted capability index (`file_cap = 99`).
+  - Kernel capability validation in `kernel_rs/src/file_service.rs` rejects the call, records an `audit::AuditEvent::Denied { cap_id: 99 }`, and prevents disk writes.
+
+- [x] **Deliverable 6: Automated Integration Test & Regression Wiring**
+  - Added `scripts/test-agent-download.ps1`:
+    - Formats fresh 8MB disk image.
+    - Launches QEMU with both `virtio-blk-pci` and `e1000`.
+    - Validates 18/18 markers in serial log including independent host-side regex validation of identical 64-char SHA-256 hashes (`ff67a9d764d6a2367a187734e697f6a53217db9a21c101d410a113ca871a299d`).
+    - Executes adversarial test verifying kernel write denial and capability audit logging.
+  - Added `test-agent-download` entry into `scripts/test-integration.ps1`.
+  - Zero regressions: pre-existing `scripts/test-net-client.ps1` passes 100%.
+
+**Explicit Scope Boundaries (v1):**
+- Single file written to fixed root location (`FILE_INODE = 11`). Hierarchical directory-path support is explicitly deferred to `docs/TASK_SELF_HOSTING_GROUNDWORK.md` Milestone 2 to prevent duplication.
+- HTTP only (matches `net_client`'s existing real capability); TLS/HTTPS is separate follow-up.
+- No resumable/partial downloads; failed transfers result in explicit failure status.
+
+**Verification & Real Evidence:**
+- `scripts/test-agent-download.ps1`: ALL CHECKS PASSED (100%).
+- Serial log transcripts saved to `_evidence/latest/serial-agent-download.log` and `_evidence/latest/serial-agent-download-unauth.log`.
+- Host unit tests: 124/124 PASS (`cargo test` in `host_tests/`).
+
+

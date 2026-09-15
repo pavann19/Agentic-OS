@@ -24,6 +24,9 @@ struct NetClientInfo {
     input_cap: u32,
     socket_cap: u32,
     ready_token: u64,
+    file_cap: u32,
+    save_to_disk: u32,
+    target_inode: u32,
 }
 
 pub fn spawn(params: crate::compositor::FbParams) {
@@ -56,10 +59,51 @@ extern "C" fn net_client_thread_at() {
 
 fn spawn_net_client_inner(x: i32, y: i32) {
     unsafe {
+        #[cfg(not(feature = "agent_download_unauthorized"))]
+        let manifest = Manifest::NONE
+            .allow(CapKind::Surface)
+            .allow(CapKind::Socket)
+            .allow(CapKind::PortIoRange)
+            .allow(CapKind::FileObject);
+        #[cfg(feature = "agent_download_unauthorized")]
         let manifest = Manifest::NONE
             .allow(CapKind::Surface)
             .allow(CapKind::Socket)
             .allow(CapKind::PortIoRange);
+
+        #[cfg(not(feature = "agent_download_unauthorized"))]
+        let requests = [
+            CapRequest {
+                kind: CapKind::Surface,
+                object_kind: KernelObjectKind::Surface { x: 0, y: 0, width: SURFACE_WIDTH, height: SURFACE_HEIGHT },
+                rights: Rights::MAP,
+                label: "net_client_surface",
+            },
+            CapRequest {
+                kind: CapKind::Socket,
+                object_kind: KernelObjectKind::Socket {
+                    protocol: SocketProtocol::Tcp,
+                    local_port: 53000,
+                    remote_ip: [10, 0, 2, 2],
+                    remote_port: 80,
+                },
+                rights: Rights::SEND,
+                label: "net_client_socket",
+            },
+            CapRequest {
+                kind: CapKind::PortIoRange,
+                object_kind: KernelObjectKind::PortIoRange { base: 0x3F8, count: 8 },
+                rights: Rights::PORT_IO,
+                label: "net_client_com1",
+            },
+            CapRequest {
+                kind: CapKind::FileObject,
+                object_kind: KernelObjectKind::FileObject { inode: 11 },
+                rights: Rights::READ.union(Rights::WRITE),
+                label: "net_client_file",
+            },
+        ];
+        #[cfg(feature = "agent_download_unauthorized")]
         let requests = [
             CapRequest {
                 kind: CapKind::Surface,
@@ -85,6 +129,7 @@ fn spawn_net_client_inner(x: i32, y: i32) {
                 label: "net_client_com1",
             },
         ];
+
         let Some((entry, space)) = installer::install_into_current_thread(NET_CLIENT_ELF, STACK_VADDR, manifest, &requests) else {
             klog_info!("NET_CLIENT_INSTALL_FAILED");
             return;
@@ -109,6 +154,11 @@ fn spawn_net_client_inner(x: i32, y: i32) {
         let input_cap = crate::input_routing::register_window_input(surface_object);
         crate::window_manager::register(surface_object, x, y, SURFACE_WIDTH, SURFACE_HEIGHT, b"Net Client");
 
+        #[cfg(not(feature = "agent_download_unauthorized"))]
+        let file_cap = 2;
+        #[cfg(feature = "agent_download_unauthorized")]
+        let file_cap = 99;
+
         let info_phys = pmm::alloc_page();
         let info_ptr = pmm::p2v_pub(info_phys) as *mut NetClientInfo;
         core::ptr::write(info_ptr, NetClientInfo {
@@ -116,6 +166,9 @@ fn spawn_net_client_inner(x: i32, y: i32) {
             input_cap,
             socket_cap: 1, // Cap 1 is the granted Socket capability
             ready_token: READY_TOKEN,
+            file_cap,
+            save_to_disk: 1,
+            target_inode: 11,
         });
         vmm::map_page_in(space, INFO_VADDR, info_phys, vmm::PAGE_USER | vmm::PAGE_NO_EXECUTE | vmm::PAGE_WRITABLE);
 

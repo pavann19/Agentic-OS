@@ -34,13 +34,14 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 /// 36 bytes) and for a real ext2 block (1024 bytes) besides -- a
 /// request naming a longer file is truncated, never faked with more
 /// bytes than the server actually supplied.
-pub const MAX_FILE_BYTES: usize = 1024;
+pub const MAX_FILE_BYTES: usize = 4096;
 
 struct Request {
     #[allow(dead_code)]
     inode: u32,
     ready: bool,
     len: usize,
+    offset: usize,
     data: [u8; MAX_FILE_BYTES],
     is_write: bool,
 }
@@ -122,6 +123,7 @@ pub fn request_file(arg0: u32) -> u64 {
                 inode,
                 ready: false,
                 len: 0,
+                offset: 0,
                 data: [0u8; MAX_FILE_BYTES],
                 is_write: false,
             },
@@ -141,7 +143,7 @@ pub fn request_file(arg0: u32) -> u64 {
 /// Real SYS_FILE_SERVICE_WRITE handler: verifies caller holds a valid
 /// FileObject capability with Rights::WRITE for `arg0`. Copies data from
 /// user space into the request buffer, queues it, and notifies the server.
-pub fn write_file(pml4: u64, arg0: u32, data_vaddr: u64, len: u32) -> u64 {
+pub fn write_file(pml4: u64, arg0: u32, data_vaddr: u64, len: u32, offset: u32) -> u64 {
     let inode = if let Some(resolved_inode) = thread::resolve_file_capability(arg0, Rights::WRITE) {
         resolved_inode
     } else if thread::current_has_file_capability(arg0, Rights::WRITE) {
@@ -174,6 +176,7 @@ pub fn write_file(pml4: u64, arg0: u32, data_vaddr: u64, len: u32) -> u64 {
                 inode,
                 ready: false,
                 len: real_len,
+                offset: offset as usize,
                 data: buf,
                 is_write: true,
             },
@@ -208,7 +211,7 @@ pub fn server_get_write_data(pml4: u64, request_id: u64, out_vaddr: u64, max_len
             return u64::MAX;
         }
         vmm::write_user_bytes(pml4, out_vaddr, &slot.request.data[..copy_len]);
-        copy_len as u64
+        ((slot.request.offset as u64) << 32) | (copy_len as u64)
     })
 }
 
@@ -308,6 +311,7 @@ struct FilePollRequest {
 pub struct FileWriteRequest {
     pub data_vaddr: u64,
     pub len: u32,
+    pub offset: u32,
 }
 
 /// SYS_FILE_SERVICE_REPLY dispatch glue: `request_vaddr` is a vaddr in
@@ -348,16 +352,22 @@ pub fn syscall_poll(pml4: u64, request_id: u64, request_vaddr: u64) -> u64 {
 /// the CALLING (requesting) thread's own mapped memory holding a real
 /// `FileWriteRequest`.
 pub fn syscall_write(pml4: u64, inode: u32, request_vaddr: u64) -> u64 {
-    let req_size = core::mem::size_of::<FileWriteRequest>() as u64;
     unsafe {
-        if !vmm::validate_user_buffer_readable(pml4, request_vaddr, req_size) {
+        if vmm::validate_user_buffer_readable(pml4, request_vaddr, 16) {
+            let mut bytes = [0u8; 16];
+            vmm::read_user_bytes(pml4, request_vaddr, &mut bytes);
+            let req: FileWriteRequest = core::ptr::read_unaligned(bytes.as_ptr() as *const FileWriteRequest);
+            write_file(pml4, inode, req.data_vaddr, req.len, req.offset)
+        } else if vmm::validate_user_buffer_readable(pml4, request_vaddr, 12) {
+            let mut bytes = [0u8; 12];
+            vmm::read_user_bytes(pml4, request_vaddr, &mut bytes);
+            let data_vaddr = u64::from_ne_bytes(bytes[0..8].try_into().unwrap());
+            let len = u32::from_ne_bytes(bytes[8..12].try_into().unwrap());
+            write_file(pml4, inode, data_vaddr, len, 0)
+        } else {
             klog_info!("FILE_SERVICE_WRITE_BAD_REQUEST_PTR");
-            return 0;
+            0
         }
-        let mut bytes = [0u8; core::mem::size_of::<FileWriteRequest>()];
-        vmm::read_user_bytes(pml4, request_vaddr, &mut bytes);
-        let req: FileWriteRequest = core::ptr::read_unaligned(bytes.as_ptr() as *const FileWriteRequest);
-        write_file(pml4, inode, req.data_vaddr, req.len)
     }
 }
 

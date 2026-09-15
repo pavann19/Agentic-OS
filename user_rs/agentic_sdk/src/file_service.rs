@@ -42,16 +42,22 @@ pub unsafe fn poll_reply(request_id: u64, out_buf: &mut [u8]) -> u64 {
 struct FileWriteRequest {
     data_vaddr: u64,
     len: u32,
+    offset: u32,
 }
 
-/// Asks the real file-serving process to write `data` into `inode`. Returns a
-/// real request id to poll for via `poll_reply`, or `0` if no server
-/// has registered or data is invalid.
-pub unsafe fn write_file(inode: u32, data: &[u8]) -> u64 {
+/// Asks the real file-serving process to write `data` into `inode` at `offset`.
+/// Returns a real request id to poll for via `poll_reply`, or `0` on failure/denial.
+pub unsafe fn write_file_at(inode: u32, offset: u32, data: &[u8]) -> u64 {
     let req = FileWriteRequest {
         data_vaddr: data.as_ptr() as u64,
         len: data.len() as u32,
+        offset,
     };
     let req_vaddr = &req as *const FileWriteRequest as u64;
     syscall2(24, inode as u64, req_vaddr)
+}
+
+/// Asks the real file-serving process to write `data` into `inode` at offset 0.
+pub unsafe fn write_file(inode: u32, data: &[u8]) -> u64 {
+    write_file_at(inode, 0, data)
 }

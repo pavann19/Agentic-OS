@@ -9,7 +9,7 @@ use crate::capability::{self, CapId, CapabilityTable, KernelObjectKind, ObjectId
 use crate::{audit, ipc, klog_info, thread, vmm};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-pub const MAX_NET_BYTES: usize = 1024;
+pub const MAX_NET_BYTES: usize = 4096;
 
 struct Request {
     ready: bool,

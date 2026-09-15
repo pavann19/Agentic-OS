@@ -663,20 +663,43 @@ pub extern "C" fn _start() -> ! {
                 write_dec_u64(inode as u64);
                 com1_write_str("\n");
 
-                let mut write_buf = zeroed_block!();
-                let bytes_len = syscall_ret(25, request_id, write_buf.as_mut_ptr() as u64); // SYS_FILE_SERVICE_GET_WRITE_DATA
-                if bytes_len != u64::MAX && bytes_len > 0 {
+                let mut write_buf_mu = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
+                let write_buf: &mut [u8; 4096] = &mut *write_buf_mu.as_mut_ptr();
+
+                let ret = syscall_ret(25, request_id, write_buf.as_mut_ptr() as u64); // SYS_FILE_SERVICE_GET_WRITE_DATA
+                if ret != u64::MAX && (ret as u32) > 0 {
+                    let offset = (ret >> 32) as usize;
+                    let bytes_len = (ret as u32) as usize;
                     com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_WRITE_DATA_FETCHED len=");
-                    write_dec_u64(bytes_len);
+                    write_dec_u64(bytes_len as u64);
+                    com1_write_str(" offset=");
+                    write_dec_u64(offset as u64);
                     com1_write_str("\n");
 
-                    // 1. Write the data block to disk
-                    ext2_write_block(common, notify_base, dma, dma_phys, ext2::FILE_DATA_BLOCK, &write_buf);
+                    // 1. Write the data block(s) to disk
+                    let mut written = 0usize;
+                    while written < bytes_len {
+                        let cur_offset = offset + written;
+                        let block_idx = (cur_offset / ext2::BLOCK_SIZE) as u32;
+                        let block_offset = cur_offset % ext2::BLOCK_SIZE;
+                        let chunk_len = (ext2::BLOCK_SIZE - block_offset).min(bytes_len - written);
 
-                    // 2. Read inode table block 1, update file inode size, write back
+                        let mut disk_block = zeroed_block!();
+                        if block_offset != 0 || chunk_len < ext2::BLOCK_SIZE {
+                            ext2_read_block(common, notify_base, dma, dma_phys, ext2::FILE_DATA_BLOCK + block_idx, &mut disk_block);
+                        }
+                        disk_block[block_offset..block_offset + chunk_len].copy_from_slice(&write_buf[written..written + chunk_len]);
+                        ext2_write_block(common, notify_base, dma, dma_phys, ext2::FILE_DATA_BLOCK + block_idx, &disk_block);
+                        written += chunk_len;
+                    }
+
+                    // 2. Read inode table block 1, update file inode size & block pointers, write back
                     let mut inode_table1 = zeroed_block!();
                     ext2_read_block(common, notify_base, dma, dma_phys, ext2::INODE_TABLE_START_BLOCK + 1, &mut inode_table1);
-                    ext2::write_file_inode(&mut inode_table1, bytes_len as u32);
+                    let existing_size = ext2::read_file_inode_size(&inode_table1);
+                    let new_size = (offset + bytes_len).max(existing_size) as u32;
+                    let num_blocks = ((new_size as usize + ext2::BLOCK_SIZE - 1) / ext2::BLOCK_SIZE) as u32;
+                    ext2::write_file_inode_blocks(&mut inode_table1, new_size, ext2::FILE_DATA_BLOCK, num_blocks);
                     ext2_write_block(common, notify_base, dma, dma_phys, ext2::INODE_TABLE_START_BLOCK + 1, &inode_table1);
 
                     com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_WRITE_COMMITTED\n");
@@ -700,15 +723,24 @@ pub extern "C" fn _start() -> ! {
 
                 let mut inode_table1 = zeroed_block!();
                 ext2_read_block(common, notify_base, dma, dma_phys, ext2::INODE_TABLE_START_BLOCK + 1, &mut inode_table1);
-                let mut file_data = zeroed_block!();
-                ext2_read_block(common, notify_base, dma, dma_phys, ext2::FILE_DATA_BLOCK, &mut file_data);
-                let mut out = zeroed_block!();
-                let n = ext2::read_file_data(&inode_table1, &file_data, &mut out);
+                let file_size = ext2::read_file_inode_size(&inode_table1);
+                let read_len = file_size.min(4096);
+                let mut out_mu = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
+                let out: &mut [u8; 4096] = &mut *out_mu.as_mut_ptr();
+
+                let num_blocks = (read_len + ext2::BLOCK_SIZE - 1) / ext2::BLOCK_SIZE;
+                for blk_idx in 0..num_blocks {
+                    let mut blk_buf = zeroed_block!();
+                    ext2_read_block(common, notify_base, dma, dma_phys, ext2::FILE_DATA_BLOCK + blk_idx as u32, &mut blk_buf);
+                    let blk_start = blk_idx * ext2::BLOCK_SIZE;
+                    let blk_len = ext2::BLOCK_SIZE.min(read_len - blk_start);
+                    out[blk_start..blk_start + blk_len].copy_from_slice(&blk_buf[..blk_len]);
+                }
 
                 let reply = FileReplyRequest {
                     request_id,
                     data_vaddr: out.as_ptr() as u64,
-                    len: n as u32,
+                    len: read_len as u32,
                 };
                 let reply_vaddr = &reply as *const FileReplyRequest as u64;
                 let reply_status = syscall_ret(18, 0, reply_vaddr); // SYS_FILE_SERVICE_REPLY

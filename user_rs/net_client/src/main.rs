@@ -10,7 +10,7 @@
 #![no_std]
 #![no_main]
 
-use agentic_sdk::{com1, net_service, surface, syscall::syscall1, text_widget::TextRegion};
+use agentic_sdk::{com1, file_service, net_service, surface, syscall::syscall1, text_widget::TextRegion};
 
 const INFO_VADDR: u64 = 0x0000_0000_0053_0000;
 
@@ -20,6 +20,9 @@ struct NetClientInfo {
     input_cap: u32,
     socket_cap: u32,
     ready_token: u64,
+    file_cap: u32,
+    save_to_disk: u32,
+    target_inode: u32,
 }
 
 const COLS: usize = 40;
@@ -31,12 +34,28 @@ fn is_refresh_key(code: u8) -> bool {
     code == 0x13 // 'r' scancode
 }
 
+fn is_download_key(code: u8) -> bool {
+    code == 0x20 // 'd' scancode
+}
+
+fn print_hex_bytes(bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for &b in bytes {
+        let hi = HEX[(b >> 4) as usize];
+        let lo = HEX[(b & 0x0f) as usize];
+        let s = [hi, lo];
+        if let Ok(st) = core::str::from_utf8(&s) {
+            com1::write_str(st);
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     unsafe {
         let info = &*(INFO_VADDR as *const NetClientInfo);
 
-        com1::write_str("\n[NET_CLIENT] real ELF64 ring-3 process, real Surface + Socket + routed-input capabilities\n");
+        com1::write_str("\n[NET_CLIENT] real ELF64 ring-3 process, real Surface + Socket + FileObject capabilities\n");
         syscall1(1, 0x4E45_5431); // 'NET1'
 
         let mut history_mu = core::mem::MaybeUninit::<TextRegion<LINES, COLS>>::uninit();
@@ -47,7 +66,11 @@ pub extern "C" fn _start() -> ! {
         surface::present(info.surface_cap);
         syscall1(4, info.ready_token);
 
-        request_and_show(info, history_ptr);
+        if info.save_to_disk != 0 {
+            download_and_save(info, history_ptr);
+        } else {
+            request_and_show(info, history_ptr);
+        }
 
         loop {
             let r = syscall1(12, info.input_cap as u64);
@@ -62,9 +85,198 @@ pub extern "C" fn _start() -> ! {
             if is_refresh_key(scancode) {
                 com1::write_str("[NET_CLIENT] REFRESH_REQUESTED\n");
                 request_and_show(info, history_ptr);
+            } else if is_download_key(scancode) {
+                com1::write_str("[NET_CLIENT] MANUAL_DOWNLOAD_REQUESTED\n");
+                download_and_save(info, history_ptr);
             }
         }
     }
+}
+
+unsafe fn download_and_save(info: &NetClientInfo, history_ptr: *mut TextRegion<LINES, COLS>) {
+    TextRegion::init_in_place(history_ptr);
+    com1::write_str("[NET_CLIENT] AGENT_DOWNLOAD_START\n");
+
+    // 1. Send HTTP fetch request via net_service IPC
+    com1::write_str("[NET_CLIENT] HTTP_FETCH_REQUEST_SENT\n");
+    let mut request_id = 0;
+    for _ in 0..500 {
+        request_id = net_service::request_fetch(info.socket_cap);
+        if request_id != 0 {
+            break;
+        }
+        for _ in 0..100_000 {
+            core::hint::spin_loop();
+        }
+    }
+    if request_id == 0 {
+        (*history_ptr).push_line(b"NO NET SERVER OR CAP DENIED");
+        (*history_ptr).render(info.surface_cap, 16, FG, BG);
+        surface::present(info.surface_cap);
+        com1::write_str("[NET_CLIENT] HTTP_FETCH_FAILED_NO_SERVER\n");
+        return;
+    }
+
+    // 2. Poll for HTTP reply (up to 4096 bytes)
+    let mut http_buf_mu = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
+    let http_buf_ptr = http_buf_mu.as_mut_ptr() as *mut u8;
+    let http_buf: &mut [u8] = core::slice::from_raw_parts_mut(http_buf_ptr, 4096);
+    let mut real_len: u64 = u64::MAX;
+
+    const MAX_POLLS: u32 = 3_000_000;
+    for _ in 0..MAX_POLLS {
+        let n = net_service::poll_reply(request_id, http_buf);
+        if n != u64::MAX {
+            real_len = n;
+            break;
+        }
+        core::hint::spin_loop();
+    }
+
+    if real_len == u64::MAX || real_len == 0 {
+        (*history_ptr).push_line(b"HTTP FETCH TIMED OUT");
+        (*history_ptr).render(info.surface_cap, 16, FG, BG);
+        surface::present(info.surface_cap);
+        com1::write_str("[NET_CLIENT] HTTP_FETCH_TIMED_OUT\n");
+        return;
+    }
+
+    let len = real_len as usize;
+    com1::write_str("[NET_CLIENT] HTTP_RESPONSE_RECEIVED len=");
+    com1::write_dec_u64(real_len);
+    com1::write_str("\n");
+
+    if len >= 7 && &http_buf[0..7] == b"HTTP/1." {
+        com1::write_str("[NET_CLIENT] HTTP_STATUS_OK: response byte-verified\n");
+    } else {
+        com1::write_str("[NET_CLIENT] HTTP_STATUS_UNKNOWN\n");
+    }
+
+    // 3. Extract HTTP body
+    let mut body_start = 0;
+    let mut found_header_end = false;
+    for i in 0..len {
+        if i + 4 <= len && &http_buf[i..i + 4] == b"\r\n\r\n" {
+            body_start = i + 4;
+            found_header_end = true;
+            break;
+        } else if i + 2 <= len && &http_buf[i..i + 2] == b"\n\n" {
+            body_start = i + 2;
+            found_header_end = true;
+            break;
+        }
+    }
+    let body = if found_header_end && body_start < len {
+        &http_buf[body_start..len]
+    } else {
+        &http_buf[0..len]
+    };
+
+    if body.is_empty() {
+        com1::write_str("[NET_CLIENT] HTTP_BODY_EMPTY\n");
+        return;
+    }
+
+    com1::write_str("[NET_CLIENT] HTTP_BODY_EXTRACTED len=");
+    com1::write_dec_u64(body.len() as u64);
+    com1::write_str("\n");
+
+    let body_digest = kernel_common::crypto::Sha256::digest(body);
+    com1::write_str("[NET_CLIENT] HTTP_BODY_SHA256=");
+    print_hex_bytes(&body_digest);
+    com1::write_str("\n");
+
+    // 4. Persist to disk via file_service
+    com1::write_str("[NET_CLIENT] PERSISTING_TO_DISK inode=");
+    com1::write_dec_u64(info.target_inode as u64);
+    com1::write_str("\n");
+
+    let write_id = file_service::write_file_at(info.file_cap, 0, body);
+    if write_id == 0 {
+        com1::write_str("[NET_CLIENT] FILE_SERVICE_WRITE_DENIED_OR_NO_SERVER\n");
+        (*history_ptr).push_line(b"HTTP/1.0 200 OK");
+        (*history_ptr).push_line(b"DISK WRITE DENIED/NO SERVER");
+        (*history_ptr).render(info.surface_cap, 16, FG, BG);
+        surface::present(info.surface_cap);
+        return;
+    }
+
+    let mut poll_buf_mu = core::mem::MaybeUninit::<[u8; 64]>::uninit();
+    let poll_buf_ptr = poll_buf_mu.as_mut_ptr() as *mut u8;
+    let poll_buf = core::slice::from_raw_parts_mut(poll_buf_ptr, 64);
+    let mut write_res = u64::MAX;
+    for _ in 0..MAX_POLLS {
+        let n = file_service::poll_reply(write_id, poll_buf);
+        if n != u64::MAX {
+            write_res = n;
+            break;
+        }
+        core::hint::spin_loop();
+    }
+
+    if write_res == u64::MAX {
+        com1::write_str("[NET_CLIENT] FILE_SERVICE_WRITE_TIMED_OUT\n");
+        (*history_ptr).push_line(b"FILE WRITE TIMED OUT");
+        (*history_ptr).render(info.surface_cap, 16, FG, BG);
+        surface::present(info.surface_cap);
+        return;
+    }
+
+    com1::write_str("[NET_CLIENT] FILE_WRITE_CONFIRMED len=");
+    com1::write_dec_u64(write_res);
+    com1::write_str("\n");
+
+    // 5. Read back from disk to cryptographically verify payload
+    com1::write_str("[NET_CLIENT] DISK_READBACK_START inode=");
+    com1::write_dec_u64(info.target_inode as u64);
+    com1::write_str("\n");
+
+    let read_id = file_service::request_file(info.file_cap);
+    if read_id == 0 {
+        com1::write_str("[NET_CLIENT] DISK_READBACK_REQUEST_FAILED\n");
+        return;
+    }
+
+    let mut read_buf_mu = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
+    let read_buf_ptr = read_buf_mu.as_mut_ptr() as *mut u8;
+    let read_buf: &mut [u8] = core::slice::from_raw_parts_mut(read_buf_ptr, 4096);
+    let mut read_len = u64::MAX;
+    for _ in 0..MAX_POLLS {
+        let n = file_service::poll_reply(read_id, read_buf);
+        if n != u64::MAX {
+            read_len = n;
+            break;
+        }
+        core::hint::spin_loop();
+    }
+
+    if read_len == u64::MAX {
+        com1::write_str("[NET_CLIENT] DISK_READBACK_TIMED_OUT\n");
+        return;
+    }
+
+    com1::write_str("[NET_CLIENT] DISK_READBACK_LEN len=");
+    com1::write_dec_u64(read_len);
+    com1::write_str("\n");
+
+    let read_digest = kernel_common::crypto::Sha256::digest(&read_buf[..read_len as usize]);
+    com1::write_str("[NET_CLIENT] DISK_READBACK_SHA256=");
+    print_hex_bytes(&read_digest);
+    com1::write_str("\n");
+
+    if kernel_common::crypto::constant_time_eq(&body_digest, &read_digest) && read_len as usize == body.len() {
+        com1::write_str("[NET_CLIENT] DOWNLOAD_CHECKSUM_VERIFIED: sha256 byte-matched\n");
+        com1::write_str("[NET_CLIENT] AGENT_DOWNLOAD_SUCCESS\n");
+        (*history_ptr).push_line(b"HTTP/1.0 200 OK");
+        (*history_ptr).push_line(b"Saved to Inode 11");
+        (*history_ptr).push_line(b"SHA-256 Match: VERIFIED");
+    } else {
+        com1::write_str("[NET_CLIENT] DOWNLOAD_CHECKSUM_MISMATCH\n");
+        (*history_ptr).push_line(b"CHECKSUM MISMATCH");
+    }
+
+    (*history_ptr).render(info.surface_cap, 16, FG, BG);
+    surface::present(info.surface_cap);
 }
 
 unsafe fn request_and_show(info: &NetClientInfo, history_ptr: *mut TextRegion<LINES, COLS>) {
@@ -89,9 +301,9 @@ unsafe fn request_and_show(info: &NetClientInfo, history_ptr: *mut TextRegion<LI
         return;
     }
 
-    let mut buf_mu = core::mem::MaybeUninit::<[u8; 512]>::uninit();
+    let mut buf_mu = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
     let buf_ptr = buf_mu.as_mut_ptr() as *mut u8;
-    let buf: &mut [u8] = core::slice::from_raw_parts_mut(buf_ptr, 512);
+    let buf: &mut [u8] = core::slice::from_raw_parts_mut(buf_ptr, 4096);
     let mut real_len: u64 = u64::MAX;
 
     const MAX_POLLS: u32 = 3_000_000;

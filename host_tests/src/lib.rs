@@ -346,6 +346,21 @@ mod ext2_tests {
         assert_eq!(n, 5);
         assert_eq!(&out[..5], b"short");
     }
+
+    #[test]
+    fn multi_block_file_inode_and_size() {
+        let mut inode_table1 = [0u8; BLOCK_SIZE];
+        let size = 2500u32;
+        write_file_inode_blocks(&mut inode_table1, size, FILE_DATA_BLOCK, 3);
+        assert_eq!(read_file_inode_size(&inode_table1), 2500);
+        let entry_index = (FILE_INODE - INODES_PER_BLOCK - 1) as usize;
+        let off = entry_index * 128;
+        assert_eq!(ru32(&inode_table1, off + 0x04), 2500);
+        assert_eq!(ru32(&inode_table1, off + 0x1C), 6); // 3 blocks * 2 sectors
+        assert_eq!(ru32(&inode_table1, off + 0x28), FILE_DATA_BLOCK);
+        assert_eq!(ru32(&inode_table1, off + 0x2C), FILE_DATA_BLOCK + 1);
+        assert_eq!(ru32(&inode_table1, off + 0x30), FILE_DATA_BLOCK + 2);
+    }
 }
 
 /// Real assertions against `kernel_common::audit_ring` -- Phase 4's

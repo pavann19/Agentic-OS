@@ -9,11 +9,15 @@ SECTIONS
        page-align every output section onto its own PT_LOAD segment. */
     .text : { *(.text*) }
     . = ALIGN(4096);
-    .rodata : { *(.rodata*) }
+    .rodata : {
+        *(.rodata*)
+        *(.got*)
+        *(.data.rel.ro*)
+    }
     . = ALIGN(4096);
     .data : { *(.data*) }
     . = ALIGN(4096);
     .bss : { *(.bss*) }
 
-    /DISCARD/ : { *(.comment) *(.eh_frame) *(.note*) *(.got*) }
+    /DISCARD/ : { *(.comment) *(.eh_frame) *(.note*) }
 }

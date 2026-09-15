@@ -162,7 +162,7 @@ pub fn build_inode_bitmap(b: &mut [u8]) {
     }
 }
 
-fn write_inode_entry(table_block: &mut [u8], entry_index_in_block: usize, mode: u16, size: u32, links: u16, block0: u32) {
+fn write_inode_entry_blocks(table_block: &mut [u8], entry_index_in_block: usize, mode: u16, size: u32, links: u16, start_block: u32, num_blocks: u32) {
     let off = entry_index_in_block * 128;
     vzero(&mut table_block[off..off + 128]);
     wu16(table_block, off + 0x00, mode);
@@ -171,10 +171,17 @@ fn write_inode_entry(table_block: &mut [u8], entry_index_in_block: usize, mode: 
     // i_blocks: 512-byte sector count for the allocated data (real ext2
     // field, used by `du`-style tools) -- BLOCK_SIZE/512 sectors per
     // ext2 block actually used.
-    wu32(table_block, off + 0x1C, if block0 != 0 { (BLOCK_SIZE / 512) as u32 } else { 0 });
-    if block0 != 0 {
-        wu32(table_block, off + 0x28, block0); // i_block[0]
+    let sectors = (num_blocks as usize * BLOCK_SIZE / 512) as u32;
+    wu32(table_block, off + 0x1C, sectors);
+    let limit = (num_blocks as usize).min(12);
+    for i in 0..limit {
+        wu32(table_block, off + 0x28 + i * 4, start_block + i as u32);
     }
+}
+
+fn write_inode_entry(table_block: &mut [u8], entry_index_in_block: usize, mode: u16, size: u32, links: u16, block0: u32) {
+    let num_blocks = if block0 != 0 { 1 } else { 0 };
+    write_inode_entry_blocks(table_block, entry_index_in_block, mode, size, links, block0, num_blocks);
 }
 
 /// Writes the root directory's real inode (inode 2, always the second
@@ -184,12 +191,25 @@ pub fn write_root_inode(inode_table_block0: &mut [u8]) {
     write_inode_entry(inode_table_block0, (ROOT_INODE - 1) as usize, S_IFDIR | MODE_755, BLOCK_SIZE as u32, 2, ROOT_DATA_BLOCK);
 }
 
+/// Writes the one real file's inode spanning multiple direct blocks.
+pub fn write_file_inode_blocks(inode_table_block1: &mut [u8], size: u32, start_block: u32, num_blocks: u32) {
+    let entry_index = (FILE_INODE - INODES_PER_BLOCK - 1) as usize;
+    write_inode_entry_blocks(inode_table_block1, entry_index, S_IFREG | MODE_644, size, 1, start_block, num_blocks);
+}
+
 /// Writes the one real file's inode. `FILE_INODE` (11) falls in the
 /// SECOND inode-table block (inodes 9..=16) at entry index
 /// `FILE_INODE - INODES_PER_BLOCK - 1`.
 pub fn write_file_inode(inode_table_block1: &mut [u8], size: u32) {
+    let num_blocks = if size > 0 { ((size as usize + BLOCK_SIZE - 1) / BLOCK_SIZE) as u32 } else { 1 };
+    write_file_inode_blocks(inode_table_block1, size, FILE_DATA_BLOCK, num_blocks);
+}
+
+/// Reads the file's recorded size from its real inode table entry.
+pub fn read_file_inode_size(inode_table_block1: &[u8]) -> usize {
     let entry_index = (FILE_INODE - INODES_PER_BLOCK - 1) as usize;
-    write_inode_entry(inode_table_block1, entry_index, S_IFREG | MODE_644, size, 1, FILE_DATA_BLOCK);
+    let off = entry_index * 128;
+    ru32(inode_table_block1, off + 0x04) as usize
 }
 
 const FT_DIR: u8 = 2;

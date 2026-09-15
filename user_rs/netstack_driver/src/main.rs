@@ -1734,8 +1734,8 @@ pub extern "C" fn _start() -> ! {
                     let req_bytes = b"GET / HTTP/1.0\r\nHost: example.com\r\nConnection: close\r\n\r\n";
                     if tcp_send(&nic, &mut table, &mut next_rx, &mut conn, req_bytes) {
                         com1_write_str("[NETSTACK] NET_SERVICE_GET_SENT\n");
-                        let mut resp_mu = core::mem::MaybeUninit::<[u8; 512]>::uninit();
-                        let resp: &mut [u8; 512] = &mut *resp_mu.as_mut_ptr();
+                        let mut resp_mu = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
+                        let resp: &mut [u8; 4096] = &mut *resp_mu.as_mut_ptr();
                         let mut total = 0usize;
                         while total < resp.len() && conn.state != TcpState::Closed2 {
                             let n = tcp_recv(&nic, &mut table, &mut next_rx, &mut conn, &mut resp[total..], 20_000_000);
