@@ -1,13 +1,41 @@
 //! Milestone 2 — Generic on-demand process execution substrate.
 //! Provides `SYS_PROCESS_SPAWN` (34), `SYS_PROCESS_WAIT` (35), and `SYS_PROCESS_EXIT` (36).
-//! Allows a running ring-3 process to spawn a second ELF binary by path on-demand,
-//! wait for its exit status, and cleanly terminate processes.
+//!
+//! Spawn hardening (docs/TASK_SPAWN_HARDENING.md) — two real gaps closed:
+//!
+//! 1. **Real path resolution.** The previous implementation matched the `path`
+//!    argument against a few hardcoded string patterns and always loaded one
+//!    fixed `include_bytes!`-embedded binary regardless of what path was
+//!    requested. This pass wires the existing `file_service` FS_OP_LOOKUP +
+//!    file-read IPC path (`virtio_blk_driver`'s own `driver_resolve_path`
+//!    already uses the same `ext2::resolve_path` underneath) to find the
+//!    target inode on the REAL filesystem and load the REAL file's bytes —
+//!    not any embedded binary.  `child_proc` is kept as a genuine test
+//!    fixture: kernel-side setup in `net_client_app.rs` writes its ELF to
+//!    disk at `/bin/child` before ring 3 ever runs, and `net_client` spawns
+//!    it BY PATH to prove the whole chain.
+//!
+//! 2. **Real capability gate (`Rights::EXEC`).** Every other syscall class in
+//!    this kernel already gates on a purpose-specific `Rights` bit via
+//!    `thread::resolve_current_capability`. `sys_spawn` was the single gap.
+//!    Fixed the same way: `Rights::EXEC` (bit 14, `capability.rs`) is checked
+//!    as the FIRST thing `sys_spawn` does — deny + `AuditEvent::Denied` +
+//!    early return on failure, exactly the same pattern as syscalls 7/9/32/33
+//!    (`INTROSPECT`/`AUDIT_QUERY`/`INTROSPECT_WINDOWS`/`AGENT_UI_ACTION`).
+//!    Only a process explicitly granted an `ExecHandle` capability with
+//!    `Rights::EXEC` at spawn time may call this syscall at all.
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::{klog_info, pmm, thread, vmm};
+use crate::{audit, capability, klog_info, pmm, thread, vmm};
 
-static CHILD_ELF: &[u8] = include_bytes!("../../user_rs/child_proc/target/x86_64-unknown-none/release/child_proc");
+/// Slot index the `ExecHandle` capability is granted into by
+/// `net_client_app.rs`. By convention every new per-process capability kind
+/// in this kernel is granted at a fixed, predictable table index so the
+/// ring-3 process knows which slot to pass. Slot 3 for net_client (after
+/// Surface=0, Socket=1, PortIo=2). Unauthorized processes receive nothing at
+/// this slot, so `resolve_current_capability(EXEC_CAP_SLOT, EXEC)` fails.
+pub const EXEC_CAP_SLOT: capability::CapId = 3;
 
 pub type ProcessId = u64;
 
@@ -35,10 +63,107 @@ pub struct ProcessSpawnRequest {
     pub argv_count: u32,
 }
 
+/// Maximum ELF binary size we will load on-demand.
+const MAX_ELF_BYTES: usize = 512 * 1024;
+
+/// Sends an FS_OP_LOOKUP request through `file_service` and spin-polls for
+/// the reply, returning the resolved inode or 0 on failure.  Called from
+/// `sys_spawn` which runs with interrupts enabled so the virtio-blk driver
+/// thread can run and service the request while we spin.
+fn lookup_path_inode(path: &str) -> u32 {
+    const FS_OP_LOOKUP: u8 = 2;
+    let arg0 = (FS_OP_LOOKUP as u32) << 24;
+    // Pass path bytes as a kernel-address pointer; file_service::write_file
+    // takes a pml4 + vaddr pair — we use the kernel pml4 here since this is
+    // kernel code and the path buffer is a kernel stack slice.
+    let req_id = crate::file_service::write_file(
+        vmm::kernel_pml4_phys(),
+        arg0,
+        path.as_ptr() as u64,
+        path.len() as u32,
+        0,
+    );
+    if req_id == 0 {
+        klog_info!("SYS_PROCESS_SPAWN_LOOKUP_NO_SERVER path=\"{}\"", path);
+        return 0;
+    }
+    let mut out = [0u8; 16];
+    let out_vaddr = out.as_mut_ptr() as u64;
+    for _ in 0..10_000_000u32 {
+        let n = crate::file_service::poll_reply(
+            vmm::kernel_pml4_phys(),
+            req_id,
+            out_vaddr,
+            16,
+        );
+        if n != u64::MAX {
+            if n >= 4 {
+                return u32::from_le_bytes(out[0..4].try_into().unwrap_or([0u8; 4]));
+            }
+            return 0;
+        }
+        unsafe { core::arch::asm!("sti", "hlt", "cli", options(nomem, nostack)) };
+    }
+    klog_info!("SYS_PROCESS_SPAWN_LOOKUP_TIMEOUT path=\"{}\"", path);
+    0
+}
+
+/// Reads the file at `inode` via `file_service` and spin-polls until done,
+/// returning actual byte count on success (0 on error/timeout).
+fn read_file_bytes(inode: u32, buf: &mut [u8]) -> usize {
+    let req_id = crate::file_service::request_file_internal(inode);
+    if req_id == 0 {
+        klog_info!("SYS_PROCESS_SPAWN_READ_NO_SERVER inode={}", inode);
+        return 0;
+    }
+    let out_vaddr = buf.as_mut_ptr() as u64;
+    let max_len = buf.len() as u32;
+    for _ in 0..10_000_000u32 {
+        let n = crate::file_service::poll_reply(
+            vmm::kernel_pml4_phys(),
+            req_id,
+            out_vaddr,
+            max_len,
+        );
+        if n != u64::MAX {
+            return (n as usize).min(buf.len());
+        }
+        unsafe { core::arch::asm!("sti", "hlt", "cli", options(nomem, nostack)) };
+    }
+    klog_info!("SYS_PROCESS_SPAWN_READ_TIMEOUT inode={}", inode);
+    0
+}
+
 /// Dispatches SYS_PROCESS_SPAWN (syscall 34).
-/// Reads path and argv parameters from user memory, validates and loads the target ELF,
-/// creates a new isolated address space, user stack, and schedules a new thread.
+///
+/// Hardening fixes (docs/TASK_SPAWN_HARDENING.md):
+///
+/// 1. **Capability gate first**: resolves `Rights::EXEC` against the calling
+///    thread's OWN cap_table via `thread::resolve_current_capability`. On
+///    failure: log + `AuditEvent::Denied` + return `u64::MAX` immediately,
+///    before any path parsing, allocation, or IPC. Matches the pattern
+///    syscalls 7/9/32/33 already use for their own per-process rights.
+///
+/// 2. **Real path resolution**: sends `FS_OP_LOOKUP` to the file-service
+///    driver via `file_service::write_file` (the same IPC path the SDK's own
+///    `file_service::lookup` uses from user space), polls for the inode, then
+///    reads the ELF bytes via `file_service::request_file` + `poll_reply`.
+///    Any ELF on the real ext2 filesystem can be spawned by path; no
+///    hardcoded pattern match, no embedded binary.
 pub fn sys_spawn(req_vaddr: u64) -> u64 {
+    // ── 1. Capability gate ───────────────────────────────────────────────────
+    // Resolved FIRST — before any user pointer is touched — so an
+    // unauthorized caller sees a fast, audited denial with no side effects.
+    // `CapabilityTable::resolve` already emits `AuditEvent::Denied` on its
+    // own (see capability.rs doc comment); we additionally log a kernel
+    // message to make the denial visible in the serial transcript.
+    if let Err(_) = thread::resolve_current_capability(EXEC_CAP_SLOT, capability::Rights::EXEC) {
+        klog_info!("SYS_PROCESS_SPAWN_EXEC_DENIED: caller lacks ExecHandle/Rights::EXEC");
+        audit::record(audit::AuditEvent::Denied { cap_id: EXEC_CAP_SLOT });
+        return u64::MAX;
+    }
+
+    // ── 2. Read ProcessSpawnRequest from user memory ─────────────────────────
     let pml4 = vmm::current_cr3();
     let mut req_bytes = [0u8; core::mem::size_of::<ProcessSpawnRequest>()];
     unsafe {
@@ -64,16 +189,30 @@ pub fn sys_spawn(req_vaddr: u64) -> u64 {
     let path_str = core::str::from_utf8(&path_bytes[..path_len]).unwrap_or("");
     klog_info!("SYS_PROCESS_SPAWN path=\"{}\" argc={}", path_str, req.argv_count);
 
-    // Resolve ELF binary by path
-    let elf_data: &[u8] = if path_str == "/bin/child" || path_str == "child" || path_str.ends_with("child") || path_str == "/bin/child_proc" {
-        CHILD_ELF
-    } else {
-        klog_info!("SYS_PROCESS_SPAWN_PATH_NOT_FOUND: {}", path_str);
+    // ── 3. Real path resolution via file_service IPC ─────────────────────────
+    // FS_OP_LOOKUP → inode (via virtio_blk_driver's ext2::resolve_path), then
+    // request_file(inode) → ELF bytes. This is the same IPC chain the SDK's
+    // own `file_service::lookup` + `read_file_path` uses from ring-3; calling
+    // it from kernel context is valid because the virtio_blk_driver thread is
+    // already scheduled and will service the IPC while we spin below.
+    let inode = lookup_path_inode(path_str);
+    if inode == 0 {
+        klog_info!("SYS_PROCESS_SPAWN_PATH_NOT_FOUND: \"{}\"", path_str);
         return u64::MAX;
-    };
+    }
+    klog_info!("SYS_PROCESS_SPAWN_RESOLVED path=\"{}\" inode={}", path_str, inode);
 
+    let mut elf_buf = alloc::vec![0u8; MAX_ELF_BYTES];
+    let elf_len = read_file_bytes(inode, &mut elf_buf);
+    if elf_len == 0 {
+        klog_info!("SYS_PROCESS_SPAWN_ELF_READ_FAILED inode={}", inode);
+        return u64::MAX;
+    }
+    klog_info!("SYS_PROCESS_SPAWN_ELF_LOADED inode={} bytes={}", inode, elf_len);
+
+    // ── 4. Load ELF into a new isolated address space ────────────────────────
     let space = unsafe { vmm::new_address_space() };
-    let entry = match unsafe { crate::elf::load(space, elf_data) } {
+    let entry = match unsafe { crate::elf::load(space, &elf_buf[..elf_len]) } {
         Ok(e) => e,
         Err(e) => {
             klog_info!("SYS_PROCESS_SPAWN_ELF_LOAD_FAILED {:?}", e);
@@ -81,8 +220,9 @@ pub fn sys_spawn(req_vaddr: u64) -> u64 {
             return u64::MAX;
         }
     };
+    drop(elf_buf);
 
-    // User stack: 4 pages (16KB) at 0x00B0_0000
+    // User stack: 4 pages (16 KB) at 0x00B0_0000
     const STACK_VADDR: u64 = 0x00B0_0000;
     const STACK_PAGES: u64 = 4;
     for i in 0..STACK_PAGES {
@@ -176,3 +316,5 @@ pub fn sys_exit(code: i32) -> ! {
         unsafe { core::arch::asm!("sti; hlt", options(nomem, nostack)) };
     }
 }
+
+

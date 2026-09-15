@@ -1974,27 +1974,33 @@ Established the architectural audit and implemented the foundational prerequisit
   - `user_rs/agentic_sdk/src/file_service.rs`: Ring-3 API bindings: `lookup(path)`, `mkdir(path)`, `create_file(path)`, `unlink(path)`, `readdir(path, entries)`, `write_file_path(path, data)`, `read_file_path(path, out)`.
   - `kernel_rs/src/file_service.rs`: Server reply and poll handling updated to preserve byte lengths for non-payload replies (e.g. write byte counts), and capability validation extended (`current_has_any_file_capability`) to authorize file operations on dynamically created inodes for processes holding `FileObject` rights.
 
-- [x] **Milestone 2.2: Generic On-Demand Process Exec Syscall Lifecycle**
-  - `kernel_rs/src/syscall.rs`: Wired syscall 34 (`SYS_PROCESS_SPAWN`), 35 (`SYS_PROCESS_WAIT`), and 36 (`SYS_PROCESS_EXIT`).
-  - `kernel_rs/src/process.rs`: Implemented `sys_spawn(path, argv) -> pid`, `sys_wait(pid) -> exit_code`, and `sys_exit(code)`. Maintained thread-safe global `PROCESS_TABLE` tracking `Running`, `Exited(code)`, and reaped processes. Loads ELF binaries on demand via `elf::load` into isolated address spaces.
+- [x] **Milestone 2.2: Generic On-Demand Process Exec Syscall Lifecycle & Capability Gate Hardening**
+  - `kernel_rs/src/capability.rs` & `manifest.rs`: Added `Rights::EXEC` (bit `1 << 14`) and `KernelObjectKind::ExecHandle` / `CapKind::ExecHandle` (discriminant 12). Syscall 34 (`SYS_PROCESS_SPAWN`) is gated on `Rights::EXEC` via `thread::resolve_current_capability(EXEC_CAP_SLOT, Rights::EXEC)` as its first action — unauthorized callers are denied immediately, audited (`AuditEvent::Denied`), and return `u64::MAX`.
+  - `kernel_rs/src/process.rs`: Fully eliminated hardcoded pattern matching and embedded binaries from `sys_spawn`. Implemented real path resolution via `FS_OP_LOOKUP` IPC chain to `virtio_blk_driver` (`ext2::resolve_path`), resolving arbitrary paths to target inodes, followed by `file_service::request_file_internal` reading the ELF binary bytes directly from the real ext2 filesystem into isolated address spaces via `elf::load`.
+  - `kernel_rs/src/syscall.rs`: Wired syscall 34 (`SYS_PROCESS_SPAWN`), 35 (`SYS_PROCESS_WAIT`), and 36 (`SYS_PROCESS_EXIT`). Maintained thread-safe global `PROCESS_TABLE` tracking `Running`, `Exited(code)`, and reaped processes.
   - `kernel_rs/src/thread.rs`: Added `spawn_user`, `enter_user_process`, and `user_process_trampoline` setting up clean ring-3 user stacks with `argc` and `argv` pointers, returning to ring 3 via `sysretq`.
-  - `user_rs/child_proc`: Standalone ring-3 binary (`x86_64-unknown-none`) built and embedded. Executes on-demand, writes confirmation to COM1, and exits with code 42 via `SYS_PROCESS_EXIT`.
+  - `user_rs/child_proc` & `user_rs/helper_proc`: Standalone ring-3 binaries (`x86_64-unknown-none`) written to disk at `/bin/child` and `/bin/helper` by kernel setup before ring 3 begins. Ring-3 processes spawn them by distinct paths (`/bin/child` exiting with 42, `/bin/helper` exiting with 84), demonstrating real, generic path resolution end-to-end.
   - `user_rs/agentic_sdk/src/process.rs`: SDK bindings for `spawn(path, argv) -> u64`, `waitpid(pid) -> u64`, and `exit(code) -> !`.
+  - `kernel_rs/Cargo.toml` & `net_client_app.rs`: Added `spawn_unauthorized` adversarial feature omitting the `ExecHandle` capability grant to prove live kernel rejection and ring-3 audit behavior.
 
 - [x] **Milestone 2.3: Live Verification & Automated Suite Integration**
-  - `user_rs/net_client/src/main.rs`: Added live groundwork verification sequence:
+  - `user_rs/net_client/src/main.rs`: Added live groundwork & hardening verification sequence:
     1. `mkdir("/src")` -> OK (inode 12).
     2. `mkdir("/src/bin")` -> OK (inode 13).
     3. `write_file_path("/src/bin/hello.txt", ...)` -> creates inode 14 and writes 68 bytes.
     4. `read_file_path("/src/bin/hello.txt", ...)` -> reads back 68 bytes, byte-for-byte verified.
     5. `readdir("/src/bin")` -> lists `.`, `..`, and `hello.txt`.
     6. `unlink("/src/bin/hello.txt")` -> unlinks entry and frees inode 14.
-    7. `spawn("/bin/child", ...)` -> launches child process in ring 3 on demand.
+    7. `spawn("/bin/child", ...)` -> launches child process in ring 3 on demand via FS_OP_LOOKUP.
     8. Child executes in ring 3 and exits with code 42.
     9. `waitpid` reaps child process and retrieves exit code 42.
-  - `scripts/test-self-hosting.ps1`: Automated QEMU test validating 19/19 checks (100% PASS).
+    10. `spawn("/bin/helper", ...)` -> launches distinct helper binary by distinct path via FS_OP_LOOKUP.
+    11. Helper executes in ring 3 and exits with code 84.
+    12. `waitpid` reaps helper process and retrieves exit code 84.
+    13. Adversarial run: `net_client` without `Rights::EXEC` triggers kernel `SYS_PROCESS_SPAWN_EXEC_DENIED` and ring-3 `SPAWN_EXEC_DENIED`.
+  - `scripts/test-self-hosting.ps1`: Automated 2-phase QEMU test validating 24/24 authorized checks + 3/3 adversarial denial checks (100% PASS).
   - `scripts/test-integration.ps1`: Wired `test-self-hosting` into the full regression suite.
-  - Transcript saved to `_evidence/latest/serial-self-hosting.log`.
+  - Transcript saved to `_evidence/latest/serial-self-hosting.log` and `_evidence/latest/serial-self-hosting-adversarial.log`.
   - Zero regressions: `scripts/test-agent-download.ps1` PASS (18/18 authorized, 4/4 adversarial denial checks).
 
 **Explicit Scope Boundaries:**

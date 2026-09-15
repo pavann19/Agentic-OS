@@ -43,6 +43,7 @@ pub enum CapKind {
     UserSession = 9,
     CryptoKey = 10,
     DnsResolver = 11,
+    ExecHandle = 12,
 }
 
 pub(crate) fn kind_of(kind: &KernelObjectKind) -> CapKind {
@@ -60,6 +61,7 @@ pub(crate) fn kind_of(kind: &KernelObjectKind) -> CapKind {
         UserSession { .. } => CapKind::UserSession,
         CryptoKey { .. } => CapKind::CryptoKey,
         DnsResolver { .. } => CapKind::DnsResolver,
+        ExecHandle => CapKind::ExecHandle,
     }
 }
 

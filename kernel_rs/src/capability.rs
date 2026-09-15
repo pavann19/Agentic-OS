@@ -72,6 +72,13 @@ impl Rights {
     pub const ENCRYPT: Rights = Rights(1 << 11);
     pub const DECRYPT: Rights = Rights(1 << 12);
     pub const SESSION_SWITCH: Rights = Rights(1 << 13);
+    // Spawn hardening (docs/TASK_SPAWN_HARDENING.md): the dedicated
+    // right to call SYS_PROCESS_SPAWN at all -- every other syscall class
+    // in this kernel already has its own purpose-specific right, and the
+    // milestone that introduced sys_spawn was the single gap. A process
+    // can only spawn children if it was explicitly granted this right;
+    // holding SEND, READ, WRITE, INTROSPECT, etc. does not imply it.
+    pub const EXEC: Rights = Rights(1 << 14);
 
     pub fn contains(self, other: Rights) -> bool {
         (self.0 & other.0) == other.0
@@ -170,6 +177,15 @@ pub enum KernelObjectKind {
     /// Phase 10 (docs/ROADMAP.md Sec5 deliverable 3 — "DNS resolution is an explicit capability"):
     /// names an authorized DNS resolver endpoint.
     DnsResolver { server_ip: [u8; 4] },
+    /// Spawn hardening (docs/TASK_SPAWN_HARDENING.md): the process-execution
+    /// handle -- names no physical resource (like IntrospectionHandle/
+    /// AuditQueryHandle above it) and exists purely so Rights::EXEC has an
+    /// object to be granted against. A process without one is denied
+    /// SYS_PROCESS_SPAWN by the kernel's capability check, not by any policy
+    /// advisory layer. Kept separate from every other right so a process
+    /// holding MAP/SEND/READ/WRITE/INTROSPECT etc. never incidentally gains
+    /// the ability to spawn children.
+    ExecHandle,
 }
 
 /// Real, small, closed set — matches this stack's own real, from-spec

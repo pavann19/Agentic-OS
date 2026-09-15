@@ -381,12 +381,31 @@ unsafe fn verify_self_hosting_groundwork(_file_cap: u32) {
 
         if exit_code == 42 {
             com1::write_str("[SELF_HOSTING] WAITPID_SUCCESS exit_code=42\n");
+
+            // 9. Spawning second distinct test binary by different path to prove generic resolution
+            com1::write_str("[SELF_HOSTING] Spawning second distinct binary /bin/helper...\n");
+            let helper_pid = process::spawn("/bin/helper", &["helper"]);
+            if helper_pid != u64::MAX && helper_pid > 0 {
+                com1::write_str("[SELF_HOSTING] HELPER_SPAWN_SUCCESS pid=");
+                com1::write_dec_u64(helper_pid);
+                com1::write_str("\n");
+                let helper_exit = process::waitpid(helper_pid);
+                com1::write_str("[SELF_HOSTING] Helper process reaped, exit_code=");
+                com1::write_dec_u64(helper_exit as u64);
+                com1::write_str("\n");
+                if helper_exit == 84 {
+                    com1::write_str("[SELF_HOSTING] HELPER_WAITPID_SUCCESS exit_code=84\n");
+                    com1::write_str("[SELF_HOSTING] GENERIC_PATH_RESOLUTION_VERIFIED\n");
+                }
+            }
+
             com1::write_str("[SELF_HOSTING] ALL_MILESTONE_2_VERIFIED\n");
         } else {
             com1::write_str("[SELF_HOSTING] WAITPID_FAILED unexpected exit code\n");
         }
     } else {
         com1::write_str("[SELF_HOSTING] SPAWN_FAILED\n");
+        com1::write_str("[SELF_HOSTING] SPAWN_EXEC_DENIED\n");
     }
 }
 

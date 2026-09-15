@@ -1,5 +1,5 @@
 [package]
-name = "child_proc"
+name = "helper_proc"
 version = "0.1.0"
 edition = "2021"
 
@@ -16,4 +16,3 @@ panic = "abort"
 opt-level = 2
 lto = true
 strip = true
-

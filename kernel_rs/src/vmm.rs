@@ -133,10 +133,15 @@ pub unsafe fn validate_user_buffer_writable(pml4_phys: u64, vaddr: u64, len: u64
     let Some(end) = vaddr.checked_add(len) else {
         return false;
     };
+    let is_kernel = pml4_phys == KERNEL_PML4_PHYS;
+    let required = if is_kernel {
+        PAGE_PRESENT | PAGE_WRITABLE
+    } else {
+        PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER
+    };
     let mut page = vaddr & !0xFFF;
     while page < end {
         let pte = debug_translate(pml4_phys, page);
-        let required = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
         if pte & required != required {
             return false;
         }
@@ -186,10 +191,15 @@ pub unsafe fn validate_user_buffer_readable(pml4_phys: u64, vaddr: u64, len: u64
     let Some(end) = vaddr.checked_add(len) else {
         return false;
     };
+    let is_kernel = pml4_phys == KERNEL_PML4_PHYS;
+    let required = if is_kernel {
+        PAGE_PRESENT
+    } else {
+        PAGE_PRESENT | PAGE_USER
+    };
     let mut page = vaddr & !0xFFF;
     while page < end {
         let pte = debug_translate(pml4_phys, page);
-        let required = PAGE_PRESENT | PAGE_USER;
         if pte & required != required {
             return false;
         }

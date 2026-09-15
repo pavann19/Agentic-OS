@@ -73,6 +73,7 @@ user_rs/net_client/target/
 user_rs/sample_app/target/
 user_rs/agent_gateway/target/
 user_rs/child_proc/target/
+user_rs/helper_proc/target/
 hyperv/*.vhdx
 hyperv/*.log
 _evidence/latest/

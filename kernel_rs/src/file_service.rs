@@ -95,6 +95,10 @@ pub fn register_server() -> CapId {
     receive_cap
 }
 
+pub fn is_server_registered() -> bool {
+    SERVER_SEND_CAP.load(Ordering::SeqCst) != NO_SERVER
+}
+
 /// Real SYS_FILE_SERVICE_REQUEST handler: verifies caller holds a valid
 /// FileObject capability with Rights::READ for `arg0` (either resolving `arg0`
 /// as a CapId or checking that `arg0` matches an authorized inode held by the caller).
@@ -111,7 +115,13 @@ pub fn request_file(arg0: u32) -> u64 {
         klog_info!("FILE_SERVICE_DENIED: caller lacks FileObject READ capability for arg0={}", arg0);
         return 0;
     };
+    request_file_internal(inode)
+}
 
+/// Internal file request: called either by `request_file` (after capability check)
+/// or by kernel subsystems (like `sys_spawn` after `Rights::EXEC` check) to fetch
+/// file bytes by inode.
+pub fn request_file_internal(inode: u32) -> u64 {
     let send_cap = SERVER_SEND_CAP.load(Ordering::SeqCst);
     if send_cap == NO_SERVER {
         klog_info!("FILE_SERVICE_REQUEST_NO_SERVER");
@@ -147,7 +157,7 @@ pub fn request_file(arg0: u32) -> u64 {
 /// Copies data from user space into the request buffer, queues it, and notifies the server.
 pub fn write_file(pml4: u64, arg0: u32, data_vaddr: u64, len: u32, offset: u32) -> u64 {
     let (op, mut inode) = ((arg0 >> 24) as u8, arg0 & 0x00FF_FFFF);
-    if op == 0 {
+    if op == 0 && pml4 != vmm::kernel_pml4_phys() {
         if let Some(resolved_inode) = thread::resolve_file_capability(arg0, Rights::WRITE) {
             inode = resolved_inode;
         } else if thread::current_has_file_capability(arg0, Rights::WRITE) {
