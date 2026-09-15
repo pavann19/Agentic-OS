@@ -192,6 +192,34 @@ extern "C" fn thread_trampoline() -> ! {
     )
 }
 
+#[unsafe(naked)]
+extern "C" fn user_process_trampoline() -> ! {
+    core::arch::naked_asm!(
+        "pop rdi",      // entry_rip
+        "pop rsi",      // user_rsp
+        "sti",
+        "call {enter}",
+        "call {exit}",
+        enter = sym enter_user_process,
+        exit = sym exit_current,
+    )
+}
+
+extern "C" fn enter_user_process(entry_rip: u64, user_rsp: u64) -> ! {
+    unsafe {
+        let kernel_stack_top = current_kernel_stack_top();
+        crate::gdt::set_kernel_stack(kernel_stack_top);
+        crate::syscall::set_kernel_stack(kernel_stack_top);
+        crate::syscall::init();
+
+        let mut table = crate::capability::CapabilityTable::new();
+        let com1_cap = crate::driver::create_port_capability(&mut table, 0x3F8, 8, crate::capability::Rights::PORT_IO);
+        let _ = crate::driver::grant_port_access(&table, com1_cap);
+
+        crate::ring3::enter_user_mode(entry_rip, user_rsp);
+    }
+}
+
 /// Builds a new thread with its own kernel stack, rigged so the first
 /// `switch_to` into it starts executing `entry`. Does NOT schedule it —
 /// call `enqueue` (or rely on `spawn`, which does both) separately if
@@ -304,6 +332,48 @@ unsafe fn spawn_in_locked(entry: extern "C" fn(), address_space: u64) -> ThreadI
         threads_mut().as_mut().unwrap().push_back(thread);
         tid
     }
+}
+
+/// Spawns a new thread that directly transitions into ring-3 user mode at `entry_rip`
+/// using `user_rsp` in `address_space`.
+pub fn spawn_user(entry_rip: u64, user_rsp: u64, address_space: u64) -> ThreadId {
+    crate::critical::without_interrupts(|| unsafe {
+        let tid = NEXT_TID;
+        NEXT_TID += 1;
+
+        let mut stack = alloc::vec![0u8; KERNEL_STACK_SIZE].into_boxed_slice();
+        let stack_top = stack.as_mut_ptr() as u64 + KERNEL_STACK_SIZE as u64;
+
+        let mut sp = stack_top;
+
+        sp -= 8;
+        *(sp as *mut u64) = user_rsp;
+
+        sp -= 8;
+        *(sp as *mut u64) = entry_rip;
+
+        sp -= 8;
+        *(sp as *mut u64) = user_process_trampoline as *const () as u64;
+
+        sp -= core::mem::size_of::<CalleeSaved>() as u64;
+        *(sp as *mut CalleeSaved) = CalleeSaved::default();
+
+        let thread = Box::new(Thread {
+            id: tid,
+            state: ThreadState::Ready,
+            saved_rsp: sp,
+            _stack: stack,
+            address_space,
+            cap_table: crate::capability::CapabilityTable::new(),
+            iopb: [0xFFu8; crate::gdt::IOPB_BYTES],
+        });
+
+        if threads_mut().is_none() {
+            *threads_mut() = Some(VecDeque::new());
+        }
+        threads_mut().as_mut().unwrap().push_back(thread);
+        tid
+    })
 }
 
 /// Phase 9 deliverable 3's real, demonstrable IPI-based reschedule:
@@ -537,6 +607,16 @@ pub fn current_has_file_capability(inode: u32, required: crate::capability::Righ
     crate::critical::without_interrupts(|| unsafe {
         match current_mut().as_ref() {
             Some(t) => t.cap_table.find_file_capability(inode, required).is_some(),
+            None => false,
+        }
+    })
+}
+
+/// Checks if the current thread holds ANY authorized, valid FileObject capability with `required` rights.
+pub fn current_has_any_file_capability(required: crate::capability::Rights) -> bool {
+    crate::critical::without_interrupts(|| unsafe {
+        match current_mut().as_ref() {
+            Some(t) => t.cap_table.has_any_file_capability(required),
             None => false,
         }
     })

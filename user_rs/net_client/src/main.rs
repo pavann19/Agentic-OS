@@ -10,7 +10,7 @@
 #![no_std]
 #![no_main]
 
-use agentic_sdk::{com1, file_service, net_service, surface, syscall::syscall1, text_widget::TextRegion};
+use agentic_sdk::{com1, file_service, net_service, process, surface, syscall::syscall1, text_widget::TextRegion};
 
 const INFO_VADDR: u64 = 0x0000_0000_0053_0000;
 
@@ -270,6 +270,8 @@ unsafe fn download_and_save(info: &NetClientInfo, history_ptr: *mut TextRegion<L
         (*history_ptr).push_line(b"HTTP/1.0 200 OK");
         (*history_ptr).push_line(b"Saved to Inode 11");
         (*history_ptr).push_line(b"SHA-256 Match: VERIFIED");
+
+        verify_self_hosting_groundwork(info.file_cap);
     } else {
         com1::write_str("[NET_CLIENT] DOWNLOAD_CHECKSUM_MISMATCH\n");
         (*history_ptr).push_line(b"CHECKSUM MISMATCH");
@@ -277,6 +279,115 @@ unsafe fn download_and_save(info: &NetClientInfo, history_ptr: *mut TextRegion<L
 
     (*history_ptr).render(info.surface_cap, 16, FG, BG);
     surface::present(info.surface_cap);
+}
+
+unsafe fn verify_self_hosting_groundwork(_file_cap: u32) {
+    com1::write_str("\n=== [SELF_HOSTING] Groundwork Verification Starting ===\n");
+
+    // 1. Directory creation: mkdir("/src")
+    com1::write_str("[SELF_HOSTING] Creating directory /src...\n");
+    let ok1 = file_service::mkdir("/src");
+    if ok1 {
+        com1::write_str("[SELF_HOSTING] MKDIR /src OK\n");
+    } else {
+        com1::write_str("[SELF_HOSTING] MKDIR /src FAILED\n");
+    }
+
+    // 2. Subdirectory creation: mkdir("/src/bin")
+    com1::write_str("[SELF_HOSTING] Creating directory /src/bin...\n");
+    let ok2 = file_service::mkdir("/src/bin");
+    if ok2 {
+        com1::write_str("[SELF_HOSTING] MKDIR /src/bin OK\n");
+    } else {
+        com1::write_str("[SELF_HOSTING] MKDIR /src/bin FAILED\n");
+    }
+    if ok1 && ok2 {
+        com1::write_str("[SELF_HOSTING] MKDIR_SUCCESS\n");
+    }
+
+    // 3. Write file by multi-file path: write_file_path("/src/bin/hello.txt", ...)
+    const TEST_PAYLOAD: &[u8] = b"Self-hosting groundwork verified: ext2 directories + on-demand exec\n";
+    com1::write_str("[SELF_HOSTING] Writing file to /src/bin/hello.txt...\n");
+    let w_ok = file_service::write_file_path("/src/bin/hello.txt", TEST_PAYLOAD);
+    if w_ok {
+        com1::write_str("[SELF_HOSTING] WRITE_PATH OK len=");
+        com1::write_dec_u64(TEST_PAYLOAD.len() as u64);
+        com1::write_str("\n");
+    } else {
+        com1::write_str("[SELF_HOSTING] WRITE_PATH FAILED\n");
+    }
+
+    // 4. Read back file by path and verify content
+    let mut read_buf = [0u8; 128];
+    let r_len = file_service::read_file_path("/src/bin/hello.txt", &mut read_buf);
+    if r_len == TEST_PAYLOAD.len() && &read_buf[..r_len] == TEST_PAYLOAD {
+        com1::write_str("[SELF_HOSTING] READ_PATH OK: byte-for-byte content matched\n");
+        com1::write_str("[SELF_HOSTING] WRITE_READ_PATH_SUCCESS\n");
+    } else {
+        com1::write_str("[SELF_HOSTING] READ_PATH FAILED\n");
+    }
+
+    // 5. Readdir on /src/bin
+    let mut entries = [file_service::FsDirEntry { inode: 0, file_type: 0, name_len: 0, pad: 0, name: [0u8; 56] }; 8];
+    let num_entries = file_service::readdir("/src/bin", &mut entries);
+    com1::write_str("[SELF_HOSTING] READDIR /src/bin found count=");
+    com1::write_dec_u64(num_entries as u64);
+    com1::write_str("\n");
+    let mut found_hello = false;
+    for i in 0..num_entries.min(entries.len()) {
+        let entry = &entries[i];
+        let name_str = core::str::from_utf8(&entry.name[..entry.name_len as usize]).unwrap_or("");
+        com1::write_str("  entry: ");
+        com1::write_str(name_str);
+        com1::write_str(" inode=");
+        com1::write_dec_u64(entry.inode as u64);
+        com1::write_str(" type=");
+        com1::write_dec_u64(entry.file_type as u64);
+        com1::write_str("\n");
+        if name_str == "hello.txt" {
+            found_hello = true;
+        }
+    }
+    if found_hello {
+        com1::write_str("[SELF_HOSTING] READDIR_SUCCESS\n");
+    } else {
+        com1::write_str("[SELF_HOSTING] READDIR_FAILED: hello.txt not found\n");
+    }
+
+    // 6. Unlink file
+    com1::write_str("[SELF_HOSTING] Unlinking /src/bin/hello.txt...\n");
+    let un_ok = file_service::unlink("/src/bin/hello.txt");
+    if un_ok {
+        com1::write_str("[SELF_HOSTING] UNLINK OK\n");
+        com1::write_str("[SELF_HOSTING] UNLINK_SUCCESS\n");
+    } else {
+        com1::write_str("[SELF_HOSTING] UNLINK FAILED\n");
+    }
+
+    // 7. Generic on-demand process exec: spawn child process by path
+    com1::write_str("[SELF_HOSTING] Spawning child process /bin/child on-demand...\n");
+    let child_pid = process::spawn("/bin/child", &["child", "--self-host-test"]);
+    if child_pid != u64::MAX && child_pid > 0 {
+        com1::write_str("[SELF_HOSTING] SPAWN_SUCCESS pid=");
+        com1::write_dec_u64(child_pid);
+        com1::write_str("\n");
+
+        // 8. Waitpid for child process to exit
+        com1::write_str("[SELF_HOSTING] Waiting for child process to exit via waitpid...\n");
+        let exit_code = process::waitpid(child_pid);
+        com1::write_str("[SELF_HOSTING] Child process reaped, exit_code=");
+        com1::write_dec_u64(exit_code as u64);
+        com1::write_str("\n");
+
+        if exit_code == 42 {
+            com1::write_str("[SELF_HOSTING] WAITPID_SUCCESS exit_code=42\n");
+            com1::write_str("[SELF_HOSTING] ALL_MILESTONE_2_VERIFIED\n");
+        } else {
+            com1::write_str("[SELF_HOSTING] WAITPID_FAILED unexpected exit code\n");
+        }
+    } else {
+        com1::write_str("[SELF_HOSTING] SPAWN_FAILED\n");
+    }
 }
 
 unsafe fn request_and_show(info: &NetClientInfo, history_ptr: *mut TextRegion<LINES, COLS>) {

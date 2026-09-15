@@ -361,6 +361,173 @@ mod ext2_tests {
         assert_eq!(ru32(&inode_table1, off + 0x2C), FILE_DATA_BLOCK + 1);
         assert_eq!(ru32(&inode_table1, off + 0x30), FILE_DATA_BLOCK + 2);
     }
+
+    #[test]
+    fn block_allocator_and_free() {
+        let mut bitmap = [0u8; BLOCK_SIZE];
+        build_block_bitmap(&mut bitmap);
+
+        // Blocks 1..=10 are used.
+        // First alloc should give block 11.
+        let b1 = alloc_block(&mut bitmap, TOTAL_BLOCKS).expect("alloc b1");
+        assert_eq!(b1, 11);
+        let b2 = alloc_block(&mut bitmap, TOTAL_BLOCKS).expect("alloc b2");
+        assert_eq!(b2, 12);
+        let b3 = alloc_block(&mut bitmap, TOTAL_BLOCKS).expect("alloc b3");
+        assert_eq!(b3, 13);
+
+        // Free b2 (block 12)
+        free_block(&mut bitmap, b2);
+
+        // Next alloc should reuse block 12
+        let reused = alloc_block(&mut bitmap, TOTAL_BLOCKS).expect("realloc b2");
+        assert_eq!(reused, 12);
+
+        // Next alloc should give block 14
+        let b4 = alloc_block(&mut bitmap, TOTAL_BLOCKS).expect("alloc b4");
+        assert_eq!(b4, 14);
+    }
+
+    #[test]
+    fn inode_allocator_and_free() {
+        let mut bitmap = [0u8; BLOCK_SIZE];
+        build_inode_bitmap(&mut bitmap);
+
+        // Inodes 1..=11 are used.
+        // First alloc should give inode 12.
+        let ino1 = alloc_inode(&mut bitmap, NUM_INODES).expect("alloc ino1");
+        assert_eq!(ino1, 12);
+        let ino2 = alloc_inode(&mut bitmap, NUM_INODES).expect("alloc ino2");
+        assert_eq!(ino2, 13);
+
+        // Free ino1
+        free_inode(&mut bitmap, ino1);
+
+        // Next alloc reuses inode 12
+        let reused = alloc_inode(&mut bitmap, NUM_INODES).expect("realloc ino1");
+        assert_eq!(reused, 12);
+    }
+
+    #[test]
+    fn dir_entry_add_find_and_remove() {
+        let mut dir_block = [0u8; BLOCK_SIZE];
+        init_dir_block(&mut dir_block, 2, 2);
+
+        // Find . and ..
+        assert_eq!(find_dir_entry(&dir_block, b"."), Some((2, FT_DIR)));
+        assert_eq!(find_dir_entry(&dir_block, b".."), Some((2, FT_DIR)));
+        assert_eq!(find_dir_entry(&dir_block, b"nonexistent"), None);
+
+        // Add file entry
+        assert!(add_dir_entry(&mut dir_block, 11, FT_REG, b"hello.txt"));
+        assert_eq!(find_dir_entry(&dir_block, b"hello.txt"), Some((11, FT_REG)));
+
+        // Add dir entry
+        assert!(add_dir_entry(&mut dir_block, 12, FT_DIR, b"subdir"));
+        assert_eq!(find_dir_entry(&dir_block, b"subdir"), Some((12, FT_DIR)));
+
+        // Verify read_dir_entries visits all 4 entries in order
+        let mut visited = Vec::new();
+        read_dir_entries(&dir_block, |ino, ft, name| {
+            visited.push((ino, ft, core::str::from_utf8(name).unwrap().to_string()));
+        });
+        assert_eq!(visited.len(), 4);
+        assert_eq!(visited[0], (2, FT_DIR, ".".to_string()));
+        assert_eq!(visited[1], (2, FT_DIR, "..".to_string()));
+        assert_eq!(visited[2], (11, FT_REG, "hello.txt".to_string()));
+        assert_eq!(visited[3], (12, FT_DIR, "subdir".to_string()));
+
+        // Remove middle entry hello.txt
+        let removed = remove_dir_entry(&mut dir_block, b"hello.txt");
+        assert_eq!(removed, Some(11));
+        assert_eq!(find_dir_entry(&dir_block, b"hello.txt"), None);
+        assert_eq!(find_dir_entry(&dir_block, b"subdir"), Some((12, FT_DIR)));
+
+        // Verify entries remaining: ., .., subdir
+        let mut visited_after = Vec::new();
+        read_dir_entries(&dir_block, |ino, ft, name| {
+            visited_after.push((ino, ft, core::str::from_utf8(name).unwrap().to_string()));
+        });
+        assert_eq!(visited_after.len(), 3);
+        assert_eq!(visited_after[0].2, ".");
+        assert_eq!(visited_after[1].2, "..");
+        assert_eq!(visited_after[2].2, "subdir");
+    }
+
+    #[test]
+    fn path_splitting_and_iteration() {
+        assert_eq!(split_parent_and_basename("/"), ("", ""));
+        assert_eq!(split_parent_and_basename("/foo"), ("", "foo"));
+        assert_eq!(split_parent_and_basename("/foo/bar"), ("foo", "bar"));
+        assert_eq!(split_parent_and_basename("foo/bar/baz"), ("foo/bar", "baz"));
+        assert_eq!(split_parent_and_basename("solo"), ("", "solo"));
+
+        let components: Vec<&str> = PathComponentIterator::new("/usr/local/bin").collect();
+        assert_eq!(components, vec!["usr", "local", "bin"]);
+
+        let single: Vec<&str> = PathComponentIterator::new("file.txt").collect();
+        assert_eq!(single, vec!["file.txt"]);
+
+        let multi_slash: Vec<&str> = PathComponentIterator::new("//a///b////c//").collect();
+        assert_eq!(multi_slash, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn nested_directory_tree_and_path_resolution() {
+        let mut disk = vec![0u8; (TOTAL_BLOCKS as usize) * BLOCK_SIZE];
+        fn blk(n: u32) -> core::ops::Range<usize> {
+            let start = n as usize * BLOCK_SIZE;
+            start..start + BLOCK_SIZE
+        }
+        build_superblock(&mut disk[blk(SUPERBLOCK_BLOCK)]);
+        build_group_desc(&mut disk[blk(GROUP_DESC_BLOCK)]);
+        build_block_bitmap(&mut disk[blk(BLOCK_BITMAP_BLOCK)]);
+        build_inode_bitmap(&mut disk[blk(INODE_BITMAP_BLOCK)]);
+        write_root_inode(&mut disk[blk(INODE_TABLE_START_BLOCK)]);
+
+        // 1. Root dir: add "bin" (inode 12, block 11) and "readme.txt" (inode 11, block 10)
+        let root_slice = &mut disk[blk(ROOT_DATA_BLOCK)];
+        init_dir_block(root_slice, ROOT_INODE, ROOT_INODE);
+        assert!(add_dir_entry(root_slice, 11, FT_REG, b"readme.txt"));
+        assert!(add_dir_entry(root_slice, 12, FT_DIR, b"bin"));
+
+        // 2. Setup inode 12 for "bin" directory pointing to block 11
+        let (bin_tbl_blk, _) = inode_block_and_offset(12);
+        write_inode_entry_full(&mut disk[blk(bin_tbl_blk)], 12, S_IFDIR | MODE_755, BLOCK_SIZE as u32, 2, &[11]);
+
+        // 3. Init "bin" dir block (block 11) with . and .. (parent is ROOT_INODE=2)
+        init_dir_block(&mut disk[blk(11)], 12, ROOT_INODE);
+        assert!(add_dir_entry(&mut disk[blk(11)], 13, FT_REG, b"sh"));
+        assert!(add_dir_entry(&mut disk[blk(11)], 14, FT_DIR, b"apps"));
+
+        // 4. Setup inode 14 for "apps" dir pointing to block 12
+        let (apps_tbl_blk, _) = inode_block_and_offset(14);
+        write_inode_entry_full(&mut disk[blk(apps_tbl_blk)], 14, S_IFDIR | MODE_755, BLOCK_SIZE as u32, 2, &[12]);
+        init_dir_block(&mut disk[blk(12)], 14, 12);
+        assert!(add_dir_entry(&mut disk[blk(12)], 15, FT_REG, b"nested_file"));
+
+        // Resolve paths
+        let lookup = |inode: u32, buf: &mut [u8; BLOCK_SIZE]| -> bool {
+            let (tbl_blk, _) = inode_block_and_offset(inode);
+            let info = read_inode_entry(&disk[blk(tbl_blk)], inode);
+            if info.direct_blocks[0] != 0 {
+                let dblk = info.direct_blocks[0];
+                buf.copy_from_slice(&disk[blk(dblk)]);
+                true
+            } else {
+                false
+            }
+        };
+
+        assert_eq!(resolve_path("/", ROOT_INODE, lookup), Some((ROOT_INODE, FT_DIR)));
+        assert_eq!(resolve_path("/readme.txt", ROOT_INODE, lookup), Some((11, FT_REG)));
+        assert_eq!(resolve_path("/bin", ROOT_INODE, lookup), Some((12, FT_DIR)));
+        assert_eq!(resolve_path("/bin/sh", ROOT_INODE, lookup), Some((13, FT_REG)));
+        assert_eq!(resolve_path("/bin/apps", ROOT_INODE, lookup), Some((14, FT_DIR)));
+        assert_eq!(resolve_path("/bin/apps/nested_file", ROOT_INODE, lookup), Some((15, FT_REG)));
+        assert_eq!(resolve_path("/bin/nonexistent", ROOT_INODE, lookup), None);
+        assert_eq!(resolve_path("/readme.txt/cannot_be_dir", ROOT_INODE, lookup), None);
+    }
 }
 
 /// Real assertions against `kernel_common::audit_ring` -- Phase 4's

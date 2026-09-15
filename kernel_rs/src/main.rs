@@ -48,6 +48,7 @@ pub mod installer_demo; // Phase 13 -- real adversarial installer demo against a
 pub mod ipc;
 pub mod manifest; // Phase 13 deliverable 1 -- per-app capability manifest, see its own module doc
 pub mod manifest_demo; // Phase 13 -- real adversarial manifest-enforcement demo, off by default (see Cargo.toml)
+pub mod process; // Milestone 2: Generic on-demand process exec
 pub mod agent_gateway; // Live Agent Bridge: external LLM/host over COM2
 #[cfg(any(
     feature = "fault_test_null_deref",

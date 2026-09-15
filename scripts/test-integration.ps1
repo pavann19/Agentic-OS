@@ -39,6 +39,7 @@ $suite = @(
     @{ Name = "test-shell";                    Script = "scripts\test-shell.ps1" },
     @{ Name = "test-agent-bridge";             Script = "scripts\test-agent-bridge.ps1" },
     @{ Name = "test-agent-download";           Script = "scripts\test-agent-download.ps1" },
+    @{ Name = "test-self-hosting";             Script = "scripts\test-self-hosting.ps1" },
     @{ Name = "test-release";                  Script = "scripts\test-release.ps1" }
 )
 

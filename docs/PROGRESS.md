@@ -1956,4 +1956,49 @@ Wired together `net_client`'s real HTTP GET and `file_service`'s real ext2 write
 - Serial log transcripts saved to `_evidence/latest/serial-agent-download.log` and `_evidence/latest/serial-agent-download-unauth.log`.
 - Host unit tests: 124/124 PASS (`cargo test` in `host_tests/`).
 
+---
+
+## Self-Hosting Groundwork — Milestones 1 & 2 (DONE)
+
+Source: `docs/TASK_SELF_HOSTING_GROUNDWORK.md`. Completed 2026-09-15.
+Established the architectural audit and implemented the foundational prerequisites for self-hosting on Agentic OS: a directory-based ext2 filesystem with multi-file path resolution and a generic on-demand process execution syscall lifecycle (`spawn` / `waitpid` / `exit`).
+
+- [x] **Milestone 1: Self-Hosting Requirements Audit (`docs/SELF_HOSTING_REQUIREMENTS_AUDIT.md`)**
+  - Detailed architectural audit comparing `rustc`/`cargo` and minimal C toolchain runtime requirements against Agentic OS capabilities.
+  - Documents memory budgets (1-4GB minimum for `rustc`, 64MB-256MB for minimal bootstrap), required syscall surface (64+ POSIX syscalls for `std::fs`, `std::process`, `std::env`, `mmap`, `signals`), dynamic vs static linking requirements, and a staged 4-phase ladder towards native compilation.
+
+- [x] **Milestone 2.1: Directory-Based ext2 Filesystem**
+  - `kernel_common/src/ext2.rs`: Implemented ext2 block and inode allocation (`alloc_block`, `free_block`, `alloc_inode`, `free_inode`), directory block formatting (`init_dir_block` with `.` and `..`), directory entry manipulation (`add_dir_entry`, `find_dir_entry`, `remove_dir_entry`), path splitting (`split_parent_and_basename`), segment iteration (`PathComponentIterator`), and hierarchical path resolution (`resolve_path`).
+  - `host_tests/src/lib.rs`: 5 new unit tests covering allocation, directory entries, path splitting, nested tree traversal, and block bitmaps. 129/129 host unit tests PASS (`cargo test`).
+  - `user_rs/virtio_blk_driver/src/main.rs`: Handlers for `FS_OP_LOOKUP` (2), `FS_OP_READDIR` (3), `FS_OP_MKDIR` (4), `FS_OP_CREATE` (5), `FS_OP_UNLINK` (6), alongside regular read and write operations.
+  - `user_rs/agentic_sdk/src/file_service.rs`: Ring-3 API bindings: `lookup(path)`, `mkdir(path)`, `create_file(path)`, `unlink(path)`, `readdir(path, entries)`, `write_file_path(path, data)`, `read_file_path(path, out)`.
+  - `kernel_rs/src/file_service.rs`: Server reply and poll handling updated to preserve byte lengths for non-payload replies (e.g. write byte counts), and capability validation extended (`current_has_any_file_capability`) to authorize file operations on dynamically created inodes for processes holding `FileObject` rights.
+
+- [x] **Milestone 2.2: Generic On-Demand Process Exec Syscall Lifecycle**
+  - `kernel_rs/src/syscall.rs`: Wired syscall 34 (`SYS_PROCESS_SPAWN`), 35 (`SYS_PROCESS_WAIT`), and 36 (`SYS_PROCESS_EXIT`).
+  - `kernel_rs/src/process.rs`: Implemented `sys_spawn(path, argv) -> pid`, `sys_wait(pid) -> exit_code`, and `sys_exit(code)`. Maintained thread-safe global `PROCESS_TABLE` tracking `Running`, `Exited(code)`, and reaped processes. Loads ELF binaries on demand via `elf::load` into isolated address spaces.
+  - `kernel_rs/src/thread.rs`: Added `spawn_user`, `enter_user_process`, and `user_process_trampoline` setting up clean ring-3 user stacks with `argc` and `argv` pointers, returning to ring 3 via `sysretq`.
+  - `user_rs/child_proc`: Standalone ring-3 binary (`x86_64-unknown-none`) built and embedded. Executes on-demand, writes confirmation to COM1, and exits with code 42 via `SYS_PROCESS_EXIT`.
+  - `user_rs/agentic_sdk/src/process.rs`: SDK bindings for `spawn(path, argv) -> u64`, `waitpid(pid) -> u64`, and `exit(code) -> !`.
+
+- [x] **Milestone 2.3: Live Verification & Automated Suite Integration**
+  - `user_rs/net_client/src/main.rs`: Added live groundwork verification sequence:
+    1. `mkdir("/src")` -> OK (inode 12).
+    2. `mkdir("/src/bin")` -> OK (inode 13).
+    3. `write_file_path("/src/bin/hello.txt", ...)` -> creates inode 14 and writes 68 bytes.
+    4. `read_file_path("/src/bin/hello.txt", ...)` -> reads back 68 bytes, byte-for-byte verified.
+    5. `readdir("/src/bin")` -> lists `.`, `..`, and `hello.txt`.
+    6. `unlink("/src/bin/hello.txt")` -> unlinks entry and frees inode 14.
+    7. `spawn("/bin/child", ...)` -> launches child process in ring 3 on demand.
+    8. Child executes in ring 3 and exits with code 42.
+    9. `waitpid` reaps child process and retrieves exit code 42.
+  - `scripts/test-self-hosting.ps1`: Automated QEMU test validating 19/19 checks (100% PASS).
+  - `scripts/test-integration.ps1`: Wired `test-self-hosting` into the full regression suite.
+  - Transcript saved to `_evidence/latest/serial-self-hosting.log`.
+  - Zero regressions: `scripts/test-agent-download.ps1` PASS (18/18 authorized, 4/4 adversarial denial checks).
+
+**Explicit Scope Boundaries:**
+- Stops after Milestone 2 per instructions: Milestones 3 (minimal C toolchain bootstrap) and 4 (`rustc` self-hosting pipeline) are future work and explicitly not attempted.
+
+
 

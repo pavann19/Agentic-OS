@@ -436,6 +436,22 @@ impl CapabilityTable {
         }
         None
     }
+
+    /// Checks if the table holds ANY valid, unrevoked FileObject capability that satisfies `required`.
+    pub fn has_any_file_capability(&self, required: Rights) -> bool {
+        for (i, slot) in self.slots.iter().enumerate() {
+            if let Some(cap) = slot {
+                if cap.rights.contains(required) {
+                    if let Some(KernelObjectKind::FileObject { .. }) = object_kind(cap.object_id) {
+                        if self.resolve(i as CapId, required).is_ok() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

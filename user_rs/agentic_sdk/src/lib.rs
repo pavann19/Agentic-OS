@@ -33,6 +33,7 @@
 pub mod file_service; // real block/file-I/O-for-apps path (IPC-mediated), see its own module doc
 pub mod icon; // minimal 16x16 1-bit icons for apps & launcher
 pub mod net_service; // real network service client for apps (IPC-mediated)
+pub mod process; // generic on-demand process exec (SYS_PROCESS_SPAWN / WAIT / EXIT)
 pub mod serial_com1;
 pub mod surface; // Phase 12 deliverable 4 -- real PSF1 text rendering via SYS_SURFACE_DRAW_TEXT
 pub mod syscall;

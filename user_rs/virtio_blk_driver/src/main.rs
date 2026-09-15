@@ -121,12 +121,13 @@ struct VirtioBlkInfo {
 /// syscalls 12 (poll), 17-19 with real return values, so this is the
 /// same full-clobber-list fix that function's own doc already
 /// describes, generalized.
-unsafe fn syscall_ret(num: u64, a0: u64, a1: u64) -> u64 {
+unsafe fn syscall_ret(num: u64, mut a0: u64, mut a1: u64) -> u64 {
     let ret: u64;
     core::arch::asm!(
         "mov rax, {num}", "syscall",
         num = in(reg) num,
-        in("rdi") a0, in("rsi") a1,
+        inout("rdi") a0 => _,
+        inout("rsi") a1 => _,
         lateout("rax") ret,
         lateout("rdx") _, lateout("rcx") _,
         lateout("r8") _, lateout("r9") _, lateout("r10") _, lateout("r11") _,
@@ -643,24 +644,312 @@ pub extern "C" fn _start() -> ! {
         com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_LOOP_START cap=");
         write_dec_u64(info.file_service_cap as u64);
         com1_write_str("\n");
+
+        const FS_OP_READ: u8 = 0;
+        const FS_OP_WRITE: u8 = 1;
+        const FS_OP_LOOKUP: u8 = 2;
+        const FS_OP_READDIR: u8 = 3;
+        const FS_OP_MKDIR: u8 = 4;
+        const FS_OP_CREATE: u8 = 5;
+        const FS_OP_UNLINK: u8 = 6;
+
+        unsafe fn driver_resolve_path(common: u64, notify_base: u64, dma: u64, dma_phys: u64, path: &str) -> Option<(u32, u8)> {
+            ext2::resolve_path(path, ext2::ROOT_INODE, |dir_ino, buf| {
+                let (tbl_blk, _) = ext2::inode_block_and_offset(dir_ino);
+                let mut tbl = zeroed_block!();
+                ext2_read_block(common, notify_base, dma, dma_phys, tbl_blk, &mut tbl);
+                let info = ext2::read_inode_entry(&tbl, dir_ino);
+                if info.direct_blocks[0] != 0 {
+                    ext2_read_block(common, notify_base, dma, dma_phys, info.direct_blocks[0], buf);
+                    true
+                } else {
+                    false
+                }
+            })
+        }
+
         loop {
             let r = syscall_ret(12, info.file_service_cap as u64, 0); // SYS_IPC_TRY_RECEIVE
             if r == u64::MAX {
-                syscall_ret(29, 0, 0); // SYS_YIELD -- cooperative quantum release
+                syscall_ret(29, 0, 0); // SYS_YIELD
                 continue;
             }
-            // Real, disclosed ABI limit: `SYS_IPC_TRY_RECEIVE`'s own
-            // syscall return value only ever carries `msg.data[0]`
-            // (one real u64) -- `file_service::request_file` packs
-            // both the real request id and the real inode into it
-            // (`(request_id << 32) | inode`), unpacked here the same
-            // way `SYS_WINDOW_MOVE`'s own packed x/y already does.
             let request_id = r >> 32;
-            let is_write = ((r >> 31) & 1) != 0;
-            let inode = (r as u32) & 0x7FFF_FFFF;
-            if is_write {
+            let is_write_bit = ((r >> 31) & 1) != 0;
+            let op = ((r >> 24) & 0x7F) as u8;
+            let mut target_inode = (r as u32) & 0x00FF_FFFF;
+            if op == 0 && target_inode == 0 {
+                target_inode = ext2::FILE_INODE;
+            }
+
+            if op == FS_OP_LOOKUP {
+                let mut write_buf_mu = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
+                let write_buf: &mut [u8; 4096] = &mut *write_buf_mu.as_mut_ptr();
+                let ret = syscall_ret(25, request_id, write_buf.as_mut_ptr() as u64);
+                if ret != u64::MAX {
+                    let bytes_len = (ret as u32) as usize;
+                    let path = core::str::from_utf8(&write_buf[..bytes_len]).unwrap_or("");
+                    com1_write_str("[VIRTIO_BLK_DRIVER] FS_OP_LOOKUP path=");
+                    com1_write_str(path);
+                    com1_write_str("\n");
+                    if let Some((found_ino, ft)) = driver_resolve_path(common, notify_base, dma, dma_phys, path) {
+                        let (tbl_blk, _) = ext2::inode_block_and_offset(found_ino);
+                        let mut tbl = zeroed_block!();
+                        ext2_read_block(common, notify_base, dma, dma_phys, tbl_blk, &mut tbl);
+                        let info = ext2::read_inode_entry(&tbl, found_ino);
+                        let mut reply_data = [0u8; 16];
+                        reply_data[0..4].copy_from_slice(&found_ino.to_le_bytes());
+                        reply_data[4] = ft;
+                        reply_data[8..12].copy_from_slice(&info.size.to_le_bytes());
+                        let reply = FileReplyRequest { request_id, data_vaddr: reply_data.as_ptr() as u64, len: 16 };
+                        syscall_ret(18, 0, &reply as *const _ as u64);
+                    } else {
+                        let reply = FileReplyRequest { request_id, data_vaddr: 0, len: 0 };
+                        syscall_ret(18, 0, &reply as *const _ as u64);
+                    }
+                }
+            } else if op == FS_OP_READDIR {
+                let mut write_buf_mu = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
+                let write_buf: &mut [u8; 4096] = &mut *write_buf_mu.as_mut_ptr();
+                let ret = syscall_ret(25, request_id, write_buf.as_mut_ptr() as u64);
+                let bytes_len = if ret != u64::MAX { (ret as u32) as usize } else { 0 };
+                let path = core::str::from_utf8(&write_buf[..bytes_len]).unwrap_or("");
+                com1_write_str("[VIRTIO_BLK_DRIVER] FS_OP_READDIR path=");
+                com1_write_str(path);
+                com1_write_str("\n");
+                let dir_ino = if path.is_empty() || path == "/" {
+                    ext2::ROOT_INODE
+                } else {
+                    driver_resolve_path(common, notify_base, dma, dma_phys, path).map(|(i, _)| i).unwrap_or(0)
+                };
+                if dir_ino != 0 {
+                    let (tbl_blk, _) = ext2::inode_block_and_offset(dir_ino);
+                    let mut tbl = zeroed_block!();
+                    ext2_read_block(common, notify_base, dma, dma_phys, tbl_blk, &mut tbl);
+                    let info = ext2::read_inode_entry(&tbl, dir_ino);
+                    let mut out_mu = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
+                    let out: &mut [u8; 4096] = &mut *out_mu.as_mut_ptr();
+                    for b in out.iter_mut() { *b = 0; }
+                    let mut off = 0usize;
+                    if info.direct_blocks[0] != 0 {
+                        let mut dir_block = zeroed_block!();
+                        ext2_read_block(common, notify_base, dma, dma_phys, info.direct_blocks[0], &mut dir_block);
+                        ext2::read_dir_entries(&dir_block, |e_ino, e_ft, e_name| {
+                            if off + 64 <= 4096 {
+                                let slot = &mut out[off..off + 64];
+                                slot[0..4].copy_from_slice(&e_ino.to_le_bytes());
+                                slot[4] = e_ft;
+                                slot[5] = e_name.len() as u8;
+                                let nlen = e_name.len().min(56);
+                                slot[8..8 + nlen].copy_from_slice(&e_name[..nlen]);
+                                off += 64;
+                            }
+                        });
+                    }
+                    let reply = FileReplyRequest { request_id, data_vaddr: out.as_ptr() as u64, len: off as u32 };
+                    syscall_ret(18, 0, &reply as *const _ as u64);
+                } else {
+                    let reply = FileReplyRequest { request_id, data_vaddr: 0, len: 0 };
+                    syscall_ret(18, 0, &reply as *const _ as u64);
+                }
+            } else if op == FS_OP_MKDIR {
+                let mut write_buf_mu = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
+                let write_buf: &mut [u8; 4096] = &mut *write_buf_mu.as_mut_ptr();
+                let ret = syscall_ret(25, request_id, write_buf.as_mut_ptr() as u64);
+                let bytes_len = if ret != u64::MAX { (ret as u32) as usize } else { 0 };
+                let path = core::str::from_utf8(&write_buf[..bytes_len]).unwrap_or("");
+                com1_write_str("[VIRTIO_BLK_DRIVER] FS_OP_MKDIR path=");
+                com1_write_str(path);
+                com1_write_str("\n");
+                let (parent_path, leaf_name) = ext2::split_parent_and_basename(path);
+                let parent_ino = if parent_path.is_empty() {
+                    ext2::ROOT_INODE
+                } else {
+                    driver_resolve_path(common, notify_base, dma, dma_phys, parent_path).map(|(i, _)| i).unwrap_or(0)
+                };
+                let mut success_ino = 0u32;
+                if parent_ino != 0 && !leaf_name.is_empty() {
+                    let mut blk_bm = zeroed_block!(); ext2_read_block(common, notify_base, dma, dma_phys, ext2::BLOCK_BITMAP_BLOCK, &mut blk_bm);
+                    let mut ino_bm = zeroed_block!(); ext2_read_block(common, notify_base, dma, dma_phys, ext2::INODE_BITMAP_BLOCK, &mut ino_bm);
+                    let new_blk = ext2::alloc_block(&mut blk_bm, ext2::TOTAL_BLOCKS);
+                    let new_ino = ext2::alloc_inode(&mut ino_bm, ext2::NUM_INODES);
+                    if let (Some(new_b), Some(new_i)) = (new_blk, new_ino) {
+                        let mut new_dir_b = zeroed_block!();
+                        ext2::init_dir_block(&mut new_dir_b, new_i, parent_ino);
+                        ext2_write_block(common, notify_base, dma, dma_phys, new_b, &new_dir_b);
+
+                        let (p_tbl_blk, _) = ext2::inode_block_and_offset(parent_ino);
+                        let mut p_tbl = zeroed_block!();
+                        ext2_read_block(common, notify_base, dma, dma_phys, p_tbl_blk, &mut p_tbl);
+                        let mut p_info = ext2::read_inode_entry(&p_tbl, parent_ino);
+                        let mut p_dir_b = zeroed_block!();
+                        ext2_read_block(common, notify_base, dma, dma_phys, p_info.direct_blocks[0], &mut p_dir_b);
+                        if ext2::add_dir_entry(&mut p_dir_b, new_i, ext2::FT_DIR, leaf_name.as_bytes()) {
+                            ext2_write_block(common, notify_base, dma, dma_phys, p_info.direct_blocks[0], &p_dir_b);
+
+                            p_info.links += 1;
+                            ext2::write_inode_entry_full(&mut p_tbl, parent_ino, p_info.mode, p_info.size, p_info.links, &p_info.direct_blocks);
+                            ext2_write_block(common, notify_base, dma, dma_phys, p_tbl_blk, &p_tbl);
+
+                            let (n_tbl_blk, _) = ext2::inode_block_and_offset(new_i);
+                            let mut n_tbl = zeroed_block!();
+                            ext2_read_block(common, notify_base, dma, dma_phys, n_tbl_blk, &mut n_tbl);
+                            ext2::write_inode_entry_full(&mut n_tbl, new_i, ext2::S_IFDIR | ext2::MODE_755, ext2::BLOCK_SIZE as u32, 2, &[new_b]);
+                            ext2_write_block(common, notify_base, dma, dma_phys, n_tbl_blk, &n_tbl);
+
+                            ext2_write_block(common, notify_base, dma, dma_phys, ext2::BLOCK_BITMAP_BLOCK, &blk_bm);
+                            ext2_write_block(common, notify_base, dma, dma_phys, ext2::INODE_BITMAP_BLOCK, &ino_bm);
+
+                            let mut sb = zeroed_block!(); ext2_read_block(common, notify_base, dma, dma_phys, ext2::SUPERBLOCK_BLOCK, &mut sb);
+                            let mut gd = zeroed_block!(); ext2_read_block(common, notify_base, dma, dma_phys, ext2::GROUP_DESC_BLOCK, &mut gd);
+                            ext2::update_alloc_counts(&mut sb, &mut gd, -1, -1, 1);
+                            ext2_write_block(common, notify_base, dma, dma_phys, ext2::GROUP_DESC_BLOCK, &gd);
+                            ext2_write_block(common, notify_base, dma, dma_phys, ext2::SUPERBLOCK_BLOCK, &sb);
+
+                            success_ino = new_i;
+                            com1_write_str("[VIRTIO_BLK_DRIVER] FS_OP_MKDIR_SUCCESS ino=");
+                            write_dec_u64(success_ino as u64);
+                            com1_write_str("\n");
+                        }
+                    }
+                }
+                let mut reply_bytes = [0u8; 4];
+                if success_ino != 0 {
+                    reply_bytes.copy_from_slice(&success_ino.to_le_bytes());
+                    let reply = FileReplyRequest { request_id, data_vaddr: reply_bytes.as_ptr() as u64, len: 4 };
+                    syscall_ret(18, 0, &reply as *const _ as u64);
+                } else {
+                    let reply = FileReplyRequest { request_id, data_vaddr: 0, len: 0 };
+                    syscall_ret(18, 0, &reply as *const _ as u64);
+                }
+            } else if op == FS_OP_CREATE {
+                let mut write_buf_mu = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
+                let write_buf: &mut [u8; 4096] = &mut *write_buf_mu.as_mut_ptr();
+                let ret = syscall_ret(25, request_id, write_buf.as_mut_ptr() as u64);
+                let bytes_len = if ret != u64::MAX { (ret as u32) as usize } else { 0 };
+                let path = core::str::from_utf8(&write_buf[..bytes_len]).unwrap_or("");
+                com1_write_str("[VIRTIO_BLK_DRIVER] FS_OP_CREATE path=");
+                com1_write_str(path);
+                com1_write_str("\n");
+                let (parent_path, leaf_name) = ext2::split_parent_and_basename(path);
+                let parent_ino = if parent_path.is_empty() {
+                    ext2::ROOT_INODE
+                } else {
+                    driver_resolve_path(common, notify_base, dma, dma_phys, parent_path).map(|(i, _)| i).unwrap_or(0)
+                };
+                let mut success_ino = 0u32;
+                if parent_ino != 0 && !leaf_name.is_empty() {
+                    let mut blk_bm = zeroed_block!(); ext2_read_block(common, notify_base, dma, dma_phys, ext2::BLOCK_BITMAP_BLOCK, &mut blk_bm);
+                    let mut ino_bm = zeroed_block!(); ext2_read_block(common, notify_base, dma, dma_phys, ext2::INODE_BITMAP_BLOCK, &mut ino_bm);
+                    let new_blk = ext2::alloc_block(&mut blk_bm, ext2::TOTAL_BLOCKS);
+                    let new_ino = ext2::alloc_inode(&mut ino_bm, ext2::NUM_INODES);
+                    if let (Some(new_b), Some(new_i)) = (new_blk, new_ino) {
+                        let zero_b = zeroed_block!();
+                        ext2_write_block(common, notify_base, dma, dma_phys, new_b, &zero_b);
+
+                        let (p_tbl_blk, _) = ext2::inode_block_and_offset(parent_ino);
+                        let mut p_tbl = zeroed_block!();
+                        ext2_read_block(common, notify_base, dma, dma_phys, p_tbl_blk, &mut p_tbl);
+                        let p_info = ext2::read_inode_entry(&p_tbl, parent_ino);
+                        let mut p_dir_b = zeroed_block!();
+                        ext2_read_block(common, notify_base, dma, dma_phys, p_info.direct_blocks[0], &mut p_dir_b);
+                        if ext2::add_dir_entry(&mut p_dir_b, new_i, ext2::FT_REG, leaf_name.as_bytes()) {
+                            ext2_write_block(common, notify_base, dma, dma_phys, p_info.direct_blocks[0], &p_dir_b);
+
+                            let (n_tbl_blk, _) = ext2::inode_block_and_offset(new_i);
+                            let mut n_tbl = zeroed_block!();
+                            ext2_read_block(common, notify_base, dma, dma_phys, n_tbl_blk, &mut n_tbl);
+                            ext2::write_inode_entry_full(&mut n_tbl, new_i, ext2::S_IFREG | ext2::MODE_644, 0, 1, &[new_b]);
+                            ext2_write_block(common, notify_base, dma, dma_phys, n_tbl_blk, &n_tbl);
+
+                            ext2_write_block(common, notify_base, dma, dma_phys, ext2::BLOCK_BITMAP_BLOCK, &blk_bm);
+                            ext2_write_block(common, notify_base, dma, dma_phys, ext2::INODE_BITMAP_BLOCK, &ino_bm);
+
+                            let mut sb = zeroed_block!(); ext2_read_block(common, notify_base, dma, dma_phys, ext2::SUPERBLOCK_BLOCK, &mut sb);
+                            let mut gd = zeroed_block!(); ext2_read_block(common, notify_base, dma, dma_phys, ext2::GROUP_DESC_BLOCK, &mut gd);
+                            ext2::update_alloc_counts(&mut sb, &mut gd, -1, -1, 0);
+                            ext2_write_block(common, notify_base, dma, dma_phys, ext2::GROUP_DESC_BLOCK, &gd);
+                            ext2_write_block(common, notify_base, dma, dma_phys, ext2::SUPERBLOCK_BLOCK, &sb);
+
+                            success_ino = new_i;
+                            com1_write_str("[VIRTIO_BLK_DRIVER] FS_OP_CREATE_SUCCESS ino=");
+                            write_dec_u64(success_ino as u64);
+                            com1_write_str("\n");
+                        }
+                    }
+                }
+                let mut reply_bytes = [0u8; 4];
+                if success_ino != 0 {
+                    reply_bytes.copy_from_slice(&success_ino.to_le_bytes());
+                    let reply = FileReplyRequest { request_id, data_vaddr: reply_bytes.as_ptr() as u64, len: 4 };
+                    syscall_ret(18, 0, &reply as *const _ as u64);
+                } else {
+                    let reply = FileReplyRequest { request_id, data_vaddr: 0, len: 0 };
+                    syscall_ret(18, 0, &reply as *const _ as u64);
+                }
+            } else if op == FS_OP_UNLINK {
+                let mut write_buf_mu = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
+                let write_buf: &mut [u8; 4096] = &mut *write_buf_mu.as_mut_ptr();
+                let ret = syscall_ret(25, request_id, write_buf.as_mut_ptr() as u64);
+                let bytes_len = if ret != u64::MAX { (ret as u32) as usize } else { 0 };
+                let path = core::str::from_utf8(&write_buf[..bytes_len]).unwrap_or("");
+                com1_write_str("[VIRTIO_BLK_DRIVER] FS_OP_UNLINK path=");
+                com1_write_str(path);
+                com1_write_str("\n");
+                let (parent_path, leaf_name) = ext2::split_parent_and_basename(path);
+                let parent_ino = if parent_path.is_empty() {
+                    ext2::ROOT_INODE
+                } else {
+                    driver_resolve_path(common, notify_base, dma, dma_phys, parent_path).map(|(i, _)| i).unwrap_or(0)
+                };
+                let mut unlinked = false;
+                if parent_ino != 0 && !leaf_name.is_empty() {
+                    let (p_tbl_blk, _) = ext2::inode_block_and_offset(parent_ino);
+                    let mut p_tbl = zeroed_block!();
+                    ext2_read_block(common, notify_base, dma, dma_phys, p_tbl_blk, &mut p_tbl);
+                    let p_info = ext2::read_inode_entry(&p_tbl, parent_ino);
+                    let mut p_dir_b = zeroed_block!();
+                    ext2_read_block(common, notify_base, dma, dma_phys, p_info.direct_blocks[0], &mut p_dir_b);
+                    if let Some(target_ino) = ext2::remove_dir_entry(&mut p_dir_b, leaf_name.as_bytes()) {
+                        ext2_write_block(common, notify_base, dma, dma_phys, p_info.direct_blocks[0], &p_dir_b);
+
+                        let (t_tbl_blk, _) = ext2::inode_block_and_offset(target_ino);
+                        let mut t_tbl = zeroed_block!();
+                        ext2_read_block(common, notify_base, dma, dma_phys, t_tbl_blk, &mut t_tbl);
+                        let t_info = ext2::read_inode_entry(&t_tbl, target_ino);
+
+                        let mut blk_bm = zeroed_block!(); ext2_read_block(common, notify_base, dma, dma_phys, ext2::BLOCK_BITMAP_BLOCK, &mut blk_bm);
+                        let mut ino_bm = zeroed_block!(); ext2_read_block(common, notify_base, dma, dma_phys, ext2::INODE_BITMAP_BLOCK, &mut ino_bm);
+                        let mut freed_blks = 0i32;
+                        for &b in t_info.direct_blocks.iter() {
+                            if b != 0 {
+                                ext2::free_block(&mut blk_bm, b);
+                                freed_blks += 1;
+                            }
+                        }
+                        ext2::free_inode(&mut ino_bm, target_ino);
+                        ext2_write_block(common, notify_base, dma, dma_phys, ext2::BLOCK_BITMAP_BLOCK, &blk_bm);
+                        ext2_write_block(common, notify_base, dma, dma_phys, ext2::INODE_BITMAP_BLOCK, &ino_bm);
+
+                        let is_dir = (t_info.mode & ext2::S_IFDIR) != 0;
+                        let mut sb = zeroed_block!(); ext2_read_block(common, notify_base, dma, dma_phys, ext2::SUPERBLOCK_BLOCK, &mut sb);
+                        let mut gd = zeroed_block!(); ext2_read_block(common, notify_base, dma, dma_phys, ext2::GROUP_DESC_BLOCK, &mut gd);
+                        ext2::update_alloc_counts(&mut sb, &mut gd, freed_blks, 1, if is_dir { -1 } else { 0 });
+                        ext2_write_block(common, notify_base, dma, dma_phys, ext2::GROUP_DESC_BLOCK, &gd);
+                        ext2_write_block(common, notify_base, dma, dma_phys, ext2::SUPERBLOCK_BLOCK, &sb);
+
+                        unlinked = true;
+                        com1_write_str("[VIRTIO_BLK_DRIVER] FS_OP_UNLINK_SUCCESS target_ino=");
+                        write_dec_u64(target_ino as u64);
+                        com1_write_str("\n");
+                    }
+                }
+                let reply_val = [if unlinked { 1u8 } else { 0u8 }];
+                let reply = FileReplyRequest { request_id, data_vaddr: reply_val.as_ptr() as u64, len: 1 };
+                syscall_ret(18, 0, &reply as *const _ as u64);
+            } else if is_write_bit {
                 com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_WRITE_REQUEST_RECEIVED inode=");
-                write_dec_u64(inode as u64);
+                write_dec_u64(target_inode as u64);
                 com1_write_str("\n");
 
                 let mut write_buf_mu = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
@@ -676,39 +965,56 @@ pub extern "C" fn _start() -> ! {
                     write_dec_u64(offset as u64);
                     com1_write_str("\n");
 
-                    // 1. Write the data block(s) to disk
+                    let (tbl_blk, _) = ext2::inode_block_and_offset(target_inode);
+                    let mut tbl = zeroed_block!();
+                    ext2_read_block(common, notify_base, dma, dma_phys, tbl_blk, &mut tbl);
+                    let mut info = ext2::read_inode_entry(&tbl, target_inode);
+
                     let mut written = 0usize;
                     while written < bytes_len {
                         let cur_offset = offset + written;
-                        let block_idx = (cur_offset / ext2::BLOCK_SIZE) as u32;
+                        let block_idx = (cur_offset / ext2::BLOCK_SIZE) as usize;
+                        if block_idx >= 12 { break; }
                         let block_offset = cur_offset % ext2::BLOCK_SIZE;
                         let chunk_len = (ext2::BLOCK_SIZE - block_offset).min(bytes_len - written);
 
+                        if info.direct_blocks[block_idx] == 0 {
+                            let mut blk_bm = zeroed_block!();
+                            ext2_read_block(common, notify_base, dma, dma_phys, ext2::BLOCK_BITMAP_BLOCK, &mut blk_bm);
+                            if let Some(new_blk) = ext2::alloc_block(&mut blk_bm, ext2::TOTAL_BLOCKS) {
+                                info.direct_blocks[block_idx] = new_blk;
+                                ext2_write_block(common, notify_base, dma, dma_phys, ext2::BLOCK_BITMAP_BLOCK, &blk_bm);
+                                let mut sb = zeroed_block!(); ext2_read_block(common, notify_base, dma, dma_phys, ext2::SUPERBLOCK_BLOCK, &mut sb);
+                                let mut gd = zeroed_block!(); ext2_read_block(common, notify_base, dma, dma_phys, ext2::GROUP_DESC_BLOCK, &mut gd);
+                                ext2::update_alloc_counts(&mut sb, &mut gd, -1, 0, 0);
+                                ext2_write_block(common, notify_base, dma, dma_phys, ext2::GROUP_DESC_BLOCK, &gd);
+                                ext2_write_block(common, notify_base, dma, dma_phys, ext2::SUPERBLOCK_BLOCK, &sb);
+                            } else {
+                                break;
+                            }
+                        }
+
+                        let dblk = info.direct_blocks[block_idx];
                         let mut disk_block = zeroed_block!();
                         if block_offset != 0 || chunk_len < ext2::BLOCK_SIZE {
-                            ext2_read_block(common, notify_base, dma, dma_phys, ext2::FILE_DATA_BLOCK + block_idx, &mut disk_block);
+                            ext2_read_block(common, notify_base, dma, dma_phys, dblk, &mut disk_block);
                         }
                         disk_block[block_offset..block_offset + chunk_len].copy_from_slice(&write_buf[written..written + chunk_len]);
-                        ext2_write_block(common, notify_base, dma, dma_phys, ext2::FILE_DATA_BLOCK + block_idx, &disk_block);
+                        ext2_write_block(common, notify_base, dma, dma_phys, dblk, &disk_block);
                         written += chunk_len;
                     }
 
-                    // 2. Read inode table block 1, update file inode size & block pointers, write back
-                    let mut inode_table1 = zeroed_block!();
-                    ext2_read_block(common, notify_base, dma, dma_phys, ext2::INODE_TABLE_START_BLOCK + 1, &mut inode_table1);
-                    let existing_size = ext2::read_file_inode_size(&inode_table1);
-                    let new_size = (offset + bytes_len).max(existing_size) as u32;
+                    let new_size = (offset + written).max(info.size as usize) as u32;
                     let num_blocks = ((new_size as usize + ext2::BLOCK_SIZE - 1) / ext2::BLOCK_SIZE) as u32;
-                    ext2::write_file_inode_blocks(&mut inode_table1, new_size, ext2::FILE_DATA_BLOCK, num_blocks);
-                    ext2_write_block(common, notify_base, dma, dma_phys, ext2::INODE_TABLE_START_BLOCK + 1, &inode_table1);
+                    ext2::write_inode_entry_full(&mut tbl, target_inode, info.mode, new_size, info.links, &info.direct_blocks[..num_blocks as usize]);
+                    ext2_write_block(common, notify_base, dma, dma_phys, tbl_blk, &tbl);
 
                     com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_WRITE_COMMITTED\n");
 
-                    // 3. Acknowledge write completion via SYS_FILE_SERVICE_REPLY
                     let reply = FileReplyRequest {
                         request_id,
                         data_vaddr: 0,
-                        len: bytes_len as u32,
+                        len: written as u32,
                     };
                     let reply_vaddr = &reply as *const FileReplyRequest as u64;
                     let reply_status = syscall_ret(18, 0, reply_vaddr);
@@ -718,23 +1024,28 @@ pub extern "C" fn _start() -> ! {
                 }
             } else {
                 com1_write_str("[VIRTIO_BLK_DRIVER] FILE_SERVICE_REQUEST_RECEIVED inode=");
-                write_dec_u64(inode as u64);
+                write_dec_u64(target_inode as u64);
                 com1_write_str("\n");
 
-                let mut inode_table1 = zeroed_block!();
-                ext2_read_block(common, notify_base, dma, dma_phys, ext2::INODE_TABLE_START_BLOCK + 1, &mut inode_table1);
-                let file_size = ext2::read_file_inode_size(&inode_table1);
+                let (tbl_blk, _) = ext2::inode_block_and_offset(target_inode);
+                let mut tbl = zeroed_block!();
+                ext2_read_block(common, notify_base, dma, dma_phys, tbl_blk, &mut tbl);
+                let info = ext2::read_inode_entry(&tbl, target_inode);
+                let file_size = info.size as usize;
                 let read_len = file_size.min(4096);
                 let mut out_mu = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
                 let out: &mut [u8; 4096] = &mut *out_mu.as_mut_ptr();
 
                 let num_blocks = (read_len + ext2::BLOCK_SIZE - 1) / ext2::BLOCK_SIZE;
-                for blk_idx in 0..num_blocks {
-                    let mut blk_buf = zeroed_block!();
-                    ext2_read_block(common, notify_base, dma, dma_phys, ext2::FILE_DATA_BLOCK + blk_idx as u32, &mut blk_buf);
-                    let blk_start = blk_idx * ext2::BLOCK_SIZE;
-                    let blk_len = ext2::BLOCK_SIZE.min(read_len - blk_start);
-                    out[blk_start..blk_start + blk_len].copy_from_slice(&blk_buf[..blk_len]);
+                for blk_idx in 0..num_blocks.min(12) {
+                    let dblk = info.direct_blocks[blk_idx];
+                    if dblk != 0 {
+                        let mut blk_buf = zeroed_block!();
+                        ext2_read_block(common, notify_base, dma, dma_phys, dblk, &mut blk_buf);
+                        let blk_start = blk_idx * ext2::BLOCK_SIZE;
+                        let blk_len = ext2::BLOCK_SIZE.min(read_len - blk_start);
+                        out[blk_start..blk_start + blk_len].copy_from_slice(&blk_buf[..blk_len]);
+                    }
                 }
 
                 let reply = FileReplyRequest {

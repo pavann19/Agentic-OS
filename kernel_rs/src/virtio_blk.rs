@@ -176,8 +176,9 @@ extern "C" fn virtio_blk_driver_thread() {
         // inode-table/data-block/output buffers the final read-back
         // verification needs simultaneously). A single 4KB page was
         // enough for the raw-sector self-check alone but would overflow
-        // once the filesystem logic was added.
-        const STACK_PAGES: u64 = 4;
+        // 16 pages (64KB) -- ext2 directory formatting, block allocation,
+        // and multi-block read/write buffers.
+        const STACK_PAGES: u64 = 16;
         for i in 0..STACK_PAGES {
             let stack_page = pmm::alloc_page();
             vmm::map_page_in(

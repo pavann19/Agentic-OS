@@ -49,10 +49,325 @@ pub const INODES_PER_BLOCK: u32 = (BLOCK_SIZE / 128) as u32; // 8
 pub const ROOT_INODE: u32 = 2; // EXT2_ROOT_INO, fixed by the format itself
 pub const FILE_INODE: u32 = 11; // first usable inode past the reserved 1..=10 (GOOD_OLD_REV)
 
-const S_IFREG: u16 = 0x8000;
-const S_IFDIR: u16 = 0x4000;
-const MODE_644: u16 = 0o644;
-const MODE_755: u16 = 0o755;
+pub const S_IFREG: u16 = 0x8000;
+pub const S_IFDIR: u16 = 0x4000;
+pub const MODE_644: u16 = 0o644;
+pub const MODE_755: u16 = 0o755;
+
+pub const FT_UNKNOWN: u8 = 0;
+pub const FT_REG: u8 = 1;
+pub const FT_DIR: u8 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InodeInfo {
+    pub mode: u16,
+    pub size: u32,
+    pub links: u16,
+    pub blocks_count: u32,
+    pub direct_blocks: [u32; 12],
+}
+
+pub fn inode_block_and_offset(inode: u32) -> (u32, usize) {
+    let block = INODE_TABLE_START_BLOCK + (inode - 1) / INODES_PER_BLOCK;
+    let offset = ((inode - 1) % INODES_PER_BLOCK) as usize * 128;
+    (block, offset)
+}
+
+pub fn write_inode_entry_full(table_block: &mut [u8], inode: u32, mode: u16, size: u32, links: u16, direct_blocks: &[u32]) {
+    let (_, off) = inode_block_and_offset(inode);
+    vzero(&mut table_block[off..off + 128]);
+    wu16(table_block, off + 0x00, mode);
+    wu32(table_block, off + 0x04, size);
+    wu16(table_block, off + 0x1A, links);
+    let num_blocks = direct_blocks.len() as u32;
+    let sectors = (num_blocks as usize * BLOCK_SIZE / 512) as u32;
+    wu32(table_block, off + 0x1C, sectors);
+    let limit = direct_blocks.len().min(12);
+    for i in 0..limit {
+        wu32(table_block, off + 0x28 + i * 4, direct_blocks[i]);
+    }
+}
+
+pub fn read_inode_entry(table_block: &[u8], inode: u32) -> InodeInfo {
+    let (_, off) = inode_block_and_offset(inode);
+    let mode = ru16(table_block, off + 0x00);
+    let size = ru32(table_block, off + 0x04);
+    let links = ru16(table_block, off + 0x1A);
+    let sectors = ru32(table_block, off + 0x1C);
+    let blocks_count = sectors / (BLOCK_SIZE as u32 / 512);
+    let mut direct_blocks = [0u32; 12];
+    for i in 0..12 {
+        direct_blocks[i] = ru32(table_block, off + 0x28 + i * 4);
+    }
+    InodeInfo {
+        mode,
+        size,
+        links,
+        blocks_count,
+        direct_blocks,
+    }
+}
+
+/// Allocates the first free block in `block_bitmap` starting at `FILE_DATA_BLOCK + 1`.
+pub fn alloc_block(block_bitmap: &mut [u8], total_blocks: u32) -> Option<u32> {
+    for block in (FILE_DATA_BLOCK + 1)..=total_blocks {
+        let bit = (block - 1) as usize;
+        let byte_idx = bit / 8;
+        let bit_mask = 1 << (bit % 8);
+        if byte_idx < block_bitmap.len() && (block_bitmap[byte_idx] & bit_mask) == 0 {
+            block_bitmap[byte_idx] |= bit_mask;
+            return Some(block);
+        }
+    }
+    None
+}
+
+/// Frees a block in `block_bitmap`.
+pub fn free_block(block_bitmap: &mut [u8], block: u32) {
+    if block > 0 {
+        let bit = (block - 1) as usize;
+        let byte_idx = bit / 8;
+        if byte_idx < block_bitmap.len() {
+            block_bitmap[byte_idx] &= !(1 << (bit % 8));
+        }
+    }
+}
+
+/// Allocates the first free inode in `inode_bitmap` starting at `FILE_INODE + 1`.
+pub fn alloc_inode(inode_bitmap: &mut [u8], num_inodes: u32) -> Option<u32> {
+    for inode in (FILE_INODE + 1)..=num_inodes {
+        let bit = (inode - 1) as usize;
+        let byte_idx = bit / 8;
+        let bit_mask = 1 << (bit % 8);
+        if byte_idx < inode_bitmap.len() && (inode_bitmap[byte_idx] & bit_mask) == 0 {
+            inode_bitmap[byte_idx] |= bit_mask;
+            return Some(inode);
+        }
+    }
+    None
+}
+
+/// Frees an inode in `inode_bitmap`.
+pub fn free_inode(inode_bitmap: &mut [u8], inode: u32) {
+    if inode > 0 {
+        let bit = (inode - 1) as usize;
+        let byte_idx = bit / 8;
+        if byte_idx < inode_bitmap.len() {
+            inode_bitmap[byte_idx] &= !(1 << (bit % 8));
+        }
+    }
+}
+
+pub fn write_dir_entry(block: &mut [u8], offset: usize, inode: u32, rec_len: u16, file_type: u8, name: &[u8]) {
+    wu32(block, offset, inode);
+    wu16(block, offset + 4, rec_len);
+    block[offset + 6] = name.len() as u8;
+    block[offset + 7] = file_type;
+    vcopy(&mut block[offset + 8..offset + 8 + name.len()], name);
+}
+
+/// Initializes a directory data block with `.` and `..` entries.
+pub fn init_dir_block(b: &mut [u8], dir_inode: u32, parent_inode: u32) {
+    vzero(b);
+    write_dir_entry(b, 0, dir_inode, 12, FT_DIR, b".");
+    let rem = (BLOCK_SIZE - 12) as u16;
+    write_dir_entry(b, 12, parent_inode, rem, FT_DIR, b"..");
+}
+
+/// Iterates over all valid, non-zero entries in a directory data block.
+pub fn read_dir_entries<F: FnMut(u32, u8, &[u8])>(dir_block: &[u8], mut callback: F) {
+    let mut off = 0;
+    while off + 8 <= BLOCK_SIZE {
+        let inode = ru32(dir_block, off);
+        let rec_len = ru16(dir_block, off + 4) as usize;
+        if rec_len < 8 || off + rec_len > BLOCK_SIZE {
+            break;
+        }
+        let name_len = dir_block[off + 6] as usize;
+        let file_type = dir_block[off + 7];
+        if inode != 0 && name_len > 0 && off + 8 + name_len <= off + rec_len {
+            let name = &dir_block[off + 8..off + 8 + name_len];
+            callback(inode, file_type, name);
+        }
+        off += rec_len;
+    }
+}
+
+/// Finds a directory entry by exact name in a directory data block.
+pub fn find_dir_entry(dir_block: &[u8], target_name: &[u8]) -> Option<(u32, u8)> {
+    let mut result = None;
+    read_dir_entries(dir_block, |inode, file_type, name| {
+        if result.is_none() && name == target_name {
+            result = Some((inode, file_type));
+        }
+    });
+    result
+}
+
+/// Inserts a new directory entry into a directory data block.
+pub fn add_dir_entry(dir_block: &mut [u8], inode: u32, file_type: u8, name: &[u8]) -> bool {
+    let needed = (8 + name.len() + 3) & !3;
+    let mut off = 0;
+    while off + 8 <= BLOCK_SIZE {
+        let cur_inode = ru32(dir_block, off);
+        let rec_len = ru16(dir_block, off + 4) as usize;
+        if rec_len < 8 || off + rec_len > BLOCK_SIZE {
+            break;
+        }
+        let cur_name_len = dir_block[off + 6] as usize;
+        let actual_size = if cur_inode == 0 {
+            0
+        } else {
+            (8 + cur_name_len + 3) & !3
+        };
+
+        if cur_inode == 0 && rec_len >= needed {
+            // Re-use an empty slot
+            write_dir_entry(dir_block, off, inode, rec_len as u16, file_type, name);
+            return true;
+        } else if cur_inode != 0 && rec_len >= actual_size + needed {
+            // Split this entry
+            let new_off = off + actual_size;
+            let new_rec_len = (rec_len - actual_size) as u16;
+            wu16(dir_block, off + 4, actual_size as u16);
+            write_dir_entry(dir_block, new_off, inode, new_rec_len, file_type, name);
+            return true;
+        }
+        off += rec_len;
+    }
+    false
+}
+
+/// Removes a directory entry by name from a directory data block.
+pub fn remove_dir_entry(dir_block: &mut [u8], target_name: &[u8]) -> Option<u32> {
+    let mut prev_off: Option<usize> = None;
+    let mut off = 0;
+    while off + 8 <= BLOCK_SIZE {
+        let cur_inode = ru32(dir_block, off);
+        let rec_len = ru16(dir_block, off + 4) as usize;
+        if rec_len < 8 || off + rec_len > BLOCK_SIZE {
+            break;
+        }
+        let cur_name_len = dir_block[off + 6] as usize;
+        if cur_inode != 0 && cur_name_len > 0 && off + 8 + cur_name_len <= off + rec_len {
+            let name = &dir_block[off + 8..off + 8 + cur_name_len];
+            if name == target_name {
+                // Found!
+                if let Some(p_off) = prev_off {
+                    let prev_rec_len = ru16(dir_block, p_off + 4) as usize;
+                    wu16(dir_block, p_off + 4, (prev_rec_len + rec_len) as u16);
+                } else {
+                    wu32(dir_block, off, 0); // Mark unused
+                }
+                return Some(cur_inode);
+            }
+        }
+        prev_off = Some(off);
+        off += rec_len;
+    }
+    None
+}
+
+/// Splits a path into parent path and leaf name.
+/// E.g. "/a/b/c" -> ("a/b", "c"), "/file" -> ("", "file"), "dir" -> ("", "dir").
+pub fn split_parent_and_basename<'a>(path: &'a str) -> (&'a str, &'a str) {
+    let trimmed = path.trim_matches('/');
+    if let Some(idx) = trimmed.rfind('/') {
+        (&trimmed[..idx], &trimmed[idx + 1..])
+    } else {
+        ("", trimmed)
+    }
+}
+
+/// Iterator over slash-delimited path components.
+pub struct PathComponentIterator<'a> {
+    remainder: &'a str,
+}
+
+impl<'a> PathComponentIterator<'a> {
+    pub fn new(path: &'a str) -> Self {
+        let trimmed = path.trim_matches('/');
+        Self { remainder: trimmed }
+    }
+}
+
+impl<'a> Iterator for PathComponentIterator<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remainder.is_empty() {
+            return None;
+        }
+        if let Some(idx) = self.remainder.find('/') {
+            let seg = &self.remainder[..idx];
+            self.remainder = self.remainder[idx..].trim_start_matches('/');
+            Some(seg)
+        } else {
+            let seg = self.remainder;
+            self.remainder = "";
+            Some(seg)
+        }
+    }
+}
+
+/// Traverses a path starting at `start_inode` (typically `ROOT_INODE`).
+/// `read_dir_block` reads the directory data block for a given directory inode.
+/// Returns `Some((target_inode, file_type))` on success, or `None` if any component is missing or not a directory.
+pub fn resolve_path<F>(path: &str, start_inode: u32, mut read_dir_block: F) -> Option<(u32, u8)>
+where
+    F: FnMut(u32, &mut [u8; BLOCK_SIZE]) -> bool,
+{
+    let mut cur_inode = start_inode;
+    let mut cur_type = FT_DIR;
+    let mut buf = [0u8; BLOCK_SIZE];
+
+    let mut it = PathComponentIterator::new(path);
+    let first = match it.next() {
+        Some(f) => f,
+        None => return Some((cur_inode, cur_type)),
+    };
+
+    let mut current_segment = first;
+    loop {
+        if cur_type != FT_DIR {
+            return None;
+        }
+        if !read_dir_block(cur_inode, &mut buf) {
+            return None;
+        }
+        match find_dir_entry(&buf, current_segment.as_bytes()) {
+            Some((next_inode, next_type)) => {
+                cur_inode = next_inode;
+                cur_type = next_type;
+            }
+            None => return None,
+        }
+
+        match it.next() {
+            Some(next_seg) => {
+                current_segment = next_seg;
+            }
+            None => {
+                return Some((cur_inode, cur_type));
+            }
+        }
+    }
+}
+
+/// Updates free blocks, free inodes, and used dirs counts in superblock and group descriptor.
+pub fn update_alloc_counts(sb: &mut [u8], gd: &mut [u8], block_delta: i32, inode_delta: i32, dir_delta: i32) {
+    let free_blocks = ru32(sb, 0x0C) as i32 + block_delta;
+    let free_inodes = ru32(sb, 0x10) as i32 + inode_delta;
+    wu32(sb, 0x0C, free_blocks.max(0) as u32);
+    wu32(sb, 0x10, free_inodes.max(0) as u32);
+
+    let gd_free_blocks = ru16(gd, 0x0C) as i32 + block_delta;
+    let gd_free_inodes = ru16(gd, 0x0E) as i32 + inode_delta;
+    let gd_used_dirs = ru16(gd, 0x10) as i32 + dir_delta;
+    wu16(gd, 0x0C, gd_free_blocks.max(0) as u16);
+    wu16(gd, 0x0E, gd_free_inodes.max(0) as u16);
+    wu16(gd, 0x10, gd_used_dirs.max(0) as u16);
+}
 
 /// Real bug found and fixed hardening Phase 4: a plain `for x in
 /// b.iter_mut() { *x = 0; }` loop over a 1024-byte buffer is exactly the
@@ -212,16 +527,6 @@ pub fn read_file_inode_size(inode_table_block1: &[u8]) -> usize {
     ru32(inode_table_block1, off + 0x04) as usize
 }
 
-const FT_DIR: u8 = 2;
-const FT_REG: u8 = 1;
-
-fn write_dir_entry(block: &mut [u8], offset: usize, inode: u32, rec_len: u16, file_type: u8, name: &[u8]) {
-    wu32(block, offset, inode);
-    wu16(block, offset + 4, rec_len);
-    block[offset + 6] = name.len() as u8;
-    block[offset + 7] = file_type;
-    vcopy(&mut block[offset + 8..offset + 8 + name.len()], name);
-}
 
 /// Builds the root directory's data block: real `ext2_dir_entry_2`
 /// entries for `.`, `..`, and one file (`file_name`) -- real rec_len

@@ -762,6 +762,21 @@ extern "C" fn syscall_dispatch(num: u64, a0: u64, a1: u64) -> u64 {
                 }
             }
         }
+        34 => {
+            // Milestone 2: Generic on-demand process exec (SYS_PROCESS_SPAWN)
+            // a0 = pointer to ProcessSpawnRequest in user address space
+            crate::process::sys_spawn(a0)
+        }
+        35 => {
+            // Milestone 2: Process waitpid (SYS_PROCESS_WAIT)
+            // a0 = child pid, a1 = options
+            crate::process::sys_wait(a0, a1)
+        }
+        36 => {
+            // Milestone 2: Process exit (SYS_PROCESS_EXIT)
+            // a0 = exit code
+            crate::process::sys_exit(a0 as i32);
+        }
         _ => {
             klog_info!("SYSCALL_UNKNOWN num={}", num);
             u64::MAX

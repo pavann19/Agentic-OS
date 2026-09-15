@@ -1,0 +1,17 @@
+[package]
+name = "child_proc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kernel_common = { path = "../../kernel_common", features = ["provide_mem_intrinsics"] }
+agentic_sdk = { path = "../agentic_sdk" }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

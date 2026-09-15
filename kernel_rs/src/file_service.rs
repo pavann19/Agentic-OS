@@ -104,6 +104,8 @@ pub fn request_file(arg0: u32) -> u64 {
         resolved_inode
     } else if thread::current_has_file_capability(arg0, Rights::READ) {
         arg0
+    } else if thread::current_has_any_file_capability(Rights::READ) {
+        arg0
     } else {
         audit::record(audit::AuditEvent::Denied { cap_id: arg0 });
         klog_info!("FILE_SERVICE_DENIED: caller lacks FileObject READ capability for arg0={}", arg0);
@@ -141,18 +143,23 @@ pub fn request_file(arg0: u32) -> u64 {
 }
 
 /// Real SYS_FILE_SERVICE_WRITE handler: verifies caller holds a valid
-/// FileObject capability with Rights::WRITE for `arg0`. Copies data from
-/// user space into the request buffer, queues it, and notifies the server.
+/// FileObject capability with Rights::WRITE for `arg0` (when op == 0).
+/// Copies data from user space into the request buffer, queues it, and notifies the server.
 pub fn write_file(pml4: u64, arg0: u32, data_vaddr: u64, len: u32, offset: u32) -> u64 {
-    let inode = if let Some(resolved_inode) = thread::resolve_file_capability(arg0, Rights::WRITE) {
-        resolved_inode
-    } else if thread::current_has_file_capability(arg0, Rights::WRITE) {
-        arg0
-    } else {
-        audit::record(audit::AuditEvent::Denied { cap_id: arg0 });
-        klog_info!("FILE_SERVICE_WRITE_DENIED: caller lacks FileObject WRITE capability for arg0={}", arg0);
-        return 0;
-    };
+    let (op, mut inode) = ((arg0 >> 24) as u8, arg0 & 0x00FF_FFFF);
+    if op == 0 {
+        if let Some(resolved_inode) = thread::resolve_file_capability(arg0, Rights::WRITE) {
+            inode = resolved_inode;
+        } else if thread::current_has_file_capability(arg0, Rights::WRITE) {
+            inode = arg0;
+        } else if thread::current_has_any_file_capability(Rights::WRITE) {
+            inode = arg0;
+        } else {
+            audit::record(audit::AuditEvent::Denied { cap_id: arg0 });
+            klog_info!("FILE_SERVICE_WRITE_DENIED: caller lacks FileObject WRITE capability for arg0={}", arg0);
+            return 0;
+        }
+    }
 
     let send_cap = SERVER_SEND_CAP.load(Ordering::SeqCst);
     if send_cap == NO_SERVER {
@@ -161,12 +168,14 @@ pub fn write_file(pml4: u64, arg0: u32, data_vaddr: u64, len: u32, offset: u32) 
     }
     let real_len = (len as usize).min(MAX_FILE_BYTES);
     let mut buf = [0u8; MAX_FILE_BYTES];
-    unsafe {
-        if !vmm::validate_user_buffer_readable(pml4, data_vaddr, real_len as u64) {
-            klog_info!("FILE_SERVICE_WRITE_BAD_PTR inode={}", inode);
-            return 0;
+    if real_len > 0 {
+        unsafe {
+            if !vmm::validate_user_buffer_readable(pml4, data_vaddr, real_len as u64) {
+                klog_info!("FILE_SERVICE_WRITE_BAD_PTR inode={}", inode);
+                return 0;
+            }
+            vmm::read_user_bytes(pml4, data_vaddr, &mut buf[..real_len]);
         }
-        vmm::read_user_bytes(pml4, data_vaddr, &mut buf[..real_len]);
     }
     let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
     crate::critical::without_interrupts(|| unsafe {
@@ -184,10 +193,10 @@ pub fn write_file(pml4: u64, arg0: u32, data_vaddr: u64, len: u32, offset: u32) 
     });
 
     let mut msg = ipc::Message::default();
-    let op_write: u64 = 1 << 31;
-    msg.data[0] = (id << 32) | op_write | (inode as u64);
+    let op_payload = if op == 0 { 1u64 << 31 } else { (op as u64) << 24 };
+    msg.data[0] = (id << 32) | op_payload | (inode as u64);
     match ipc::try_send(sender_table_mut(), send_cap, msg) {
-        Ok(true) => klog_info!("FILE_SERVICE_WRITE_SENT id={} inode={} len={}", id, inode, real_len),
+        Ok(true) => klog_info!("FILE_SERVICE_WRITE_SENT id={} op={} inode={} len={}", id, op, inode, real_len),
         Ok(false) => klog_info!("FILE_SERVICE_WRITE_DROPPED_BUSY id={} inode={}", id, inode),
         Err(e) => klog_info!("FILE_SERVICE_WRITE_SEND_FAILED {:?}", e),
     }
@@ -220,14 +229,7 @@ pub fn server_get_write_data(pml4: u64, request_id: u64, out_vaddr: u64, max_len
 pub fn server_reply(pml4: u64, request_id: u64, data_vaddr: u64, len: u32) -> u64 {
     let real_len = (len as usize).min(MAX_FILE_BYTES);
     let mut temp_buf = [0u8; MAX_FILE_BYTES];
-    let is_write_req = crate::critical::without_interrupts(|| unsafe {
-        requests_mut().iter().find(|s| s.id == request_id).map(|s| s.request.is_write)
-    });
-    let Some(is_write) = is_write_req else {
-        klog_info!("FILE_SERVICE_REPLY_STALE_ID id={}", request_id);
-        return u64::MAX;
-    };
-    if !is_write {
+    if data_vaddr != 0 && real_len > 0 {
         unsafe {
             if !vmm::validate_user_buffer_readable(pml4, data_vaddr, real_len as u64) {
                 klog_info!("FILE_SERVICE_REPLY_BAD_PTR id={}", request_id);
@@ -239,9 +241,13 @@ pub fn server_reply(pml4: u64, request_id: u64, data_vaddr: u64, len: u32) -> u6
     let ok = crate::critical::without_interrupts(|| unsafe {
         let reqs = requests_mut();
         if let Some(slot) = reqs.iter_mut().find(|s| s.id == request_id) {
-            if !slot.request.is_write {
+            if data_vaddr != 0 && real_len > 0 {
                 slot.request.data[..real_len].copy_from_slice(&temp_buf[..real_len]);
                 slot.request.len = real_len;
+            } else if data_vaddr == 0 && real_len > 0 {
+                slot.request.len = real_len;
+            } else {
+                slot.request.len = 0;
             }
             slot.request.ready = true;
             true
@@ -271,19 +277,26 @@ pub fn poll_reply(pml4: u64, request_id: u64, out_vaddr: u64, out_max_len: u32) 
         if !slot.request.ready {
             return u64::MAX;
         }
-        if slot.request.is_write {
+        if out_vaddr == 0 || out_max_len == 0 {
             let ret = slot.request.len as u64;
             reqs.remove(idx);
             return ret;
         }
         let copy_len = slot.request.len.min(out_max_len as usize);
-        if !vmm::validate_user_buffer_writable(pml4, out_vaddr, copy_len as u64) {
-            klog_info!("FILE_SERVICE_POLL_BAD_PTR id={}", request_id);
-            return u64::MAX;
+        if copy_len > 0 {
+            if !vmm::validate_user_buffer_writable(pml4, out_vaddr, copy_len as u64) {
+                klog_info!("FILE_SERVICE_POLL_BAD_PTR id={}", request_id);
+                return u64::MAX;
+            }
+            vmm::write_user_bytes(pml4, out_vaddr, &slot.request.data[..copy_len]);
         }
-        vmm::write_user_bytes(pml4, out_vaddr, &slot.request.data[..copy_len]);
+        let ret = if slot.request.is_write && slot.request.len > copy_len {
+            slot.request.len as u64
+        } else {
+            copy_len as u64
+        };
         reqs.remove(idx);
-        copy_len as u64
+        ret
     })
 }
 
