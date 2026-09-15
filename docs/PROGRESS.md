@@ -4,9 +4,8 @@ Source: `docs/ROADMAP.md` (the ADR-driven build plan, 2026-08-27), tracked
 here phase-by-phase against what's actually built and evidenced — same
 discipline as the repo audit from 2026-08-29: nothing here is marked done
 without a real, reproducible artifact behind it (a boot log, an `objdump`
-result, a passing test run). Detailed narrative evidence lives in
-`PHASE0_PROGRESS.md` and `NATIVE_BUILD.md`; this file is the checklist view
-across the whole roadmap, updated in the same commit as whatever changed it.
+result, a passing test run). This file is the checklist view across the
+whole roadmap, updated in the same commit as whatever changed it.
 
 Status marks: `[x]` done and evidenced · `[~]` in progress / partially done
 · `[ ]` not started.
@@ -16,16 +15,16 @@ Status marks: `[x]` done and evidenced · `[~]` in progress / partially done
 ## Phase 0 — Foundation Correctness (9/9 items complete — DONE)
 
 Depends on: ADR sign-off (done — ADR-001/002/003/006 accepted, ADR-002
-specifically extended mid-build to cover the bootloader too, see
-`NATIVE_BUILD.md`). Completed 2026-08-30, overnight session, ~1h02m real
+specifically extended mid-build to cover the bootloader too). Completed
+2026-08-30, overnight session, ~1h02m real
 elapsed time from a standing start (kernel with only boot-info validation)
 to all 9 items done and evidenced.
 
 - [x] **Toolchain decision (ADR-002) executed** — Rust, both bootloader and
       kernel. Native, Docker-free: `rustup` (nightly, GNU ABI) + `QEMU` via
-      `winget`, no MSVC/gnu-efi/mtools. See `NATIVE_BUILD.md`.
-- [x] **Bootloader ported to Rust** — full port of `boot/main.c`'s loading
-      logic: hand-written UEFI bindings (BootServices, LoadedImage,
+      `winget`, no MSVC/gnu-efi/mtools.
+- [x] **Bootloader ported to Rust** — full port of the original C
+      prototype's loading logic: hand-written UEFI bindings (BootServices, LoadedImage,
       SimpleFileSystem, File, GraphicsOutput protocols), ELF64 PT_LOAD
       segment mapping to exact physical addresses, PSF1 font loading, GOP
       framebuffer discovery, BootInfo construction, GetMemoryMap/
@@ -80,8 +79,7 @@ passing from a fully clean tree:**
 - `make test-host` executes 23 real assertions against the actual PMM/VMM
   logic kernel_rs runs, not a stub.
 
-**Nine real bugs found and fixed getting here** (see `PHASE0_PROGRESS.md`
-for full narrative): PMM span calc counting an MMIO/reserved descriptor at
+**Nine real bugs found and fixed getting here:** PMM span calc counting an MMIO/reserved descriptor at
 ~1TB; a physical-address-0 sentinel bug; a linker-symbol alignment bug that
 put NX on live executing code; a missing stack mapping across the CR3
 switch; an LLD orphan-section (`.got`) landing unaligned; an LLVM

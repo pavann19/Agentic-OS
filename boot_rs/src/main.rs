@@ -3,10 +3,9 @@
 //! Loads kernel.elf and font.psf from the ESP root volume, maps the
 //! kernel's PT_LOAD segments to their exact physical addresses, finds the
 //! GOP framebuffer, builds BootInfo, exits boot services, and jumps to the
-//! kernel entry point. Full port of `boot/main.c`'s logic — see
-//! `NATIVE_BUILD.md` / `PHASE0_PROGRESS.md` for what's still open (font
-//! rendering and GOP framebuffer use itself live in the kernel, not here;
-//! this only has to load and hand them off correctly).
+//! kernel entry point. Font rendering and GOP framebuffer use itself live
+//! in the kernel, not here — this only has to load and hand them off
+//! correctly.
 #![no_std]
 #![no_main]
 

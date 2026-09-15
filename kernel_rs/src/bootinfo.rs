@@ -64,10 +64,9 @@ pub struct BootInfo {
     pub payload: BootInfoPayload,
 }
 
-/// Validates magic/version the same way `kernel/kernel.c:15` currently does.
+/// Validates magic and version against `BOOTINFO_MAGIC`/`BOOTINFO_VERSION`.
 /// Does NOT yet validate `size` against `core::mem::size_of::<BootInfo>()` —
-/// that check is a Phase 0 TODO once the struct is confirmed layout-stable
-/// against the C side under the actual cross compiler (see PHASE0_PROGRESS.md).
+/// a real, still-open, low-risk gap, not yet closed.
 pub unsafe fn validate(info: *const BootInfo) -> Result<&'static BootInfo, &'static str> {
     if info.is_null() {
         return Err("boot info is null");

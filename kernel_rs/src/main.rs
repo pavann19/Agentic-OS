@@ -5,7 +5,7 @@
 //! bootloader's temporary identity-mapped page tables with real,
 //! permission-correct higher-half ones (`vmm.rs` — a redesign, not a port;
 //! see its module doc for why). GDT/IDT/heap/timer/interrupts are not
-//! ported yet — see `PHASE0_PROGRESS.md`.
+//! ported yet — see `docs/PROGRESS.md`.
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
@@ -159,9 +159,9 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
 
     // GDT/IDT come up before PMM/VMM deliberately: a fault during the
     // risky page-table-rebuild-and-CR3-switch work below needs a real
-    // handler to be diagnosable at all. This ordering was decided
-    // mid-session after a CR3 switch produced a silent, undiagnosable
-    // hang with no exception handling in place yet — see PHASE0_PROGRESS.md.
+    // handler to be diagnosable at all. This ordering was decided after a
+    // CR3 switch, attempted before any exception handling existed, once
+    // produced a silent, undiagnosable hang.
     gdt::init_for_cpu(0); // BSP is always cpu_index 0 (Phase 9 deliverable 2 -- per-CPU GDT/TSS)
     idt::init();
 

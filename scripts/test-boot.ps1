@@ -10,8 +10,6 @@
 # C:\ root) without it. Running this as a real PowerShell process sidesteps
 # MSYS's environment layer altogether — $env:TMP here is genuinely part of
 # this process's Win32 environment block, and children inherit it correctly.
-#
-# See NATIVE_BUILD.md for the full debugging trail if this breaks again.
 
 param(
     [string]$QemuExe = "C:\Program Files\qemu\qemu-system-x86_64.exe",
@@ -26,7 +24,7 @@ $ErrorActionPreference = "Stop"
 
 # ALWAYS overridden, never conditional on whether TMP/TEMP look already set:
 # when this script is launched through `make` (MSYS2 make.exe spawns children
-# with TMP/TEMP stripped, confirmed by testing — see NATIVE_BUILD.md), even
+# with TMP/TEMP stripped, confirmed by testing), even
 # .NET's own GetTempPath() fallback resolves to the unwritable C:\WINDOWS
 # (its last-resort default once TMP/TEMP/USERPROFILE are all absent). A
 # repo-local directory is the one thing this script can guarantee is both

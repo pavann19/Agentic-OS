@@ -1,14 +1,5 @@
-# Native (Docker-free) build. See NATIVE_BUILD.md for what's verified vs.
-# wired-but-untested, and why each tool/flag choice was made.
-#
-# Docker/gnu-efi/mtools (Dockerfile, docker-compose.yml) are NOT used by any
-# target below anymore. They're left in the tree, unused, in case a
-# reproducible/CI build wants them back later — nothing here depends on them.
-#
-# boot/*.c and kernel/*.c (the pre-Rust C sources) are also NOT built by any
-# target below. They stay as a porting reference for boot_rs/ and kernel_rs/
-# — see PHASE0_PROGRESS.md and NATIVE_BUILD.md for the per-subsystem port
-# checklist. Nothing here compiles them; `grep -r` them for reference only.
+# Native build — no Docker, no cross-platform build container. See
+# README.md for the toolchain this targets and why.
 
 CARGO      = cargo
 # Full path, not a bare name: make's recipes run under MSYS2 sh, whose PATH
@@ -51,10 +42,7 @@ kernel: userland
 	cd $(KERNEL_DIR) && $(CARGO) build --release
 
 # "image" here means the QEMU virtual-FAT directory, not a real .img file —
-# no mtools/mformat is installed on this machine yet. See NATIVE_BUILD.md.
-# Staging kernel.elf here is a no-op today: boot_rs does not read it from
-# disk yet (that's the next porting increment), but staging it now means
-# this target doesn't need to change again once boot_rs does.
+# no mtools/mformat is installed on this machine.
 image: bootloader kernel
 	mkdir -p "$(FATDIR)/EFI/BOOT"
 	cp "$(BOOT_EFI)" "$(FATDIR)/EFI/BOOT/BOOTX64.EFI"
@@ -91,8 +79,7 @@ run-qemu: image
 # fails with "Could not open temporary file 'C:\...'" (silently falling back
 # to the unwritable C:\ root) without it. A real PowerShell process has a
 # genuine Win32 environment block, so this sidesteps the problem entirely
-# instead of fighting make/MSYS's environment layer. Full debugging trail in
-# NATIVE_BUILD.md if this breaks again.
+# instead of fighting make/MSYS's environment layer.
 # No args passed: scripts/test-boot.ps1's defaults already match this
 # Makefile's QEMU/OVMF_CODE/FATDIR values. Override there if those diverge.
 # Asserts BOOT_START -> EXIT_BOOT_SERVICES_OK -> KERNEL_ENTER: the full

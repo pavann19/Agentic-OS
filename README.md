@@ -28,7 +28,12 @@ None of this runs model inference or automated reasoning inside the kernel, and 
 
 ## Building and running
 
-The build is native — no Docker, no cross-platform build container. You need a nightly Rust toolchain targeting `x86_64-unknown-none` and `x86_64-unknown-uefi`, and QEMU with OVMF firmware. See `NATIVE_BUILD.md` for exact toolchain versions.
+The build is native — no Docker, no cross-platform build container. You need:
+
+- A nightly Rust toolchain (`rustup`) targeting both `x86_64-unknown-none` (the kernel and ring-3 processes) and `x86_64-unknown-uefi` (the bootloader).
+- QEMU with OVMF/EDK2 firmware for the UEFI boot path.
+
+On Windows, use the GNU-ABI Rust toolchain rather than MSVC — it needs no separate linker or Build Tools installation, which keeps the dependency list to just `rustup` and QEMU.
 
 Build everything and assemble a bootable image:
 

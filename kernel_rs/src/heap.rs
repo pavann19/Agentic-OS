@@ -11,10 +11,10 @@
 //! crate, hand-written here to keep the no-external-crates discipline).
 //! `alloc()` first-fits a free block, splitting off the remainder if it's
 //! big enough to be useful; `dealloc()` pushes the freed block back onto
-//! the list. No coalescing of adjacent free blocks yet — a real gap (see
-//! `PHASE0_PROGRESS.md`), acceptable for Phase 0 since nothing yet
-//! allocates and frees enough, in a long-running enough kernel, for
-//! fragmentation to matter. Revisit before Phase 1's scheduler does
+//! the list. No coalescing of adjacent free blocks yet — a real, still-open
+//! gap, not yet a problem in practice since nothing allocates and frees
+//! enough, in a long-running enough kernel, for fragmentation to matter.
+//! Revisit before a workload does sustained alloc/free churn.
 //! sustained alloc/free churn.
 //!
 //! Real bug found and fixed (see `critical.rs`'s doc comment for the full
