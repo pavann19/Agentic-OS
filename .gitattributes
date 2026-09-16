@@ -1,0 +1,6 @@
+# scripts/ci/boot-test.sh is a real Linux shebang script CI executes
+# directly -- a CRLF line ending after `#!/usr/bin/env bash` breaks it
+# outright on Linux (the shebang line becomes `bash\r`, an unresolvable
+# interpreter path). Force LF regardless of core.autocrlf on any
+# checkout, Windows included.
+*.sh text eol=lf

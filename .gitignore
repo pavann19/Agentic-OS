@@ -80,3 +80,4 @@ _evidence/latest/
 fuzz/target/
 fuzz/corpus/
 fuzz/artifacts/
+_evidence/ci-disk-*.img

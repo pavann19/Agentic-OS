@@ -11,16 +11,34 @@
 # MSYS's environment layer altogether — $env:TMP here is genuinely part of
 # this process's Win32 environment block, and children inherit it correctly.
 
+# Real per-OS QEMU/OVMF defaults, resolved from the environment first
+# (AGENTIC_OS_QEMU/AGENTIC_OS_OVMF_CODE, what CI sets), falling back to
+# a bare command name resolvable via PATH (works out of the box after
+# `apt-get install qemu-system-x86 ovmf` on Linux), falling back last to
+# the winget-installed Windows path this repo has always defaulted to.
+# The three-way fallback means neither platform needs a param override
+# for the common case.
 param(
-    [string]$QemuExe = "C:\Program Files\qemu\qemu-system-x86_64.exe",
-    [string]$OvmfCode = "C:\Program Files\qemu\share\edk2-x86_64-code.fd",
-    [string]$FatDir = "boot_rs\qemu_fatdir",
-    [string]$SerialLog = "_evidence\latest\serial.log",
-    [string]$DiskImage = "_evidence\disk.img",
+    [string]$QemuExe = $(if ($env:AGENTIC_OS_QEMU) { $env:AGENTIC_OS_QEMU }
+        elseif (Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue) { (Get-Command qemu-system-x86_64).Source }
+        else { "C:\Program Files\qemu\qemu-system-x86_64.exe" }),
+    [string]$OvmfCode = $(if ($env:AGENTIC_OS_OVMF_CODE) { $env:AGENTIC_OS_OVMF_CODE }
+        elseif (Test-Path "/usr/share/OVMF/OVMF_CODE.fd") { "/usr/share/OVMF/OVMF_CODE.fd" }
+        else { "C:\Program Files\qemu\share\edk2-x86_64-code.fd" }),
+    [string]$FatDir = "boot_rs/qemu_fatdir",
+    [string]$SerialLog = "_evidence/latest/serial.log",
+    [string]$DiskImage = "_evidence/disk.img",
     [int]$TimeoutSeconds = 20
 )
 
 $ErrorActionPreference = "Stop"
+
+# Self-locate the repo root from this script's own path rather than
+# trusting the caller's current directory -- makes this script correct
+# whether it's launched as `pwsh -File scripts/test-boot.ps1` from the
+# repo root (every existing caller) or from anywhere else (CI's
+# boot-test.sh, a future caller).
+Set-Location (Join-Path $PSScriptRoot "..")
 
 # ALWAYS overridden, never conditional on whether TMP/TEMP look already set:
 # when this script is launched through `make` (MSYS2 make.exe spawns children
@@ -83,7 +101,15 @@ if (-not (Test-Path $SerialLog)) {
 }
 
 $content = Get-Content $SerialLog -Raw
-$required = @("BOOT_START", "EXIT_BOOT_SERVICES_OK", "KERNEL_ENTER")
+# REVOCATION_REJECTED_OK: the capability-revocation demo
+# (kernel_rs/src/main.rs) that runs unconditionally on every default
+# boot, not behind a feature flag -- a derived capability that worked
+# a moment ago is used again immediately after its underlying object
+# is revoked, and must be rejected on that exact same cap_id. Promoted
+# to a required boot checkpoint here (previously demonstrated but
+# never asserted by any script) since capability revocation is the
+# central property this whole kernel is built around.
+$required = @("BOOT_START", "EXIT_BOOT_SERVICES_OK", "KERNEL_ENTER", "REVOCATION_REJECTED_OK")
 $missing = $required | Where-Object { $content -notmatch [regex]::Escape($_) }
 if ($missing.Count -gt 0) {
     Write-Error "Missing checkpoint(s): $($missing -join ', ') in $SerialLog"

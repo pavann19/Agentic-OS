@@ -1,0 +1,12 @@
+[toolchain]
+channel = "nightly-2026-09-14"
+targets = ["x86_64-unknown-none", "x86_64-unknown-uefi"]
+components = ["rust-src"]
+# No `host` pin here on purpose: Linux CI wants the default
+# x86_64-unknown-linux-gnu host. On Windows, README.md already directs
+# using a GNU-ABI toolchain (`rustup toolchain install
+# nightly-2026-08-28-x86_64-pc-windows-gnu`) rather than MSVC -- no
+# separate linker/Build Tools install needed. rustup resolves this file
+# against whichever host toolchain of this date is already installed
+# and set default; pinning a specific host here would silently break
+# whichever platform isn't that one.
