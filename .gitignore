@@ -77,3 +77,6 @@ user_rs/helper_proc/target/
 hyperv/*.vhdx
 hyperv/*.log
 _evidence/latest/
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/

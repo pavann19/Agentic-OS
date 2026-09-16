@@ -1,0 +1,45 @@
+[package]
+name = "agentic-os-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Real fuzz targets for kernel_common's ext2 on-disk parsers -- the
+# actual code virtio_blk_driver runs to interpret bytes read off a
+# disk, whether that disk was formatted by this kernel or is corrupt,
+# foreign, or adversarially crafted (a real, in-principle-untrusted
+# input class: this session's own test-e1000 root cause was exactly a
+# stale/mismatched on-disk layout being misread, though by a different
+# mechanism than what's fuzzed here). Host-fuzzable because
+# kernel_common itself has zero unsafe and zero hardware access (see
+# its own Cargo.toml doc comment) -- the same property that already
+# makes it real `cargo test` evidence in host_tests/, not just
+# QEMU-only evidence.
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+kernel_common = { path = "../kernel_common" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "ext2_dir_parsing"
+path = "fuzz_targets/ext2_dir_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ext2_resolve_path"
+path = "fuzz_targets/ext2_resolve_path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ext2_read_file_data"
+path = "fuzz_targets/ext2_read_file_data.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,86 @@
+name: build-and-boot
+
+# Real, honest scope: builds the bootloader, kernel, and the four
+# userland drivers the Makefile's own `image` target wires together
+# (see Makefile's own comment on why only those four are listed there),
+# then boots the resulting image in QEMU and checks for the same three
+# checkpoints scripts/test-boot.ps1 checks locally
+# (BOOT_START -> EXIT_BOOT_SERVICES_OK -> KERNEL_ENTER).
+#
+# This is NOT the full 26-suite regression battery
+# (scripts/test-integration.ps1) -- most of those scripts build
+# additional user_rs crates on their own before copying kernel.elf
+# (compositor, net_client, agent_gateway, e1000_driver, and more),
+# which the Makefile does not orchestrate. Wiring the full suite into
+# CI is real, separate follow-up work, not something to silently imply
+# here by naming this workflow something broader than what it checks.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-boot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust with the two targets this project builds for
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-none,x86_64-unknown-uefi
+
+      - name: Install QEMU and OVMF firmware
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf
+
+      - name: Build bootloader, kernel, and userland (make image)
+        run: make image
+
+      - name: Boot the built image in QEMU and check real checkpoints
+        shell: pwsh
+        run: |
+          ./scripts/test-boot.ps1 `
+            -QemuExe (Get-Command qemu-system-x86_64).Source `
+            -OvmfCode /usr/share/OVMF/OVMF_CODE.fd `
+            -FatDir boot_rs/qemu_fatdir `
+            -SerialLog _evidence/latest/serial.log `
+            -DiskImage _evidence/disk.img
+
+      - name: Upload serial log as evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-boot-log
+          path: _evidence/latest/serial.log
+          if-no-files-found: warn
+
+  fuzz-ext2-parsers:
+    # Bounded smoke-fuzz, not a continuous fuzzing service: each target
+    # gets a short, fixed time budget so a real crash/panic/assert
+    # failure fails this job fast, without pretending to be exhaustive
+    # coverage. See fuzz/Cargo.toml's own doc comment for why these
+    # three targets (kernel_common::ext2's on-disk parsers) were chosen
+    # first -- a real bug in this exact area (a stale/mismatched
+    # on-disk layout being misread) is what test-e1000's root cause
+    # turned out to be this session, by a different mechanism than
+    # what's fuzzed here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz each ext2 parser target for 60 seconds
+        run: |
+          for target in ext2_dir_parsing ext2_resolve_path ext2_read_file_data; do
+            echo "=== fuzzing $target ==="
+            cargo fuzz run "$target" -- -max_total_time=60
+          done

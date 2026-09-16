@@ -2,14 +2,23 @@
 # README.md for the toolchain this targets and why.
 
 CARGO      = cargo
-# Full path, not a bare name: make's recipes run under MSYS2 sh, whose PATH
-# does not include the winget QEMU install dir even when it's on the
-# invoking PowerShell's own PATH (confirmed: "command not found" from sh
-# despite `qemu-system-x86_64.exe` working fine interactively).
+# Real per-OS defaults, both still overridable with `make QEMU=... run-qemu`.
+# On Windows: a full path, not a bare name -- make's recipes run under
+# MSYS2 sh, whose PATH does not include the winget QEMU install dir even
+# when it's on the invoking PowerShell's own PATH (confirmed: "command
+# not found" from sh despite `qemu-system-x86_64.exe` working fine
+# interactively). On Linux (CI, `apt-get install qemu-system-x86 ovmf`):
+# both ship on PATH/a fixed share dir, no such workaround needed.
+ifeq ($(OS),Windows_NT)
 QEMU      ?= C:/Program Files/qemu/qemu-system-x86_64.exe
-# Bundled with the winget QEMU install (share/) — this build's stand-in for
-# OVMF; both are EDK2 firmware builds, this one just ships with QEMU itself.
+# Bundled with the winget QEMU install (share/) -- this build's stand-in
+# for OVMF; both are EDK2 firmware builds, this one just ships with QEMU
+# itself.
 OVMF_CODE ?= C:/Program Files/qemu/share/edk2-x86_64-code.fd
+else
+QEMU      ?= qemu-system-x86_64
+OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE.fd
+endif
 
 BOOT_DIR    = boot_rs
 KERNEL_DIR  = kernel_rs
