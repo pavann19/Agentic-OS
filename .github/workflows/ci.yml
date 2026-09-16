@@ -85,6 +85,13 @@ jobs:
         run: cargo install cargo-fuzz --locked
 
       - name: Fuzz each ext2 parser target for 60 seconds
+        # cargo-fuzz's own project-detection walks up from CWD looking
+        # for a Cargo.toml that isn't itself inside fuzz/ -- this repo
+        # is a set of independent crates with no root/workspace
+        # Cargo.toml, so `cargo fuzz` must run from inside fuzz/ itself
+        # (confirmed against a real CI failure: "could not find a cargo
+        # project" when run from the repo root).
+        working-directory: fuzz
         run: |
           for target in ext2_dir_parsing ext2_resolve_path ext2_read_file_data; do
             echo "=== fuzzing $target ==="

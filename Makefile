@@ -22,13 +22,42 @@ endif
 
 BOOT_DIR    = boot_rs
 KERNEL_DIR  = kernel_rs
-USER_DIR    = user_rs/serial_driver
-USER_DIR2   = user_rs/framebuffer_driver
-USER_DIR3   = user_rs/keyboard_driver
-USER_DIR4   = user_rs/virtio_blk_driver
 FATDIR      = $(BOOT_DIR)/qemu_fatdir
 BOOT_EFI    = $(BOOT_DIR)/target/x86_64-unknown-uefi/release/agentic_bootloader.efi
 KERNEL_ELF  = $(KERNEL_DIR)/target/x86_64-unknown-none/release/agentic_kernel
+
+# Every user_rs crate kernel_rs's OWN default (no --features) build
+# embeds via include_bytes! -- confirmed exhaustively against a real
+# clean-checkout CI failure (18 "couldn't read" errors, one per crate
+# below, virtio_net_driver counted twice for its two variants), not
+# assumed from reading source. This list existing at all is itself the
+# fix for a real, previously-hidden gap: `make image` only ever worked
+# on this machine because of years of leftover target/ build output
+# from `scripts/test-*.ps1` runs masking the fact that the Makefile's
+# own `userland` target never built most of what the kernel actually
+# needs. A genuinely clean checkout (this repo's own CI) surfaced it.
+USER_CRATES = \
+	user_rs/serial_driver \
+	user_rs/framebuffer_driver \
+	user_rs/keyboard_driver \
+	user_rs/virtio_blk_driver \
+	user_rs/ahci_driver \
+	user_rs/nvme_driver \
+	user_rs/usb_xhci_driver \
+	user_rs/netstack_driver \
+	user_rs/net_client \
+	user_rs/child_proc \
+	user_rs/helper_proc \
+	user_rs/shell \
+	user_rs/terminal_emulator \
+	user_rs/text_editor \
+	user_rs/file_manager \
+	user_rs/mouse_driver \
+	user_rs/compositor_driver \
+	user_rs/window_client_driver \
+	user_rs/agent_demo \
+	user_rs/agent_gateway \
+	user_rs/e1000_driver
 
 .PHONY: all bootloader kernel userland image run-qemu test-boot test-host clean
 
@@ -37,15 +66,30 @@ all: image
 bootloader:
 	cd $(BOOT_DIR) && $(CARGO) build --release
 
-# Built BEFORE kernel: kernel_rs/src/user_driver.rs embeds this crate's
-# compiled ELF64 output via include_bytes! at kernel compile time (no
-# filesystem exists yet to load it from at runtime — see elf.rs's doc
-# comment), so the kernel build fails outright if this hasn't run first.
+# Built BEFORE kernel: kernel_rs/src/user_driver.rs (and many other
+# kernel_rs modules) embed these crates' compiled ELF64 output via
+# include_bytes! at kernel compile time (no filesystem exists yet to
+# load them from at runtime — see elf.rs's doc comment), so the kernel
+# build fails outright if any of them hasn't run first.
 userland:
-	cd $(USER_DIR) && $(CARGO) build --release
-	cd $(USER_DIR2) && $(CARGO) build --release
-	cd $(USER_DIR3) && $(CARGO) build --release
-	cd $(USER_DIR4) && $(CARGO) build --release
+	@for dir in $(USER_CRATES); do \
+		echo "cd $$dir && $(CARGO) build --release"; \
+		(cd $$dir && $(CARGO) build --release) || exit 1; \
+	done
+	@# virtio_net_driver is a special case: kernel_rs/src/virtio_net.rs
+	@# embeds TWO separately-built variants of it (variants/*_good and
+	@# variants/*_induced_fault, chosen at kernel build time by the
+	@# synthesis_induced_fault feature) -- see
+	@# scripts/build-virtio-net-variants.ps1's own doc comment for the
+	@# full story. Replicated here with plain cargo so `make image`
+	@# doesn't need PowerShell on the core Linux/CI path.
+	mkdir -p user_rs/virtio_net_driver/variants
+	cd user_rs/virtio_net_driver && $(CARGO) build --release
+	cp user_rs/virtio_net_driver/target/x86_64-unknown-none/release/virtio_net_driver \
+		user_rs/virtio_net_driver/variants/virtio_net_driver_good
+	cd user_rs/virtio_net_driver && $(CARGO) build --release --features induced_fault
+	cp user_rs/virtio_net_driver/target/x86_64-unknown-none/release/virtio_net_driver \
+		user_rs/virtio_net_driver/variants/virtio_net_driver_induced_fault
 
 kernel: userland
 	cd $(KERNEL_DIR) && $(CARGO) build --release
