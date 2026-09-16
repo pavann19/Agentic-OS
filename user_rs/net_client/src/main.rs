@@ -186,13 +186,27 @@ unsafe fn download_and_save(info: &NetClientInfo, history_ptr: *mut TextRegion<L
     print_hex_bytes(&body_digest);
     com1::write_str("\n");
 
-    // 4. Persist to disk via file_service
-    com1::write_str("[NET_CLIENT] PERSISTING_TO_DISK inode=");
-    com1::write_dec_u64(info.target_inode as u64);
+    // 4. Persist to disk via file_service, by path -- NOT the shared
+    // literal FILE_INODE (11) `info.file_cap`/`info.target_inode` still
+    // carry from the kernel's original grant. That inode is ALSO the
+    // exact file `main.rs`'s own Phase 4 object-store demo and
+    // `virtio_blk_driver`'s own boot-time FS_SELF_CHECK read back --
+    // reusing it here meant whichever of the two ran last silently
+    // overwrote the other, a race `test-e1000.ps1` caught the day
+    // Phase 5.5's spawn-hardening commit shifted boot scheduling enough
+    // to flip which one won (root-caused by comparing the FS_SELF_CHECK
+    // read failure's byte count against this app's own downloaded
+    // content length -- an exact match). Writing to a real, distinct
+    // path through the same FS_OP_LOOKUP/FS_OP_CREATE machinery
+    // Self-Hosting Groundwork's own net_client verification already
+    // proves works (`verify_self_hosting_groundwork`, below) removes
+    // the collision entirely instead of just re-ordering around it.
+    const DOWNLOAD_PATH: &str = "/downloaded.dat";
+    com1::write_str("[NET_CLIENT] PERSISTING_TO_DISK path=");
+    com1::write_str(DOWNLOAD_PATH);
     com1::write_str("\n");
 
-    let write_id = file_service::write_file_at(info.file_cap, 0, body);
-    if write_id == 0 {
+    if !file_service::write_file_path(DOWNLOAD_PATH, body) {
         com1::write_str("[NET_CLIENT] FILE_SERVICE_WRITE_DENIED_OR_NO_SERVER\n");
         (*history_ptr).push_line(b"HTTP/1.0 200 OK");
         (*history_ptr).push_line(b"DISK WRITE DENIED/NO SERVER");
@@ -201,56 +215,21 @@ unsafe fn download_and_save(info: &NetClientInfo, history_ptr: *mut TextRegion<L
         return;
     }
 
-    let mut poll_buf_mu = core::mem::MaybeUninit::<[u8; 64]>::uninit();
-    let poll_buf_ptr = poll_buf_mu.as_mut_ptr() as *mut u8;
-    let poll_buf = core::slice::from_raw_parts_mut(poll_buf_ptr, 64);
-    let mut write_res = u64::MAX;
-    for _ in 0..MAX_POLLS {
-        let n = file_service::poll_reply(write_id, poll_buf);
-        if n != u64::MAX {
-            write_res = n;
-            break;
-        }
-        core::hint::spin_loop();
-    }
-
-    if write_res == u64::MAX {
-        com1::write_str("[NET_CLIENT] FILE_SERVICE_WRITE_TIMED_OUT\n");
-        (*history_ptr).push_line(b"FILE WRITE TIMED OUT");
-        (*history_ptr).render(info.surface_cap, 16, FG, BG);
-        surface::present(info.surface_cap);
-        return;
-    }
-
     com1::write_str("[NET_CLIENT] FILE_WRITE_CONFIRMED len=");
-    com1::write_dec_u64(write_res);
+    com1::write_dec_u64(body.len() as u64);
     com1::write_str("\n");
 
     // 5. Read back from disk to cryptographically verify payload
-    com1::write_str("[NET_CLIENT] DISK_READBACK_START inode=");
-    com1::write_dec_u64(info.target_inode as u64);
+    com1::write_str("[NET_CLIENT] DISK_READBACK_START path=");
+    com1::write_str(DOWNLOAD_PATH);
     com1::write_str("\n");
-
-    let read_id = file_service::request_file(info.file_cap);
-    if read_id == 0 {
-        com1::write_str("[NET_CLIENT] DISK_READBACK_REQUEST_FAILED\n");
-        return;
-    }
 
     let mut read_buf_mu = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
     let read_buf_ptr = read_buf_mu.as_mut_ptr() as *mut u8;
     let read_buf: &mut [u8] = core::slice::from_raw_parts_mut(read_buf_ptr, 4096);
-    let mut read_len = u64::MAX;
-    for _ in 0..MAX_POLLS {
-        let n = file_service::poll_reply(read_id, read_buf);
-        if n != u64::MAX {
-            read_len = n;
-            break;
-        }
-        core::hint::spin_loop();
-    }
+    let read_len = file_service::read_file_path(DOWNLOAD_PATH, read_buf) as u64;
 
-    if read_len == u64::MAX {
+    if read_len == 0 {
         com1::write_str("[NET_CLIENT] DISK_READBACK_TIMED_OUT\n");
         return;
     }
@@ -268,7 +247,7 @@ unsafe fn download_and_save(info: &NetClientInfo, history_ptr: *mut TextRegion<L
         com1::write_str("[NET_CLIENT] DOWNLOAD_CHECKSUM_VERIFIED: sha256 byte-matched\n");
         com1::write_str("[NET_CLIENT] AGENT_DOWNLOAD_SUCCESS\n");
         (*history_ptr).push_line(b"HTTP/1.0 200 OK");
-        (*history_ptr).push_line(b"Saved to Inode 11");
+        (*history_ptr).push_line(b"Saved to /downloaded.dat");
         (*history_ptr).push_line(b"SHA-256 Match: VERIFIED");
 
         verify_self_hosting_groundwork(info.file_cap);

@@ -119,10 +119,16 @@ $checks = @(
     @{ Name = "net_client received HTTP response"; Pattern = "HTTP_RESPONSE_RECEIVED" },
     @{ Name = "net_client extracted HTTP body"; Pattern = "HTTP_BODY_EXTRACTED" },
     @{ Name = "net_client computed body SHA-256"; Pattern = "HTTP_BODY_SHA256=" },
-    @{ Name = "net_client initiated disk persistence"; Pattern = "PERSISTING_TO_DISK inode=11" },
+    # Writes to a real, dedicated path ("/downloaded.dat") rather than
+    # the shared literal inode 11 -- fixed this session (see
+    # user_rs/net_client/src/main.rs's own comment) because that inode
+    # was ALSO main.rs's Phase 4 object-store demo file and
+    # virtio_blk_driver's own boot-time FS_SELF_CHECK target, so
+    # whichever of the two ran last silently clobbered the other.
+    @{ Name = "net_client initiated disk persistence"; Pattern = "PERSISTING_TO_DISK path=/downloaded.dat" },
     @{ Name = "virtio-blk committed file write to disk"; Pattern = "FILE_SERVICE_WRITE_COMMITTED" },
     @{ Name = "net_client confirmed file write"; Pattern = "FILE_WRITE_CONFIRMED" },
-    @{ Name = "net_client initiated disk readback"; Pattern = "DISK_READBACK_START inode=11" },
+    @{ Name = "net_client initiated disk readback"; Pattern = "DISK_READBACK_START path=/downloaded.dat" },
     @{ Name = "net_client computed readback SHA-256"; Pattern = "DISK_READBACK_SHA256=" },
     @{ Name = "SHA-256 checksums byte-matched"; Pattern = "DOWNLOAD_CHECKSUM_VERIFIED: sha256 byte-matched" },
     @{ Name = "Agent-driven download succeeded end-to-end"; Pattern = "AGENT_DOWNLOAD_SUCCESS" }
@@ -199,14 +205,26 @@ if (-not (Test-Path $UnauthLog)) { Write-Error "No serial output at $UnauthLog";
 $unauthContent = Get-Content $UnauthLog -Raw
 
 Write-Output "--- Adversarial Denial Verification ---"
+# The literal "arg0=99" this second check used to assert on was an
+# artifact of the OLD code path (a raw hardcoded capability id passed
+# directly as the write syscall's arg0, unauthorized builds used the
+# sentinel value 99 for it). The fix this session that moved the
+# authorized path off the shared literal FILE_INODE (11) onto a real
+# resolved-by-path inode (see the authorized-run checks above) means
+# arg0 here is now whatever real inode FS_OP_LOOKUP/FS_OP_CREATE
+# resolved for "/downloaded.dat" -- legitimately non-deterministic
+# across runs depending on what else was allocated first, not a
+# regression. What's still a real, checkable security property is that
+# SOME concrete arg0 got denied, i.e. the denial fired on the real
+# resolved capability check, not vacuously.
 $unauthChecks = @(
     @{ Name = "Kernel denied unauthorized file write"; Pattern = "FILE_SERVICE_WRITE_DENIED: caller lacks FileObject WRITE capability" },
-    @{ Name = "Kernel denied write for unauthorized cap_id=99"; Pattern = "arg0=99" },
+    @{ Name = "Denial was logged against a real, concrete arg0"; Regex = "FILE_SERVICE_WRITE_DENIED: caller lacks FileObject WRITE capability for arg0=\d+" },
     @{ Name = "net_client received write denial"; Pattern = "FILE_SERVICE_WRITE_DENIED_OR_NO_SERVER" }
 )
 
 foreach ($c in $unauthChecks) {
-    $matched = $unauthContent.Contains($c.Pattern)
+    $matched = if ($c.Regex) { $unauthContent -match $c.Regex } else { $unauthContent.Contains($c.Pattern) }
     if ($matched) {
         Write-Output "  PASS: $($c.Name)"
     } else {
