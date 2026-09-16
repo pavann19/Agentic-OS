@@ -67,6 +67,22 @@ pub fn spawn_agent_demo() {
     )))]
     if !crate::window_manager::exists(1) {
         crate::window_manager::register(1, 350, 350, 200, 200, b"Agent Workspace");
+        // Real fix for the Live Agent Bridge input-routing bug: this
+        // placeholder window was only ever registered with
+        // `window_manager` (the introspection/visual registry that
+        // `ListWindows`/`FocusWindow` read), never with
+        // `input_routing`'s OWN separate registry that
+        // `deliver_key_event` actually checks -- the two are
+        // independent data structures (see `input_routing.rs`'s own
+        // `REGISTRY` vs `window_manager.rs`'s `WINDOWS`). That gap let
+        // `FocusWindow` report success for a surface with no real
+        // input endpoint, then silently drop every injected key
+        // (`INPUT_ROUTE_DROPPED_UNKNOWN_FOCUS`) -- a false-positive
+        // response the agent had no way to detect. `spawn_window_client`
+        // (`compositor.rs`) already does this correctly for real window
+        // clients; this placeholder now follows the exact same
+        // discipline.
+        crate::input_routing::register_window_input(1);
     }
 
     let introspect_object = capability::create_object(KernelObjectKind::IntrospectionHandle);
