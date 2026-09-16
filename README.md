@@ -118,7 +118,7 @@ script leaves the raw frame sequence as evidence).
   `docs/DECISIONS.md`.
 - **USB HID input is blocked** on an open Configure Endpoint bug; PS/2
   is the only tested input path.
-- **Parser fuzzing is bounded, not continuous** — `fuzz/`'s CI job runs
+- **Parser fuzzing is bounded, not continuous** — `kernel_common/fuzz/`'s CI job runs
   each target for 60 seconds per push, not an ongoing campaign.
 
 ## Further reading

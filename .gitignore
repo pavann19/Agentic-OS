@@ -77,7 +77,7 @@ user_rs/helper_proc/target/
 hyperv/*.vhdx
 hyperv/*.log
 _evidence/latest/
-fuzz/target/
-fuzz/corpus/
-fuzz/artifacts/
+kernel_common/fuzz/target/
+kernel_common/fuzz/corpus/
+kernel_common/fuzz/artifacts/
 _evidence/ci-disk-*.img

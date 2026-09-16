@@ -20,7 +20,7 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
-kernel_common = { path = "../kernel_common" }
+kernel_common = { path = ".." }
 libfuzzer-sys = "0.4"
 
 [[bin]]

@@ -71,9 +71,9 @@ jobs:
     # Bounded smoke-fuzz, not a continuous fuzzing service: each target
     # gets a short, fixed time budget so a real crash/panic/assert
     # failure fails this job fast, without pretending to be exhaustive
-    # coverage. See fuzz/Cargo.toml's own doc comment for why these
-    # three targets (kernel_common::ext2's on-disk parsers) were chosen
-    # first.
+    # coverage. See kernel_common/fuzz/Cargo.toml's own doc comment for
+    # why these three targets (kernel_common::ext2's on-disk parsers)
+    # were chosen first.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -85,13 +85,13 @@ jobs:
         run: cargo install cargo-fuzz --locked
 
       - name: Fuzz each ext2 parser target for 60 seconds
-        # cargo-fuzz's own project-detection walks up from CWD looking
-        # for a Cargo.toml that isn't itself inside fuzz/ -- this repo
-        # is a set of independent crates with no root/workspace
-        # Cargo.toml, so `cargo fuzz` must run from inside fuzz/ itself
-        # (confirmed against a real CI failure: "could not find a cargo
-        # project" when run from the repo root).
-        working-directory: fuzz
+        # cargo-fuzz's project-detection walks up from CWD looking for
+        # a Cargo.toml paired with a fuzz/ subdirectory -- it must run
+        # from the CRATE fuzz/ lives under (kernel_common/), the
+        # standard cargo-fuzz layout, not from fuzz/ itself and not
+        # from the repo root (confirmed against two real CI failures:
+        # "could not find a cargo project" from both of those).
+        working-directory: kernel_common
         run: |
           for target in ext2_dir_parsing ext2_resolve_path ext2_read_file_data; do
             echo "=== fuzzing $target ==="

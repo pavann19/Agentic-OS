@@ -48,7 +48,7 @@ requires an actual CI job, not just an assertion here.
 | Multi-core (SMP) bring-up | Partial | `test-boot` (bring-up only) | Race-soak skips itself below 3 real cores; not exercised in CI. |
 | Power-loss / crash safety (ext2) | Demonstrated | `test-powerloss` | Superblock-last write ordering; does not claim mid-superblock-write safety (disclosed in `virtio_blk_driver`'s own doc). |
 | Storage: AHCI, NVMe | Demonstrated | `test-ahci`, `test-nvme` | |
-| Filesystem: ext2 directories/path resolution | Demonstrated | `test-self-hosting` | Parsers also covered by `fuzz/` (bounded smoke-fuzz in CI, not exhaustive). |
+| Filesystem: ext2 directories/path resolution | Demonstrated | `test-self-hosting` | Parsers also covered by `kernel_common/fuzz/` (bounded smoke-fuzz in CI, not exhaustive). |
 | USB: xHCI | Demonstrated | `test-xhci` | |
 | USB HID (mouse/keyboard) | Partial | none | Configure Endpoint bug still open (Phase 11); PS/2 is the only tested input path. |
 | Network: e1000, virtio-net/TCP | Demonstrated | `test-e1000`, `test-synthesis`, `test-tcp-two-instance` | |
