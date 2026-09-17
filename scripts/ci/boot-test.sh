@@ -70,8 +70,18 @@ command -v "$QEMU" >/dev/null 2>&1 || { echo "qemu binary not found: $QEMU" >&2;
 # needed, rather than working around a bug in what it does need.
 # virtio-blk's iommu_platform=on/ats=on are dropped alongside it, since
 # both assume a real IOMMU is present.
+#
+# kernel-irqchip=split is gone too: after removing intel-iommu (its
+# only real reason to be here -- interrupt remapping needs it), the
+# NEXT run still hung on this runner, past a DIFFERENT point (no IOMMU
+# code even ran -- ACPI_DMAR_NOT_FOUND printed, then kernel_main's
+# own hlt-loop waiting for 3 real timer ticks never got them). Same
+# machine config reaches REVOCATION_REJECTED_OK reliably, fast, without
+# the split flag on a local run. Not fully proven this was the exact
+# mechanism on the CI runner specifically -- flagged here so it's easy
+# to revisit if this check goes red again.
 timeout --signal=TERM "${TIMEOUT_SECONDS}s" "$QEMU" \
-    -machine q35,kernel-irqchip=split \
+    -machine q35 \
     -m 256M \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive file=fat:rw:"$FAT_DIR",format=raw \
