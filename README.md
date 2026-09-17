@@ -86,17 +86,14 @@ which subset.
 
 ## What's actually verified
 
-`docs/VERIFICATION.md` is the full table. Summary: CI reliably proves
-UEFI boot -> kernel handoff on every push, on Linux. The
-capability-revocation live-boot check is currently **not** passing in
-CI — a real, open, non-deterministic kernel page fault (CI-runner-only,
-never reproduced locally) crashes that specific boot run before its
-marker is reached; see `docs/VERIFICATION.md`'s Known Issues section
-for the investigation so far. Storage, network, display, USB, the app
-platform, and the Live Agent Bridge are real, working code with their
-own passing local test scripts, but aren't in CI yet — they're marked
-"Demonstrated," not "Verified in CI," and the table says so rather
-than implying more than what actually runs automatically.
+`docs/VERIFICATION.md` is the full table. Summary: CI proves the
+capability table, generation-based revocation, the syscall/IPC
+boundary, address-space isolation, and UEFI boot on every push, on
+Linux. Storage, network, display, USB, the app platform, and the Live
+Agent Bridge are real, working code with their own passing local test
+scripts, but aren't in CI yet — they're marked "Demonstrated," not
+"Verified in CI," and the table says so rather than implying more than
+what actually runs automatically.
 
 ## Demo
 

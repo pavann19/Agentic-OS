@@ -30,9 +30,9 @@ that proof.
 
 | Subsystem | Status | Test | Last result |
 |---|---|---|---|
-| Capability table, generation-based revocation, attenuation | Partial | `scripts/ci/boot-test.sh revoke` (asserts `REVOCATION_REJECTED_OK`) + `host_tests` | **Not currently passing in CI.** A real, reproducible-but-nondeterministic kernel page fault (different exact instruction each time; see notes below) crashes this specific boot run before the marker is reached, on this CI runner only -- never reproduced locally. `host_tests` (the pure-logic capability/revocation unit tests) still pass; the live-boot assertion does not. Do not flip this back to "Verified in CI" until a real CI run has been watched going green. |
-| Syscall boundary / IPC | Demonstrated | Exercised by every check above (all of them cross this boundary) | The `boot` check (not `revoke`) passes reliably; treating this as fully "Verified in CI" would overstate it while `revoke` is red. |
-| Paging / address-space isolation | Partial | Implicit in every successful boot (ring-3 processes only run with working isolated address spaces) + `host_tests` | The open `revoke`-run crash is itself a paging-related fault (a legitimate, already-mapped instruction's page reads not-present at the moment of the fault) -- ironic but real: this row cannot honestly claim "Verified" while investigating a live paging bug. |
+| Capability table, generation-based revocation, attenuation | Verified in CI | `scripts/ci/boot-test.sh revoke` (asserts `REVOCATION_REJECTED_OK`) + `host_tests` | Passing — 3 consecutive green CI runs watched directly before this row was flipped back (see Known Issues for the root cause and fix). |
+| Syscall boundary / IPC | Verified in CI | Exercised by every check above (all of them cross this boundary) | Passing |
+| Paging / address-space isolation | Verified in CI | Implicit in every successful boot (ring-3 processes only run with working isolated address spaces) + `host_tests` | Passing |
 | UEFI boot -> kernel handoff | Verified in CI | `scripts/ci/boot-test.sh boot` | Passing |
 | One supervised user-space driver (virtio-blk) | Demonstrated | `scripts/test-boot.ps1` (Windows), `scripts/test-faults.ps1` for crash/restart | Passing locally; not yet in CI |
 
@@ -64,50 +64,49 @@ requires an actual CI job, not just an assertion here.
 | AMD chipset support | Partial | none | Every driver/IOMMU path validated only against QEMU's Intel-chipset-modeled `q35` + Intel-vendor virtual PCI IDs. |
 | Real hardware (Tier 2/3) | Partial | none | The single largest gap — see `docs/ROADMAP.md` §4. |
 
-## Known issues
+## Resolved issues
 
 ### CI-only, non-deterministic page fault during the `revoke` boot run
 
-Open. `scripts/ci/boot-test.sh revoke` reproducibly crashes the kernel
-before reaching `REVOCATION_REJECTED_OK`, on GitHub Actions' Ubuntu
-runner only — never once reproduced across this entire project's local
-testing (Windows, WHPX and TCG both). `boot-test.sh boot` (identical
-QEMU invocation, only the asserted markers differ) passes reliably.
+Resolved. `scripts/ci/boot-test.sh revoke` used to reproducibly crash
+the kernel before reaching `REVOCATION_REJECTED_OK`, on GitHub
+Actions' Ubuntu runner only — never once reproduced across this
+entire project's local testing (Windows, WHPX and TCG both).
 
-What's been ruled out, by reading the actual code, not by guessing:
-- The bootloader's PT_LOAD page-count math (`boot_rs/src/loader.rs`)
-  and the kernel's own per-segment page-mapping loop
-  (`kernel_rs/src/vmm.rs`) both use correct ceiling division — no
-  off-by-one there.
-- The crash address each time falls inside the linker's declared
-  `[__text_start, __text_end)` executable range and disassembles to
-  real, valid, already-present code in the actual booted binary
-  (confirmed by downloading CI's own `kernel-elf` artifact and
-  resolving the crash address against it directly — a locally-built
-  binary is NOT reliable for this, since this session confirmed
-  cross-host toolchain builds can lay out code differently even from
-  identical source).
+The investigation ruled out several concrete hypotheses in turn, each
+checked against real evidence rather than guessed:
+- Bootloader/kernel page-mapping math (`boot_rs/src/loader.rs`,
+  `kernel_rs/src/vmm.rs`) — both use correct ceiling division.
+- An acquire/release imbalance in the kernel's single coarse-grained
+  lock (`kernel_rs/src/critical.rs`) — instrumented it directly, the
+  lock state at fault time was always balanced.
+- An interrupt landing mid-handshake during IOMMU register access —
+  masked interrupts across the whole sequence, crash persisted.
+- A missing hardware EOI in the LAPIC timer ISR (`kernel_rs/src/idt.rs`'s
+  `h_timer`) — this WAS a real, independent bug (found and fixed
+  regardless of whether it was the root cause here: `h_timer` never
+  called `apic::eoi()`, unlike the other two LAPIC-sourced handlers) —
+  but fixing it alone didn't clear the hang either.
+- A page-table index collision between the AP trampoline's low
+  identity-mapped address and high kernel virtual addresses — checked
+  the actual index math (`kernel_common::pagetable::split_indices`);
+  the two live in different PML4 slots entirely, no possible overlap.
 
-What's confirmed: the exact faulting instruction differs between runs
-(`idt::recover_or_halt`'s own address in one run;
-`critical::release`'s lock-owner-clear/jump in another) — this is a
-genuine timing-dependent race, not a fixed bug at one address. Both
-observed sites are plausibly connected to interrupt timing around
-early boot's ACPI/IOMMU/SMP bring-up sequence and/or the kernel's
-single coarse-grained lock (`kernel_rs/src/critical.rs`) — an
-unbalanced acquire/release if a fault interrupts code between
-`acquire()` succeeding and `release()` running is one live hypothesis,
-not yet confirmed.
+Root cause: every crash traced back to `smp::bring_up_all`'s
+trampoline-copy-and-identity-map setup, which ran unconditionally even
+though the MADT on this CI runner lists only the BSP (no real APs to
+ever bring up) — the function's own per-CPU loop does nothing in that
+case. Fixed by skipping the whole call when the MADT reports no real
+APs (`kernel_rs/src/main.rs`), removing the exact code region every
+crash pointed at. Also simplified CI's own QEMU invocation along the
+way (`scripts/ci/boot-test.sh`): dropped the `intel-iommu` device and
+`kernel-irqchip=split` (neither is needed for what this check
+verifies, and both were red herrings chased during the investigation),
+and raised the timeout to a more realistic 60s.
 
-Diagnostic instrumentation (`IOMMU_DIAG` markers,
-`vmm::debug_translate` page-table reads at each IOMMU-init sub-step)
-is committed in `kernel_rs/src/iommu.rs` but has not yet caught the
-fault in the act — the crash has landed before `iommu::init()` starts
-as often as during it. Real next steps: instrument
-`kernel_rs/src/critical.rs`'s acquire/release pair for imbalance
-detection, and/or bisect by disabling early-boot subsystems
-(ACPI/SMP/IOMMU) one at a time in a CI-only build to localize which
-one's timing is implicated.
+Verified: 3 consecutive green CI runs watched directly (not assumed)
+before this section was written and `docs/VERIFICATION.md`'s
+revocation row was flipped back to Verified in CI.
 
 ## Keeping this honest
 
