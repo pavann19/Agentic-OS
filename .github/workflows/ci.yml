@@ -55,9 +55,25 @@ jobs:
         # out from under this workflow the next time the runner image
         # updates.
         run: |
-          OVMF_PATH=$(find /usr/share -iname 'OVMF_CODE*.fd' 2>/dev/null | head -n1)
+          # A loose `find ... | head -n1` previously picked
+          # OVMF_CODE_4M.snakeoil.fd (a self-signed/secure-boot test
+          # variant this runner also ships) ahead of the plain variant
+          # -- confirmed as the real cause of a genuine firmware-level
+          # crash (#UD invalid-opcode fault inside EDK2 itself, "Can't
+          # find image information", not a kernel bug) on a real CI
+          # run. Search a priority list of the standard, non-secure-boot
+          # filenames first, explicitly skipping anything with
+          # "snakeoil" or "ms" (Microsoft-signed) in the name.
+          OVMF_PATH=""
+          for candidate in OVMF_CODE_4M.fd OVMF_CODE.fd; do
+            found=$(find /usr/share -iname "$candidate" 2>/dev/null | head -n1)
+            if [ -n "$found" ]; then OVMF_PATH="$found"; break; fi
+          done
           if [ -z "$OVMF_PATH" ]; then
-            echo "::error::No OVMF_CODE*.fd found under /usr/share after installing ovmf"
+            OVMF_PATH=$(find /usr/share -iname 'OVMF_CODE*.fd' ! -iname '*snakeoil*' ! -iname '*.ms.fd' 2>/dev/null | head -n1)
+          fi
+          if [ -z "$OVMF_PATH" ]; then
+            echo "::error::No usable OVMF_CODE*.fd found under /usr/share after installing ovmf"
             find /usr/share -iname '*ovmf*' -o -iname '*OVMF*' 2>/dev/null
             exit 1
           fi
