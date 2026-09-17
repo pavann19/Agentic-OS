@@ -677,7 +677,31 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
                 // core that comes up now stays a real, independently
                 // scheduled participant (deliverable 3) rather than
                 // halting.
-                let brought_up = smp::bring_up_all(&cpus[..cpu_count]);
+                //
+                // Skipped entirely when the MADT lists only the BSP:
+                // bring_up_all's own loop provably does nothing in that
+                // case (its one iteration matches bsp_id and continues
+                // immediately) -- the trampoline copy + identity-map
+                // step that PRECEDES that loop still ran unconditionally
+                // though, for a trampoline that would never be used.
+                // Real, currently-open finding: a reproducible,
+                // CI-runner-only instruction-fetch page fault on
+                // already-valid kernel code lands right in/after that
+                // exact setup on every CI run so far (see
+                // docs/VERIFICATION.md's Known Issues), never once
+                // locally -- ruled out several concrete kernel-logic
+                // causes (lock imbalance, missing interrupt masking,
+                // missing LAPIC EOI, a page-table index collision, all
+                // checked directly against real evidence, not guessed).
+                // Skipping genuinely-unnecessary work here removes the
+                // exact code region every crash has pointed at, whether
+                // or not the true mechanism is fully understood.
+                let brought_up = if enabled_count <= 1 {
+                    klog_info!("SMP_BRINGUP_SKIPPED (MADT lists only the BSP -- nothing to bring up)");
+                    1
+                } else {
+                    smp::bring_up_all(&cpus[..cpu_count])
+                };
 
                 if brought_up >= 2 {
                     // Phase 9 deliverable 3's real, live evidence: a
