@@ -100,6 +100,24 @@ jobs:
           path: _evidence/latest/serial-ci-*.log
           if-no-files-found: warn
 
+      - name: Upload kernel.elf for offline crash-address symbol resolution
+        # Debugging aid for a real, currently-open finding: a page
+        # fault during the revoke boot run, at an address that only
+        # means something against the EXACT binary that crashed --
+        # cross-host builds (this runner's Linux-GNU host vs. a
+        # Windows-GNU dev host) are not guaranteed to lay out code
+        # identically even from the same source, so a locally-built
+        # kernel.elf's symbol table cannot be trusted to resolve a
+        # CI crash address precisely. Uploaded unconditionally
+        # (always), not just on failure, since the current failure
+        # doesn't visibly corrupt the artifact from a successful step.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-elf
+          path: kernel_rs/target/x86_64-unknown-none/release/agentic_kernel
+          if-no-files-found: warn
+
   fuzz-ext2-parsers:
     # Bounded smoke-fuzz, not a continuous fuzzing service: each target
     # gets a short, fixed time budget so a real crash/panic/assert
