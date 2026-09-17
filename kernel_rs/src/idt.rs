@@ -266,9 +266,32 @@ handler_no_ec!(h_reserved_31, 31);
 /// happening here to defer — this handler is already minimal, not a case
 /// that needs fixing later like the C keyboard handler did).
 extern "x86-interrupt" fn h_timer(_frame: InterruptStackFrame) {
+    // Temporary: chasing a real CI-only hang (no fault, no crash --
+    // kernel_main's own hlt-loop waiting for 3 real timer ticks never
+    // gets them, on every CI run so far, never once locally). Logs
+    // only the very first few real entries so this doesn't itself
+    // change the timing/volume of a periodic ISR that fires constantly
+    // once it's actually running. Tells us definitively whether this
+    // handler is entered AT ALL on the runner where it hangs, before
+    // guessing further at schedule()/on_tick()/interrupt_forward.
+    use core::sync::atomic::{AtomicU32, Ordering};
+    static FIRST_ENTRIES_LOGGED: AtomicU32 = AtomicU32::new(0);
+    let n = FIRST_ENTRIES_LOGGED.fetch_add(1, Ordering::Relaxed);
+    if n < 5 {
+        crate::klog_info!("TIMER_DIAG_ISR_ENTERED n={}", n);
+    }
     crate::apic::on_tick();
+    if n < 5 {
+        crate::klog_info!("TIMER_DIAG_AFTER_ON_TICK n={}", n);
+    }
     crate::interrupt_forward::notify(crate::apic::TIMER_VECTOR);
+    if n < 5 {
+        crate::klog_info!("TIMER_DIAG_AFTER_NOTIFY n={}", n);
+    }
     crate::thread::schedule();
+    if n < 5 {
+        crate::klog_info!("TIMER_DIAG_AFTER_SCHEDULE n={}", n);
+    }
 }
 
 /// Vector 0x21 (`pic::KEYBOARD_VECTOR`) — Phase 3's PS/2 keyboard driver.
