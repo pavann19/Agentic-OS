@@ -29,7 +29,15 @@ OVMF_CODE="${AGENTIC_OS_OVMF_CODE:-/usr/share/OVMF/OVMF_CODE.fd}"
 FAT_DIR="boot_rs/qemu_fatdir"
 SERIAL_LOG="_evidence/latest/serial-ci-${MODE}.log"
 DISK_IMAGE="_evidence/ci-disk-${MODE}.img"
-TIMEOUT_SECONDS=25
+# "revoke" needs kernel_main to actually reach and run its
+# scheduler-spawned demo threads (not just the early synchronous boot
+# markers "boot" checks), which takes real wall-clock time this CI
+# runner's shared/throttled CPU apparently doesn't always have inside
+# 25s -- the most recent run's log stops cleanly after
+# ACPI_DMAR_NOT_FOUND with no fault reported at all, then hits this
+# timeout, which is the signature of "still running slowly," not a
+# crash.
+TIMEOUT_SECONDS=60
 
 mkdir -p "$(dirname "$SERIAL_LOG")"
 if [[ ! -f "$DISK_IMAGE" ]]; then
@@ -64,7 +72,6 @@ command -v "$QEMU" >/dev/null 2>&1 || { echo "qemu binary not found: $QEMU" >&2;
 # both assume a real IOMMU is present.
 timeout --signal=TERM "${TIMEOUT_SECONDS}s" "$QEMU" \
     -machine q35,kernel-irqchip=split \
-    -accel tcg,thread=single \
     -m 256M \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive file=fat:rw:"$FAT_DIR",format=raw \
