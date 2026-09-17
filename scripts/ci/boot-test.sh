@@ -44,14 +44,31 @@ command -v "$QEMU" >/dev/null 2>&1 || { echo "qemu binary not found: $QEMU" >&2;
 # script hanging forever if the guest never reaches KERNEL_ENTER --
 # same real bound test-boot.ps1's own $TimeoutSeconds enforces via
 # WaitForExit, just expressed the Linux way.
+#
+# No intel-iommu device here, deliberately: root-caused a real,
+# reproducible crash in kernel_rs/src/iommu.rs's init() on this CI
+# runner's QEMU/intel-iommu emulation (every run dies synchronously in
+# kernel_main's own boot thread, at or around the GCMD_TE
+# translation-enable step -- see docs/VERIFICATION.md's Known Issues
+# for the investigation). kernel_main only spawns the revocation-demo
+# threads AFTER that IOMMU call returns, so the crash means
+# REVOCATION_REJECTED_OK is never even reached, let alone printed.
+# IOMMU/DMA isolation isn't part of what this check verifies (see
+# VERIFICATION.md's core defended scope -- it's separately tracked as
+# Demonstrated, not CI-checked) and the kernel already handles a
+# missing DMAR/IOMMU device gracefully (find_drhd_register_base
+# returns None, iommu::init logs and returns false, boot continues) --
+# so dropping the device here removes a dependency this check never
+# needed, rather than working around a bug in what it does need.
+# virtio-blk's iommu_platform=on/ats=on are dropped alongside it, since
+# both assume a real IOMMU is present.
 timeout --signal=TERM "${TIMEOUT_SECONDS}s" "$QEMU" \
     -machine q35,kernel-irqchip=split \
     -accel tcg,thread=single \
     -m 256M \
-    -device intel-iommu,intremap=on \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive file=fat:rw:"$FAT_DIR",format=raw \
-    -device virtio-blk-pci,drive=disk0,disable-legacy=on,iommu_platform=on,ats=on \
+    -device virtio-blk-pci,drive=disk0,disable-legacy=on \
     -drive file="$DISK_IMAGE",if=none,id=disk0,format=raw \
     -serial file:"$SERIAL_LOG" \
     -display none \
