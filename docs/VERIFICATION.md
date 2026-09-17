@@ -30,9 +30,9 @@ that proof.
 
 | Subsystem | Status | Test | Last result |
 |---|---|---|---|
-| Capability table, generation-based revocation, attenuation | Verified in CI | `scripts/ci/boot-test.sh revoke` (asserts `REVOCATION_REJECTED_OK`) + `host_tests` | Passing |
-| Syscall boundary / IPC | Verified in CI | Exercised by every check above (all of them cross this boundary) | Passing |
-| Paging / address-space isolation | Verified in CI | Implicit in every successful boot (ring-3 processes only run with working isolated address spaces) + `host_tests` | Passing |
+| Capability table, generation-based revocation, attenuation | Partial | `scripts/ci/boot-test.sh revoke` (asserts `REVOCATION_REJECTED_OK`) + `host_tests` | **Not currently passing in CI.** A real, reproducible-but-nondeterministic kernel page fault (different exact instruction each time; see notes below) crashes this specific boot run before the marker is reached, on this CI runner only -- never reproduced locally. `host_tests` (the pure-logic capability/revocation unit tests) still pass; the live-boot assertion does not. Do not flip this back to "Verified in CI" until a real CI run has been watched going green. |
+| Syscall boundary / IPC | Demonstrated | Exercised by every check above (all of them cross this boundary) | The `boot` check (not `revoke`) passes reliably; treating this as fully "Verified in CI" would overstate it while `revoke` is red. |
+| Paging / address-space isolation | Partial | Implicit in every successful boot (ring-3 processes only run with working isolated address spaces) + `host_tests` | The open `revoke`-run crash is itself a paging-related fault (a legitimate, already-mapped instruction's page reads not-present at the moment of the fault) -- ironic but real: this row cannot honestly claim "Verified" while investigating a live paging bug. |
 | UEFI boot -> kernel handoff | Verified in CI | `scripts/ci/boot-test.sh boot` | Passing |
 | One supervised user-space driver (virtio-blk) | Demonstrated | `scripts/test-boot.ps1` (Windows), `scripts/test-faults.ps1` for crash/restart | Passing locally; not yet in CI |
 
@@ -63,6 +63,51 @@ requires an actual CI job, not just an assertion here.
 | Release build reproducibility | Demonstrated | `test-release` | |
 | AMD chipset support | Partial | none | Every driver/IOMMU path validated only against QEMU's Intel-chipset-modeled `q35` + Intel-vendor virtual PCI IDs. |
 | Real hardware (Tier 2/3) | Partial | none | The single largest gap — see `docs/ROADMAP.md` §4. |
+
+## Known issues
+
+### CI-only, non-deterministic page fault during the `revoke` boot run
+
+Open. `scripts/ci/boot-test.sh revoke` reproducibly crashes the kernel
+before reaching `REVOCATION_REJECTED_OK`, on GitHub Actions' Ubuntu
+runner only — never once reproduced across this entire project's local
+testing (Windows, WHPX and TCG both). `boot-test.sh boot` (identical
+QEMU invocation, only the asserted markers differ) passes reliably.
+
+What's been ruled out, by reading the actual code, not by guessing:
+- The bootloader's PT_LOAD page-count math (`boot_rs/src/loader.rs`)
+  and the kernel's own per-segment page-mapping loop
+  (`kernel_rs/src/vmm.rs`) both use correct ceiling division — no
+  off-by-one there.
+- The crash address each time falls inside the linker's declared
+  `[__text_start, __text_end)` executable range and disassembles to
+  real, valid, already-present code in the actual booted binary
+  (confirmed by downloading CI's own `kernel-elf` artifact and
+  resolving the crash address against it directly — a locally-built
+  binary is NOT reliable for this, since this session confirmed
+  cross-host toolchain builds can lay out code differently even from
+  identical source).
+
+What's confirmed: the exact faulting instruction differs between runs
+(`idt::recover_or_halt`'s own address in one run;
+`critical::release`'s lock-owner-clear/jump in another) — this is a
+genuine timing-dependent race, not a fixed bug at one address. Both
+observed sites are plausibly connected to interrupt timing around
+early boot's ACPI/IOMMU/SMP bring-up sequence and/or the kernel's
+single coarse-grained lock (`kernel_rs/src/critical.rs`) — an
+unbalanced acquire/release if a fault interrupts code between
+`acquire()` succeeding and `release()` running is one live hypothesis,
+not yet confirmed.
+
+Diagnostic instrumentation (`IOMMU_DIAG` markers,
+`vmm::debug_translate` page-table reads at each IOMMU-init sub-step)
+is committed in `kernel_rs/src/iommu.rs` but has not yet caught the
+fault in the act — the crash has landed before `iommu::init()` starts
+as often as during it. Real next steps: instrument
+`kernel_rs/src/critical.rs`'s acquire/release pair for imbalance
+detection, and/or bisect by disabling early-boot subsystems
+(ACPI/SMP/IOMMU) one at a time in a CI-only build to localize which
+one's timing is implicated.
 
 ## Keeping this honest
 
