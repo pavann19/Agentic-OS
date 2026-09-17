@@ -87,7 +87,7 @@
 //! SAME core a cheap no-op, while a DIFFERENT core still genuinely spins
 //! until the owner's outermost call releases it.
 
-use core::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 
 /// -1 = unlocked; otherwise the `smp::current_cpu_index()` of whichever
 /// core currently holds the lock (real hardware-APIC-ID-resolved
@@ -97,6 +97,36 @@ static KERNEL_LOCK_OWNER: AtomicI64 = AtomicI64::new(-1);
 /// This prevents cross-core races where depth drops to 0 before owner is cleared,
 /// and eliminates multi-core de-synchronization during reentrant lock acquisition.
 static PER_CPU_DEPTH: [AtomicU32; crate::smp::MAX_CPUS] = [const { AtomicU32::new(0) }; crate::smp::MAX_CPUS];
+
+// Imbalance diagnostics, added while chasing a real, open, CI-only
+// non-deterministic page fault (see docs/VERIFICATION.md's Known
+// Issues section): the live hypothesis is a fault landing between
+// acquire() succeeding and release() running, leaving the lock held
+// forever. TOTAL_ACQUIRES/TOTAL_RELEASES only increment on the
+// outermost (depth 0->1 / 1->0) transition, so on a healthy system
+// they track each other 1:1 -- a growing gap is direct evidence of a
+// leaked lock. release() at depth==0 used to be a silent no-op; that
+// silently hides exactly the bug being hunted, so it's now counted
+// and logged instead.
+static TOTAL_ACQUIRES: AtomicU64 = AtomicU64::new(0);
+static TOTAL_RELEASES: AtomicU64 = AtomicU64::new(0);
+static UNBALANCED_RELEASES: AtomicU64 = AtomicU64::new(0);
+
+/// Real diagnostic snapshot for `idt::recover_or_halt` to log at the
+/// exact moment of a ring-0 fault -- if `owner != -1` or
+/// `depth_here > 0` right then, the lock was genuinely held (by
+/// someone) when the fault hit, which is what a real acquire/release
+/// imbalance around the faulting code would look like.
+pub fn diag_snapshot() -> (i64, u32, u64, u64, u64) {
+    let me = crate::smp::current_cpu_index().min(crate::smp::MAX_CPUS - 1);
+    (
+        KERNEL_LOCK_OWNER.load(Ordering::Relaxed),
+        PER_CPU_DEPTH[me].load(Ordering::Relaxed),
+        TOTAL_ACQUIRES.load(Ordering::Relaxed),
+        TOTAL_RELEASES.load(Ordering::Relaxed),
+        UNBALANCED_RELEASES.load(Ordering::Relaxed),
+    )
+}
 
 /// Runs `f` with interrupts disabled AND this core holding the one
 /// real, kernel-wide lock (see this module's own doc comment for the
@@ -173,6 +203,7 @@ pub fn acquire() {
     }
 
     PER_CPU_DEPTH[me].store(1, Ordering::Relaxed);
+    TOTAL_ACQUIRES.fetch_add(1, Ordering::Relaxed);
 }
 
 /// The release half — see `acquire`'s own doc comment for why
@@ -183,11 +214,16 @@ pub fn release() {
     let me = crate::smp::current_cpu_index().min(crate::smp::MAX_CPUS - 1);
     let depth = PER_CPU_DEPTH[me].load(Ordering::Relaxed);
     if depth == 0 {
+        // Previously a silent no-op -- masked exactly the imbalance
+        // being hunted. Now counted and logged instead.
+        let n = UNBALANCED_RELEASES.fetch_add(1, Ordering::Relaxed) + 1;
+        crate::klog_info!("CRITICAL_UNBALANCED_RELEASE cpu_index={} count={}", me, n);
         return;
     }
     if depth == 1 {
         PER_CPU_DEPTH[me].store(0, Ordering::Relaxed);
         KERNEL_LOCK_OWNER.store(-1, Ordering::Release);
+        TOTAL_RELEASES.fetch_add(1, Ordering::Relaxed);
     } else {
         PER_CPU_DEPTH[me].store(depth - 1, Ordering::Relaxed);
     }

@@ -119,6 +119,19 @@ fn recover_or_halt(vector: u8, frame: &InterruptStackFrame) -> ! {
     // showed is unreliable here -- LTO can merge/inline small
     // functions in ways that make symbol-based attribution mislead).
     klog_error!("RECOVER_OR_HALT_ENTER vector={} cs=0x{:x} rip=0x{:x}", vector, frame.code_segment, frame.instruction_pointer);
+    // Chasing a real, open, CI-only page fault (docs/VERIFICATION.md's
+    // Known Issues): logs the kernel's single coarse-grained lock's
+    // exact state right here -- owner != -1 or depth > 0 at this exact
+    // moment means the lock was genuinely still held when the fault
+    // hit, which is what an acquire()/release() imbalance around the
+    // faulting code would look like.
+    {
+        let (owner, depth, acquires, releases, unbalanced) = crate::critical::diag_snapshot();
+        klog_error!(
+            "CRITICAL_DIAG_AT_FAULT owner={} depth_here={} total_acquires={} total_releases={} unbalanced_releases={}",
+            owner, depth, acquires, releases, unbalanced
+        );
+    }
     // Real, permanent diagnostic: when a #GP fires at CPL0 with no privilege change,
     // hardware delivers it on the SAME stack with no RSP adjustment beyond its own
     // new frame -- meaning frame.stack_pointer here is exactly the RSP the FAULTING
