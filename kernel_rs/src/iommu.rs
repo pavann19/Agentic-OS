@@ -145,7 +145,15 @@ pub fn init(dmar_phys: u64) -> bool {
     };
     klog_info!("IOMMU: DRHD register base phys=0x{:x}", reg_base_phys);
 
-    unsafe {
+    // Whole register handshake now runs with interrupts masked. Real CI
+    // finding: a reproducible-but-nondeterministic page fault during
+    // this exact sequence, on the CI runner only, at a different
+    // instruction each time -- a lock-imbalance around it was checked
+    // directly (acquire/release counts logged at fault time) and came
+    // back balanced, ruling that out. This is the next real candidate:
+    // an interrupt landing mid-MMIO-handshake with the IOMMU device,
+    // unprotected before this change.
+    let ok = crate::critical::without_interrupts(|| unsafe {
         // Temporary diagnostic instrumentation (real CI finding: a
         // reproducible page fault whose recovery handler
         // (idt::recover_or_halt) is ITSELF not-present at the moment
@@ -200,6 +208,11 @@ pub fn init(dmar_phys: u64) -> bool {
             }
         }
         klog_info!("IOMMU_DIAG: RTPS confirmed after {} spins", spins);
+        let (owner, depth, acquires, releases, unbalanced) = crate::critical::diag_snapshot();
+        klog_info!(
+            "IOMMU_DIAG: lock state before GCMD_TE: owner={} depth_here={} total_acquires={} total_releases={} unbalanced_releases={}",
+            owner, depth, acquires, releases, unbalanced
+        );
 
         r.write32(REG_GCMD, GCMD_TE);
         klog_info!("IOMMU_DIAG: entering TES poll loop");
@@ -215,6 +228,10 @@ pub fn init(dmar_phys: u64) -> bool {
 
         REGS = Some(r);
         IOMMU_READY.store(true, core::sync::atomic::Ordering::Release);
+        true
+    });
+    if !ok {
+        return false;
     }
     klog_info!("IOMMU: translation enabled, root table live, every device denied by default");
     true
