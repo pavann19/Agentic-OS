@@ -46,6 +46,7 @@ command -v "$QEMU" >/dev/null 2>&1 || { echo "qemu binary not found: $QEMU" >&2;
 # WaitForExit, just expressed the Linux way.
 timeout --signal=TERM "${TIMEOUT_SECONDS}s" "$QEMU" \
     -machine q35,kernel-irqchip=split \
+    -accel tcg,thread=single \
     -m 256M \
     -device intel-iommu,intremap=on \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
