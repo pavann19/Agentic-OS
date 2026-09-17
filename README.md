@@ -101,10 +101,13 @@ than implying more than what actually runs automatically.
 ## Demo
 
 `scripts/record-boot-video.ps1` drives QEMU's real QMP protocol to
-capture a genuine framebuffer frame sequence across a live boot
-(verified this way: 30 real 640x480 frames, not synthetic). No
-video file is committed to the repo — run the script yourself to
-generate one (needs `ffmpeg` on PATH to encode to MP4; without it, the
+capture a genuine framebuffer frame sequence across a live boot,
+covering the same boot + capability-revocation sequence
+`scripts/test-boot.ps1` asserts on (49 real 640x480 frames, MP4-encoded
+with ffmpeg — both the capture and the encode have been run and
+verified end to end). No video file is committed to the repo — run the
+script yourself to generate one (needs `ffmpeg` on PATH to encode to
+MP4; without it, the
 script leaves the raw frame sequence as evidence).
 
 ## Limitations
