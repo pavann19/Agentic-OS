@@ -872,30 +872,10 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     // Drains events::pop() in normal (non-interrupt) context — proves the
     // producer (h_timer, interrupt context)/consumer (here) path works
     // end to end, not just that the counter increments.
-    //
-    // Temporary: chasing a real CI-only hang right at this loop (never
-    // once locally). Logs, for the first several hlt-wakeups only, the
-    // real interrupt-enable flag and apic::tick_count() seen from THIS
-    // (consumer) side -- the ISR side already looked fine in earlier
-    // diagnostics (real entries, EOI now sent), so this checks the
-    // other half directly instead of guessing further.
     let mut consumed = 0u32;
-    let mut loop_iters = 0u32;
     while consumed < 3 {
-        let rflags: u64;
         unsafe {
-            core::arch::asm!(
-                "pushfq", "pop {0}", "hlt",
-                out(reg) rflags,
-                options(nomem, nostack)
-            );
-        }
-        loop_iters += 1;
-        if loop_iters <= 10 {
-            klog_info!(
-                "TICKWAIT_DIAG iter={} rflags_IF={} tick_count={}",
-                loop_iters, (rflags >> 9) & 1, apic::tick_count()
-            );
+            core::arch::asm!("hlt", options(nomem, nostack));
         }
         while let Some(events::Event::Tick(n)) = events::pop() {
             klog_info!("DEFERRED_EVENT_CONSUMED tick={}", n);

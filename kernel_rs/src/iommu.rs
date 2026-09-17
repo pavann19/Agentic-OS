@@ -145,34 +145,13 @@ pub fn init(dmar_phys: u64) -> bool {
     };
     klog_info!("IOMMU: DRHD register base phys=0x{:x}", reg_base_phys);
 
-    // Whole register handshake now runs with interrupts masked. Real CI
-    // finding: a reproducible-but-nondeterministic page fault during
-    // this exact sequence, on the CI runner only, at a different
-    // instruction each time -- a lock-imbalance around it was checked
-    // directly (acquire/release counts logged at fault time) and came
-    // back balanced, ruling that out. This is the next real candidate:
-    // an interrupt landing mid-MMIO-handshake with the IOMMU device,
-    // unprotected before this change.
+    // Whole register handshake runs with interrupts masked -- real
+    // hardware/emulation handshake, no reason to let anything preempt
+    // it partway through.
     let ok = crate::critical::without_interrupts(|| unsafe {
-        // Temporary diagnostic instrumentation (real CI finding: a
-        // reproducible page fault whose recovery handler
-        // (idt::recover_or_halt) is ITSELF not-present at the moment
-        // of the fault, landing somewhere in this function -- these
-        // markers exist to pin down exactly which step triggers the
-        // ORIGINAL fault, not just where the broken recovery path
-        // lands. Remove once root-caused.
-        let crash_addr: u64 = 0xffffffff82013120;
-        let pte_before = vmm::debug_translate(vmm::kernel_pml4_phys(), crash_addr);
-        klog_info!("IOMMU_DIAG: PTE for 0x{:x} BEFORE anything = 0x{:x}", crash_addr, pte_before);
-
-        klog_info!("IOMMU_DIAG: before map_mmio_page phys=0x{:x}", reg_base_phys);
         let vaddr = vmm::map_mmio_page(reg_base_phys);
-        klog_info!("IOMMU_DIAG: after map_mmio_page vaddr=0x{:x}", vaddr);
-        let pte_after_mmio = vmm::debug_translate(vmm::kernel_pml4_phys(), crash_addr);
-        klog_info!("IOMMU_DIAG: PTE for 0x{:x} after map_mmio_page = 0x{:x}", crash_addr, pte_after_mmio);
         let r = Regs { vaddr };
 
-        klog_info!("IOMMU_DIAG: before reading CAP/ECAP/VER");
         let cap = r.read64(REG_CAP);
         let ecap = r.read64(REG_ECAP);
         let ver = r.read32(REG_VER);
@@ -184,19 +163,10 @@ pub fn init(dmar_phys: u64) -> bool {
         // Root table: 4KB, 256 entries x 16 bytes each (one per PCI bus
         // number 0-255). Every entry starts zeroed = not present = every
         // device on every bus denied by default.
-        klog_info!("IOMMU_DIAG: before alloc_page(root_phys)");
         let root_phys = pmm::alloc_page();
-        klog_info!("IOMMU_DIAG: after alloc_page root_phys=0x{:x}", root_phys);
-        let pte_after_alloc = vmm::debug_translate(vmm::kernel_pml4_phys(), crash_addr);
-        klog_info!("IOMMU_DIAG: PTE for 0x{:x} after alloc_page(root_phys) = 0x{:x}", crash_addr, pte_after_alloc);
         ROOT_TABLE_PHYS = root_phys;
-        klog_info!("IOMMU_DIAG: before write64(REG_RTADDR)");
         r.write64(REG_RTADDR, root_phys);
-        klog_info!("IOMMU_DIAG: before write32(REG_GCMD, SRTP)");
         r.write32(REG_GCMD, GCMD_SRTP);
-        let pte_after_rtaddr = vmm::debug_translate(vmm::kernel_pml4_phys(), crash_addr);
-        klog_info!("IOMMU_DIAG: PTE for 0x{:x} after RTADDR write + SRTP command = 0x{:x}", crash_addr, pte_after_rtaddr);
-        klog_info!("IOMMU_DIAG: entering RTPS poll loop");
         // Real hardware/emulation handshake: poll GSTS until RTPS confirms
         // the root table pointer was actually latched, not just written.
         let mut spins = 0;
@@ -207,15 +177,8 @@ pub fn init(dmar_phys: u64) -> bool {
                 return false;
             }
         }
-        klog_info!("IOMMU_DIAG: RTPS confirmed after {} spins", spins);
-        let (owner, depth, acquires, releases, unbalanced) = crate::critical::diag_snapshot();
-        klog_info!(
-            "IOMMU_DIAG: lock state before GCMD_TE: owner={} depth_here={} total_acquires={} total_releases={} unbalanced_releases={}",
-            owner, depth, acquires, releases, unbalanced
-        );
 
         r.write32(REG_GCMD, GCMD_TE);
-        klog_info!("IOMMU_DIAG: entering TES poll loop");
         spins = 0;
         while r.read32(REG_GSTS) & GSTS_TES == 0 {
             spins += 1;
@@ -224,7 +187,6 @@ pub fn init(dmar_phys: u64) -> bool {
                 return false;
             }
         }
-        klog_info!("IOMMU_DIAG: TES confirmed after {} spins", spins);
 
         REGS = Some(r);
         IOMMU_READY.store(true, core::sync::atomic::Ordering::Release);
