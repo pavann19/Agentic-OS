@@ -266,32 +266,28 @@ handler_no_ec!(h_reserved_31, 31);
 /// happening here to defer — this handler is already minimal, not a case
 /// that needs fixing later like the C keyboard handler did).
 extern "x86-interrupt" fn h_timer(_frame: InterruptStackFrame) {
-    // Temporary: chasing a real CI-only hang (no fault, no crash --
+    // Real bug, found by chasing a CI-only hang (no fault, no crash --
     // kernel_main's own hlt-loop waiting for 3 real timer ticks never
-    // gets them, on every CI run so far, never once locally). Logs
-    // only the very first few real entries so this doesn't itself
-    // change the timing/volume of a periodic ISR that fires constantly
-    // once it's actually running. Tells us definitively whether this
-    // handler is entered AT ALL on the runner where it hangs, before
-    // guessing further at schedule()/on_tick()/interrupt_forward.
-    use core::sync::atomic::{AtomicU32, Ordering};
-    static FIRST_ENTRIES_LOGGED: AtomicU32 = AtomicU32::new(0);
-    let n = FIRST_ENTRIES_LOGGED.fetch_add(1, Ordering::Relaxed);
-    if n < 5 {
-        crate::klog_info!("TIMER_DIAG_ISR_ENTERED n={}", n);
-    }
+    // got them, every time on CI, never once locally): this handler
+    // never sent a real hardware EOI to the LAPIC. Without it, once
+    // the first timer interrupt is serviced the LAPIC's in-service bit
+    // for this vector never clears, so architecturally it can't
+    // redeliver the SAME vector again until something clears it --
+    // exactly `h_reschedule`/`h_tlb_shootdown` below already do
+    // correctly for their own LAPIC-sourced vectors, and exactly what
+    // this one was missing. Diagnostic logging on this session's own
+    // dev machine (WHPX-accelerated) showed several real ticks firing
+    // before things went quiet -- WHPX's virtualized APIC tolerates a
+    // missing EOI more leniently than QEMU's strict software (TCG)
+    // LAPIC emulation does, which is why this never reproduced
+    // locally. EOI has to happen before schedule(), not after --
+    // schedule() can switch to a different thread and never return to
+    // this call site, which would leave this specific tick's EOI
+    // unsent forever if it came second.
+    crate::apic::eoi();
     crate::apic::on_tick();
-    if n < 5 {
-        crate::klog_info!("TIMER_DIAG_AFTER_ON_TICK n={}", n);
-    }
     crate::interrupt_forward::notify(crate::apic::TIMER_VECTOR);
-    if n < 5 {
-        crate::klog_info!("TIMER_DIAG_AFTER_NOTIFY n={}", n);
-    }
     crate::thread::schedule();
-    if n < 5 {
-        crate::klog_info!("TIMER_DIAG_AFTER_SCHEDULE n={}", n);
-    }
 }
 
 /// Vector 0x21 (`pic::KEYBOARD_VECTOR`) — Phase 3's PS/2 keyboard driver.
