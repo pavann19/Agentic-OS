@@ -47,6 +47,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 ovmf
 
+      - name: Locate the real OVMF_CODE path installed by this runner's ovmf package
+        # The ovmf apt package's file name/location has genuinely moved
+        # across Ubuntu releases (confirmed against a real CI failure:
+        # /usr/share/OVMF/OVMF_CODE.fd did not exist on this runner) --
+        # found at run time instead of hardcoding a path that drifts
+        # out from under this workflow the next time the runner image
+        # updates.
+        run: |
+          OVMF_PATH=$(find /usr/share -iname 'OVMF_CODE*.fd' 2>/dev/null | head -n1)
+          if [ -z "$OVMF_PATH" ]; then
+            echo "::error::No OVMF_CODE*.fd found under /usr/share after installing ovmf"
+            find /usr/share -iname '*ovmf*' -o -iname '*OVMF*' 2>/dev/null
+            exit 1
+          fi
+          echo "Found OVMF firmware at $OVMF_PATH"
+          echo "AGENTIC_OS_OVMF_CODE=$OVMF_PATH" >> "$GITHUB_ENV"
+
       - name: Build bootloader, userland drivers, and kernel (make image)
         run: make image
 
