@@ -17,6 +17,7 @@ $ErrorActionPreference = "Continue"
 $suite = @(
     @{ Name = "test-host";                    Script = "scripts\test-host.ps1" },
     @{ Name = "test-boot";                     Script = "scripts\test-boot.ps1" },
+    @{ Name = "test-syscall-latency";          Script = "scripts\test-syscall-latency.ps1" },
     @{ Name = "test-faults";                   Script = "scripts\test-faults.ps1" },
     @{ Name = "test-keyboard";                 Script = "scripts\test-keyboard.ps1" },
     @{ Name = "test-powerloss";                Script = "scripts\test-powerloss.ps1" },

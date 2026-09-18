@@ -35,6 +35,7 @@ that proof.
 | Paging / address-space isolation | Verified in CI | Implicit in every successful boot (ring-3 processes only run with working isolated address spaces) + `host_tests` | Passing |
 | UEFI boot -> kernel handoff | Verified in CI | `scripts/ci/boot-test.sh boot` | Passing |
 | One supervised user-space driver (virtio-blk) | Demonstrated | `scripts/test-boot.ps1` (Windows), `scripts/test-faults.ps1` for crash/restart | Passing locally; not yet in CI |
+| Syscall round-trip latency (the plan's "one measured systems metric") | Verified in CI | `scripts/ci/boot-test.sh revoke` (asserts a real `SYSCALL_LATENCY` marker) + `scripts/test-syscall-latency.ps1` (Windows, real numeric bounds, not just presence) | Passing — see `docs/PERFORMANCE_BASELINE.md`'s own section for the numbers and the honest QEMU/TCG-not-hardware caveat |
 
 ## Everything else
 
@@ -107,6 +108,28 @@ and raised the timeout to a more realistic 60s.
 Verified: 3 consecutive green CI runs watched directly (not assumed)
 before this section was written and `docs/VERIFICATION.md`'s
 revocation row was flipped back to Verified in CI.
+
+### The missing "one measured systems metric"
+
+Resolved. The original CI/evidence plan asked for one real measured systems
+metric alongside CI, boot, revocation, fuzzing, `docs/DECISIONS.md`, and the
+demo video — everything else in that plan landed in the same session; this
+one was overlooked and had no doc or `_evidence` file backing it, caught
+later by re-reading the original plan against what had actually shipped.
+
+Added as real syscall round-trip latency, measured with `RDTSC` from inside
+the guest (`user_rs/serial_driver`, the earliest real ring-3 ELF spawned on
+every boot) rather than host-side wall-clock polling, which is far too
+coarse at this scale. Two real bugs surfaced getting it working at all: a
+2000-sample stack array overran the process's single 4KB ring-3 stack page
+(process silently killed, page fault), and the array's own zero-init/build
+step twice triggered a pre-existing toolchain bug (`kernel_common::
+mem_intrinsics`'s own module doc: LLVM's `memset`/`memcpy` lowering becomes
+an indirect call through an unpopulated import-style slot on this host
+toolchain) even with that module's existing fix linked in — worked around
+with a `MaybeUninit` array filled by scalar stores only, never a bulk
+operation. See `docs/PERFORMANCE_BASELINE.md`'s own section for the real
+numbers and the honest QEMU/TCG framing.
 
 ## Keeping this honest
 

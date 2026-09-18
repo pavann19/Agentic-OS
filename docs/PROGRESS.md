@@ -2004,5 +2004,28 @@ Established the architectural audit and implemented the foundational prerequisit
 **Explicit Scope Boundaries:**
 - Stops after Milestone 2 per instructions: Milestones 3 (minimal C toolchain bootstrap) and 4 (`rustc` self-hosting pipeline) are future work and explicitly not attempted.
 
+---
+
+## Syscall round-trip latency — the missing "one measured systems metric" (DONE)
+
+Completed 2026-09-18. The original CI/evidence plan asked for CI, boot,
+revocation, fuzzing, `docs/DECISIONS.md`, a README rewrite, a demo video,
+and "one measured systems metric" — everything else landed earlier this
+project; this one metric didn't, with no doc or `_evidence` file behind it,
+until it was caught by re-checking the original plan against what had
+actually shipped and added once CI was stable enough to extend safely.
+
+- [x] **`agentic_sdk::timing::read_tsc()`** (`user_rs/agentic_sdk/src/timing.rs`) — one canonical ring-3 `RDTSC` read via inline asm, mirroring `kernel_rs::compositor_metrics::read_tsc`'s existing ring-0 version rather than each app hand-rolling its own.
+- [x] **Real measurement in `user_rs/serial_driver`** — the earliest real ring-3 ELF spawned on every boot, feature-flag or not, so the metric is present in every test's serial log rather than gated behind a demo build. Times 63 round trips of syscall 1 (`SYSCALL_LOG`, a real kernel-side COM1 PIO write), not `SYS_YIELD` — `SYS_YIELD` was tried first and produced wildly inflated numbers (hundreds of millions of cycles) because it can genuinely hand the CPU to another thread mid-boot and not return until rescheduled, measuring scheduler latency, not syscall dispatch cost.
+- [x] **Two real bugs found and fixed getting the measurement to run at all**: (1) an initial 2000-sample array (16000 bytes) overran the process's single mapped 4KB ring-3 stack page, page-faulting and silently killing the process before the first sample was even taken; reduced to 63 samples (504 bytes). (2) The array's own construction — both a bulk `[0u64; N]` literal and a `core::array::from_fn` build-then-copy — separately triggered a pre-existing toolchain bug already documented in `kernel_common::mem_intrinsics`'s module doc: LLVM lowers a block-sized zero-init/copy into a `memset`/`memcpy` call that this specific host toolchain emits as an indirect call through an unpopulated import-style slot, faulting at address 0 — and this happened even with that module's existing `provide_mem_intrinsics` fix linked into the crate, meaning the existing fix doesn't cover every call site LLVM can choose. Fixed by building the array as `[MaybeUninit<u64>; 63]`, filled by individual scalar stores only, never a bulk operation.
+- [x] **`scripts/test-syscall-latency.ps1`** — real assertions, not just marker presence: exactly 63 samples, `min <= median <= max`, and a sanity floor ruling out a broken/zeroed timing loop. Wired into `scripts/test-integration.ps1` (now 27 suites). Writes `_evidence/syscall-latency-result.json`.
+- [x] **CI wiring, no new job** — `scripts/ci/boot-test.sh`'s existing `revoke` mode boots the same default (no-feature-flags) image that already produces this marker, so `SYSCALL_LATENCY` was added to that mode's existing required-checkpoint list rather than standing up a separate CI job.
+- [x] **`docs/PERFORMANCE_BASELINE.md`** — new "Syscall round-trip latency" section with real measured numbers from a representative run (median ~588K cycles / ~246µs nominal estimate, min ~345K cycles / ~140µs), explicit about the QEMU/TCG-not-hardware caveat and that the max column's huge outlier is a real, expected timer-interrupt-mid-sample artifact, not a bug — exactly why median, not mean, is reported.
+- [x] **`docs/VERIFICATION.md`** — new "Resolved issues" entry for the missing-metric gap, and the core-scope table's virtio-blk row gained a sibling row for this metric, marked Verified in CI.
+
+**Verification & Real Evidence:**
+- `scripts/test-syscall-latency.ps1`: PASS, real bound checks (not just presence), `_evidence/syscall-latency-result.json` written.
+- Manually boot-tested three times during development to confirm the fix for each of the two bugs above, and that the final numbers are stable run-to-run (same order of magnitude, real variance from real scheduler/interrupt timing, not noise from a broken measurement).
+
 
 

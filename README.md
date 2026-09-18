@@ -74,7 +74,7 @@ powershell -File scripts/test-boot.ps1
 make run-qemu
 ```
 
-### Full local regression suite (Windows only, 26 scripts)
+### Full local regression suite (Windows only, 27 scripts)
 
 ```powershell
 powershell -File scripts/test-integration.ps1
@@ -88,12 +88,13 @@ which subset.
 
 `docs/VERIFICATION.md` is the full table. Summary: CI proves the
 capability table, generation-based revocation, the syscall/IPC
-boundary, address-space isolation, and UEFI boot on every push, on
-Linux. Storage, network, display, USB, the app platform, and the Live
-Agent Bridge are real, working code with their own passing local test
-scripts, but aren't in CI yet — they're marked "Demonstrated," not
-"Verified in CI," and the table says so rather than implying more than
-what actually runs automatically.
+boundary, address-space isolation, UEFI boot, and a real measured
+syscall round-trip latency number on every push, on Linux (see
+`docs/PERFORMANCE_BASELINE.md`). Storage, network, display, USB, the
+app platform, and the Live Agent Bridge are real, working code with
+their own passing local test scripts, but aren't in CI yet — they're
+marked "Demonstrated," not "Verified in CI," and the table says so
+rather than implying more than what actually runs automatically.
 
 ## Demo
 

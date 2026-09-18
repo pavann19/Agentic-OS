@@ -100,7 +100,17 @@ fi
 if [[ "$MODE" == "boot" ]]; then
     REQUIRED=(BOOT_START EXIT_BOOT_SERVICES_OK KERNEL_ENTER)
 else
-    REQUIRED=(BOOT_START EXIT_BOOT_SERVICES_OK KERNEL_ENTER REVOCATION_REJECTED_OK)
+    # SYSCALL_LATENCY: the "one measured systems metric" the original
+    # CI/evidence plan called for (docs/PERFORMANCE_BASELINE.md), added
+    # here rather than as a separate CI job because this default image
+    # (no feature flags) already produces the marker on every boot --
+    # user_rs/serial_driver is the earliest real ring-3 ELF spawned,
+    # feature-flag or not -- and "revoke" mode already waits long enough
+    # to observe it, well before REVOCATION_REJECTED_OK. Presence-only
+    # check here, same style as every other checkpoint in this script;
+    # scripts/test-syscall-latency.ps1 is where the real numeric bounds
+    # get asserted (Windows regression suite).
+    REQUIRED=(BOOT_START EXIT_BOOT_SERVICES_OK KERNEL_ENTER SYSCALL_LATENCY REVOCATION_REJECTED_OK)
 fi
 
 MISSING=()
@@ -118,3 +128,6 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
 fi
 
 echo "PASS ($MODE): ${REQUIRED[*]}"
+if [[ "$MODE" == "revoke" ]]; then
+    grep -F "SYSCALL_LATENCY" "$SERIAL_LOG" || true
+fi

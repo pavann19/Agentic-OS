@@ -38,5 +38,6 @@ pub mod serial_com1;
 pub mod surface; // Phase 12 deliverable 4 -- real PSF1 text rendering via SYS_SURFACE_DRAW_TEXT
 pub mod syscall;
 pub mod text_widget; // Phase 12 deliverable 4 -- the one real, minimal scrollable-text-region widget
+pub mod timing; // real RDTSC read, for ring-3 latency measurements (docs/PERFORMANCE_BASELINE.md)
 
 pub use serial_com1 as com1;
