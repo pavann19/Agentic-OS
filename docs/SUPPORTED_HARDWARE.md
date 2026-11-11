@@ -4,7 +4,7 @@ Phase 8, deliverable 4 (`docs/ROADMAP.md` §5): "Documented supported-hardware l
 
 ## Tier 1 — QEMU `q35` + OVMF + VirtIO (fully supported, fully verified)
 
-The development and CI target. Every phase gate in this project (`docs/PROGRESS.md`) is validated here, with real evidence for every claim.
+The development and CI target. Every phase gate in this project (`docs/VERIFICATION.md`) is validated here, with real evidence for every claim.
 
 | Component | Status | Evidence |
 |---|---|---|
@@ -46,7 +46,7 @@ Pursuant to `docs/ROADMAP.md` §5 (Phase 11) and ADR-007, Tier 3 extends hardwar
 3. **Power Management (Phase 11.3)**: ACPI tables must expose valid `FADT` (`FACP`) with non-zero `PM1a_CNT_BLK` or valid extended GAS descriptors for S3 sleep state (`SLP_TYP` / `SLP_EN`). CPU idle loop transitions cores into C1 state (`hlt`).
 4. **Early-Boot Telemetry**: A physical RS-232 COM port or EC UART reachable at `0x3F8` ensures zero headless deadlocks during kernel bring-up.
 
-For full qualification steps, board jumper settings, and firmware configuration, see [`docs/TIER3_HARDWARE.md`](file:///d:/Operating_System/docs/TIER3_HARDWARE.md).
+For full qualification steps, board jumper settings, and firmware configuration, see [`docs/TIER3_HARDWARE.md`](TIER3_HARDWARE.md).
 
 ## What this list deliberately does NOT claim
 

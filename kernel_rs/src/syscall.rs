@@ -277,7 +277,7 @@ pub fn set_kernel_stack(rsp: u64) {
 /// page tables (`vmm::current_cr3()`, never a trusted kernel one) and
 /// requires PRESENT+WRITABLE+USER on every page in range before the
 /// kernel ever writes through it. The long-standing "no user-pointer
-/// validation exists yet" note (open since Phase 1, see PROGRESS.md) is
+/// validation exists yet" note (open since Phase 1, see the implementation notes in Git history) is
 /// closed for the syscall that actually needed it; syscalls 1-6 above
 /// still take no pointer arguments, so there's nothing there to validate.
 #[no_mangle]

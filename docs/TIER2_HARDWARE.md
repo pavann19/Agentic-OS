@@ -14,7 +14,7 @@ with real sources, against the roadmap's own four criteria. It does
 physically owning the machine, connecting a serial adapter, and running
 this kernel's actual boot chain on it — none of which an AI agent without
 hardware access can do. This item stays open (not checked off) in
-`PROGRESS.md` until that physical step actually happens.
+`VERIFICATION.md` until that physical step actually happens.
 
 ## Recommendation: Lenovo ThinkPad T480
 

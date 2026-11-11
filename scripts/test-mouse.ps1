@@ -1,4 +1,4 @@
-# Real GUI mouse support (docs/PROGRESS.md): a genuine PS/2 mouse
+# Real GUI mouse support (the implementation notes in Git history): a genuine PS/2 mouse
 # driver (IRQ12) -- real 8042 auxiliary-device bring-up, real streaming
 # enable, real InterruptLine-gated packet reads.
 #

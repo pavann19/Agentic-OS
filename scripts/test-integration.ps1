@@ -8,7 +8,7 @@
 #
 # Scope, stated honestly: this covers everything verifiable on Tier 1
 # (QEMU). It does NOT include a Tier 2 physical-hardware pass --
-# that's `docs/PROGRESS.md`'s own disclosed, non-code-closable gap
+# that's the implementation notes in Git history's own disclosed, non-code-closable gap
 # (see the Phase 3/8 sections there), not something this script
 # glosses over as covered.
 

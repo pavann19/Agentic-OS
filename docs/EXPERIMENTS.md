@@ -1,6 +1,6 @@
 # Experiments — tested in isolation, not yet merged
 
-Per explicit instruction: novel ideas get built and verified standalone first; nothing here is wired into the real boot path until told to merge it. Each entry states what was tested, the real evidence, and exactly what a merge would touch — kept small on purpose, so "plug into main" stays a small, reviewable diff, not a rewrite.
+Novel ideas are built and verified standalone first; integration into the real boot path requires a separate review. Each entry states what was tested, the real evidence, and exactly what a merge would touch — kept small on purpose, so "plug into main" stays a small, reviewable diff, not a rewrite.
 
 ## 1. Generic PCI driver-matching registry (`kernel_common::driver_registry`)
 

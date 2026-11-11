@@ -1,6 +1,6 @@
 //! Critical-section helper for single-core interrupt-safety. Real bug
 //! this exists to fix (found by bisecting a reproducible late-boot crash
-//! under sustained multi-process scheduling — see PROGRESS.md's Phase 3
+//! under sustained multi-process scheduling — see the implementation notes in Git history's Phase 3
 //! section for the full investigation): `pmm.rs`'s physical-page bitmap
 //! allocator and `heap.rs`'s free-list allocator both mutate global
 //! state via a check-then-mutate sequence that ran with interrupts
