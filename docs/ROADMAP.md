@@ -272,7 +272,7 @@ Pros: real breadth, without abandoning the discipline that got this project this
 #### Options Considered
 
 **Option A: No GUI, ever — stay serial-shell-only.**
-Pros: avoids the risk entirely. Cons: "a real OS like Linux, Mac, Windows" without a display server is not a credible claim; it caps the project below the destination the user has now explicitly set.
+Pros: avoids the risk entirely. Cons: "a real OS like Linux, Mac, Windows" without a display server is not a credible claim; it caps the project below the stated product scope.
 
 **Option B: Port or closely imitate a conventional compositor/window-manager architecture (a `Wayland`-shaped or `X11`-shaped design), implemented from scratch to satisfy §1.2's "from scratch" bar.**
 Pros: mature, well-understood architecture; lots of reference material. Cons: those architectures assume a trusted compositor mediating cooperating clients under a shared-desktop threat model — not the "an agent process is adversarial until proven otherwise" threat model this OS has held since Phase 5. It would be the first subsystem in the whole roadmap built to a different security model than everything around it.
@@ -743,7 +743,7 @@ Every phase through 8 was explicitly single-core (§6, old dependency diagram; `
 
 **Depends on:** Phase 9. **Does NOT require ADR-009/ADR-010 sign-off** — deliberately scoped to contain zero self-modification, zero adoption of external code, zero policy learned from anything but a fixed, hand-written formula. It is pure wiring between two mechanisms Phases 1 and 3 already built and evidenced. **Blocks:** Phase 10 (see below).
 
-**Why split from Phase 9.5, and why now:** the user chose, explicitly, to defer the self-improvement machinery (Tiers A–C, the ADR-009 adoption pipeline, ADR-010's enforced immutable core) to later in the roadmap, while still unblocking Phase 10, whose deliverable 4 needs ONLY real crash-and-restart, not adoption or learning. Splitting the phase makes that boundary explicit rather than letting "self-healing" and "self-improvement" blur into one undifferentiated claim. 9.5a is what ships now; 9.5b (below) carries the full scope the original Phase 9.5 section described, unchanged, deferred.
+**Why split from Phase 9.5, and why now:** the design defers the self-improvement machinery (Tiers A–C, the ADR-009 adoption pipeline, ADR-010's enforced immutable core) to later in the roadmap, while still unblocking Phase 10, whose deliverable 4 needs ONLY real crash-and-restart, not adoption or learning. Splitting the phase makes that boundary explicit rather than letting "self-healing" and "self-improvement" blur into one undifferentiated claim. 9.5a is what ships now; 9.5b (below) carries the full scope the original Phase 9.5 section described, unchanged, deferred.
 
 **Deliverables**
 
