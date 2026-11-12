@@ -4,17 +4,17 @@
 param(
     [string]$QemuExe = "C:\Program Files\qemu\qemu-system-x86_64.exe",
     [string]$OvmfCode = "C:\Program Files\qemu\share\edk2-x86_64-code.fd",
-    [string]$FatDir = "D:\Operating_System\boot_rs\qemu_fatdir",
+    [string]$FatDir = (Join-Path $PSScriptRoot "..\boot_rs\qemu_fatdir"),
     [int]$MonitorPort = 4446,
     [int]$KeyDelayMs = 220
 )
 
 $ErrorActionPreference = "Stop"
-$repoRoot = "D:\Operating_System"
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
 [Environment]::CurrentDirectory = $repoRoot
 
-$cargoBin = "C:\Users\Gannoju Pavan\.cargo\bin"
+$cargoBin = if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME "bin" } else { Join-Path $env:USERPROFILE ".cargo\bin" }
 if (Test-Path $cargoBin) {
     $env:PATH = "$cargoBin;$env:PATH"
 }

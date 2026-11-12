@@ -27,7 +27,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$repoRoot = "D:\Operating_System"
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
 # Set-Location only changes PowerShell's own $PWD -- .NET APIs like
 # [System.IO.File]::Create resolve relative paths against
@@ -49,7 +49,7 @@ function Invoke-CargoQuiet {
     }
 }
 
-$cargoBin = "C:\Users\Gannoju Pavan\.cargo\bin"
+$cargoBin = if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME "bin" } else { Join-Path $env:USERPROFILE ".cargo\bin" }
 if (Test-Path $cargoBin) {
     $env:PATH = "$cargoBin;$env:PATH"
 }

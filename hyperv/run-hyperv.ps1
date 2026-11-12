@@ -2,7 +2,7 @@
 
 param(
     [string]$VMName = "AgenticOS-Gen2",
-    [string]$VhdxPath = "D:\Operating_System\hyperv\AgenticOS.vhdx",
+    [string]$VhdxPath = (Join-Path $PSScriptRoot "AgenticOS.vhdx"),
     [int64]$MemoryMB = 512
 )
 
@@ -34,7 +34,7 @@ if ($existingVM) {
 }
 
 # Check for freshly built VHDX update
-$newVhdx = "D:\Operating_System\hyperv\AgenticOS-new.vhdx"
+$newVhdx = Join-Path $PSScriptRoot "AgenticOS-new.vhdx"
 if (Test-Path $newVhdx) {
     Write-Host "Updating $VhdxPath with newly built image..."
     try {

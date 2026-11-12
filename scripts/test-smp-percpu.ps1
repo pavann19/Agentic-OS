@@ -28,8 +28,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-Set-Location "D:\Operating_System"
-[Environment]::CurrentDirectory = "D:\Operating_System"
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+Set-Location $repoRoot
+[Environment]::CurrentDirectory = $repoRoot
 
 New-Item -ItemType Directory -Force -Path (Split-Path $SerialLog) | Out-Null
 Remove-Item -Force $SerialLog -ErrorAction SilentlyContinue

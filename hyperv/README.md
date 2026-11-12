@@ -11,7 +11,7 @@ This folder contains the completely isolated Hyper-V Generation 2 test setup for
 ## Running
 In an elevated Administrator PowerShell prompt:
 ```powershell
-powershell -ExecutionPolicy Bypass -File D:\Operating_System\hyperv\run-hyperv.ps1
+powershell -ExecutionPolicy Bypass -File .\hyperv\run-hyperv.ps1
 ```
 This will:
 1. Re-create the `AgenticOS-Gen2` VM cleanly with COM1 redirected to `\\.\pipe\AgenticOS_COM1`.

@@ -7,7 +7,7 @@
 # 5. Baseline Kernel Boot Zero-Regression (test-boot.ps1)
 
 $ErrorActionPreference = "Stop"
-$repoRoot = "D:\Operating_System"
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
 [Environment]::CurrentDirectory = $repoRoot
 
