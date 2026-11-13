@@ -1,7 +1,7 @@
 # Launch QEMU interactively for manual inspection with WHPX acceleration
 
 $ErrorActionPreference = "Stop"
-$repoRoot = "D:\Operating_System"
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
 
 $repoTemp = Join-Path $repoRoot "_evidence\qemu_tmp"

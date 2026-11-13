@@ -157,7 +157,7 @@ pub fn audit_entry_bytes(e: &AuditEntryInfo) -> [u8; AUDIT_ENTRY_SIZE as usize] 
 pub fn thread_info_bytes(info: &ThreadInfo) -> [u8; THREAD_INFO_SIZE as usize] {
     // Field-by-field byte assignment, not `copy_from_slice` — this
     // project's own hard-won lesson (see `kernel_common::mem_intrinsics`'s
-    // module doc and Phase 4's PROGRESS.md entry): even small fixed-size
+    // module doc and Phase 4's the implementation notes in Git history entry): even small fixed-size
     // slice copies are a pattern LLVM CAN lower into a `memcpy`/`memset`
     // call on this toolchain, and that call resolves through a
     // permanently-unpopulated indirect slot. Explicit per-byte assignment

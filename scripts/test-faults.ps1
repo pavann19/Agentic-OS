@@ -37,7 +37,7 @@ function Invoke-CargoQuiet {
 # than just TMP/TEMP from what it passes to child processes, confirmed
 # repeatedly in this session). Hardcoded path, matching every other place
 # in this repo that had to work around the same issue.
-$cargoBin = "C:\Users\Gannoju Pavan\.cargo\bin"
+$cargoBin = if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME "bin" } else { Join-Path $env:USERPROFILE ".cargo\bin" }
 if (Test-Path $cargoBin) {
     $env:PATH = "$cargoBin;$env:PATH"
 }

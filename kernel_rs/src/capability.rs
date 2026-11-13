@@ -152,7 +152,7 @@ pub enum KernelObjectKind {
     /// and is real, typed, capability-gated state — the mechanism
     /// `netstack_driver`'s own TCP/UDP implementation will bind actual
     /// connections to is real follow-up work, not yet wired (see
-    /// `docs/PROGRESS.md`'s Phase 10 section for exactly what's done vs
+    /// the implementation notes in Git history's Phase 10 section for exactly what's done vs
     /// open).
     Socket { protocol: SocketProtocol, local_port: u16, remote_ip: [u8; 4], remote_port: u16 },
     /// Phase 12 (`docs/ROADMAP.md` §5 deliverable 1 — "window and

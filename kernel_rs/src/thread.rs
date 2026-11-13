@@ -644,7 +644,7 @@ pub fn resolve_file_capability(cap_id: crate::capability::CapId, required: crate
 ///
 /// Real root-cause bug found and fixed (the actual explanation behind
 /// the multi-process scheduling investigation in critical.rs/
-/// PROGRESS.md — this is what remained after the pmm/heap/THREADS races
+/// the implementation notes in Git history — this is what remained after the pmm/heap/THREADS races
 /// AND the TSS.RSP0 issue were all fixed and a DIFFERENT, deterministic
 /// double-fault still reproduced): the CALLER used to switch CR3 itself,
 /// BEFORE calling this function, while still executing ON THE OUTGOING
@@ -911,7 +911,7 @@ unsafe fn schedule_locked(caller_flags: u64) {
         let new_rsp = next.saved_rsp;
         let new_address_space = next.address_space;
         // Real root-cause fix (the actual bug behind the multi-process
-        // scheduling investigation in critical.rs/PROGRESS.md, found
+        // scheduling investigation in critical.rs/the implementation notes in Git history, found
         // after the pmm/heap/THREADS races above were fixed and the
         // crash still reproduced): TSS.RSP0 -- the kernel stack the CPU
         // switches to automatically on any ring3->ring0 transition

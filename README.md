@@ -130,7 +130,6 @@ script leaves the raw frame sequence as evidence).
 - [`docs/VERIFICATION.md`](docs/VERIFICATION.md) — the full per-subsystem status table.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — short-form rationale for the choices that most shape this codebase.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — the full ADR-driven build plan.
-- [`docs/PROGRESS.md`](docs/PROGRESS.md) — phase-by-phase implementation history.
 - [`docs/SUPPORTED_HARDWARE.md`](docs/SUPPORTED_HARDWARE.md) — what's verified on real silicon vs. QEMU-only.
 
 ## License

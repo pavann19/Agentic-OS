@@ -5,7 +5,7 @@
 //! bootloader's temporary identity-mapped page tables with real,
 //! permission-correct higher-half ones (`vmm.rs` — a redesign, not a port;
 //! see its module doc for why). GDT/IDT/heap/timer/interrupts are not
-//! ported yet — see `docs/PROGRESS.md`.
+//! ported yet — see the implementation notes in Git history.
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
@@ -368,7 +368,7 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     // crash+recovery here, to prove the restart-on-crash state machine
     // against a real device entry before any real supervisor existed to
     // drive it from an actual fault (see device_manager.rs's own
-    // module-doc honesty note, and docs/PROGRESS.md's Phase 3 section
+    // module-doc honesty note, and the implementation notes in Git history's Phase 3 section
     // for that original evidence). That simulated call is REMOVED now
     // that `supervisor.rs` drives `report_crash` from a REAL
     // `PROCESS_KILLED` event on this exact device -- keeping both would

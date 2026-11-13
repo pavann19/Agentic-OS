@@ -1,4 +1,4 @@
-# Real GUI mouse support (docs/PROGRESS.md): a genuine PS/2 mouse
+# Real GUI mouse support (the implementation notes in Git history): a genuine PS/2 mouse
 # driver (IRQ12) -- real 8042 auxiliary-device bring-up, real streaming
 # enable, real InterruptLine-gated packet reads.
 #
@@ -31,11 +31,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$repoRoot = "D:\Operating_System"
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
 [Environment]::CurrentDirectory = $repoRoot
 
-$cargoBin = "C:\Users\Gannoju Pavan\.cargo\bin"
+$cargoBin = if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME "bin" } else { Join-Path $env:USERPROFILE ".cargo\bin" }
 if (Test-Path $cargoBin) {
     $env:PATH = "$cargoBin;$env:PATH"
 }

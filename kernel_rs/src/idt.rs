@@ -197,7 +197,7 @@ handler_no_ec!(h_invalid_opcode, 6);
 handler_no_ec!(h_device_not_available, 7);
 
 /// Deliberately NEVER recovers, even for a ring-3 CS — a double fault
-/// means exception delivery ITSELF failed (see `docs/PROGRESS.md`'s
+/// means exception delivery ITSELF failed (see the implementation notes in Git history's
 /// account of exactly this happening for a real reason earlier in this
 /// project: a corrupted/unmapped stack at the moment of an original
 /// fault). Whatever invariant let a normal fault be delivered safely

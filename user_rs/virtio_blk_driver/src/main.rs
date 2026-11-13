@@ -392,7 +392,7 @@ unsafe fn run_filesystem_proof(common: u64, notify_base: u64, dma: u64, dma_phys
         // reformats cleanly from scratch, bounded and detected, not
         // silent. Interrupted during it: not fully solved by a
         // non-journaled filesystem -- disclosed honestly in this
-        // driver's module doc and in PROGRESS.md, not claimed as met.
+        // driver's module doc and in the implementation notes in Git history, not claimed as met.
         let mut b = zeroed_block!();
 
         ext2::build_group_desc(&mut b);

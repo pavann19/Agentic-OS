@@ -88,7 +88,7 @@ pub struct DeviceManager {
 // itself) -- the exact gap this module's own earlier comment flagged
 // as "revisit before SMP". Phase 9 finished without this specific
 // revisit happening (SMP's own audit pass covered pmm/capability/
-// audit/iommu/thread/klog explicitly, per docs/PROGRESS.md, but not
+// audit/iommu/thread/klog explicitly, per the implementation notes in Git history, but not
 // every kernel-wide static in the codebase) -- closed now, since
 // Phase 9.5a's real supervisor is the first caller that can genuinely
 // touch this from more than one core's own crash-handling path
